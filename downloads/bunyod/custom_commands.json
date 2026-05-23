@@ -1,0 +1,29 @@
+{
+  "image": {
+    "type": "plugin",
+    "plugin": "pol",
+    "args_template": []
+  },
+  "анализ_изображения": {
+    "type": "plugin",
+    "plugin": "analyze",
+    "args_template": []
+  },
+  "versus": {
+    "type": "plugin",
+    "plugin": "versus",
+    "args_template": []
+  },
+  "download": {
+    "type": "plugin",
+    "plugin": "downloads",
+    "args_template": []
+  },
+  "govor": {
+    "type": "plugin",
+    "plugin": "voice_input",
+    "args_template": [
+      "govor"
+    ]
+  }
+}

@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Assistant</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div class="bg-mesh"></div>
+    
+    <div class="sidebar-overlay" id="sidebarOverlay" onclick="closeSidebar()"></div>
+    
+    <div class="sidebar" id="sidebar">
+        <h2>
+            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="22" height="22"><path d="m13 2-10 12.5"/><path d="m13 22-10-12.5"/><path d="m22 2-10 12.5"/><path d="m22 22-10-12.5"/></svg>
+            Функции
+        </h2>
+        <div class="model-selector-container">
+            <select class="model-selector" id="sidebarModelSelect" onchange="switchModelFromSidebar(this.value)">
+                <option value="">🔄 Загрузка...</option>
+            </select>
+            <span class="provider-badge" id="sidebarModelBadge">groq</span>
+        </div>
+        <div class="function-list" id="sidebarFunctions"></div>
+    </div>
+
+    <div class="header">
+        <button class="menu-toggle" onclick="toggleSidebar()" aria-label="Меню">
+            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h18M3 6h18M3 18h18"/></svg>
+        </button>
+        <div class="header-icon">
+            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a1 1 0 0 1 1 1v2a1 1 0 0 1-1 1 5 5 0 0 0-5 5v1.5a2.5 2.5 0 0 1-2.5 2.5 1 1 0 0 0 0 2 2.5 2.5 0 0 1 2.5 2.5V19a5 5 0 0 0 5 5 1 1 0 0 1 1 1v2a1 1 0 0 1-1 1 8 8 0 0 1-8-8v-1.5a2.5 2.5 0 0 1-2.5-2.5 1 1 0 0 0 0-2 2.5 2.5 0 0 1 2.5-2.5V8a8 8 0 0 1 8-8z"/><path d="M16 9a1 1 0 0 1 1 1v2a1 1 0 0 1-1 1 3 3 0 0 0-3 3v1.5a1.5 1.5 0 0 1-1.5 1.5 1 1 0 0 0 0 2 1.5 1.5 0 0 1 1.5 1.5V19a3 3 0 0 0 3 3 1 1 0 0 1 1 1v2a1 1 0 0 1-1 1 5 5 0 0 1-5-5v-1.5a1.5 1.5 0 0 1-1.5-1.5 1 1 0 0 0 0-2 1.5 1.5 0 0 1 1.5-1.5V14a5 5 0 0 1 5-5z"/></svg>
+        </div>
+        <div>
+            <div class="header-title">AI Assistant</div>
+            <div class="header-subtitle">MyAI</div>
+        </div>
+        <div class="header-actions">
+            <a href="/admin/login" title="Админ-панель">
+                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+                <span>Админ</span>
+            </a>
+        </div>
+    </div>
+    
+    <div class="chat-wrapper">
+        <div class="chat-container" id="chatbox"></div>
+    </div>
+    
+    <div class="footer">
+        <div class="controls-row">
+            <div class="functions-wrapper">
+                <button class="functions-toggle" id="functionsToggle" onclick="toggleFunctions()">
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m13 2-10 12.5"/><path d="m13 22-10-12.5"/><path d="m22 2-10 12.5"/><path d="m22 22-10-12.5"/></svg>
+                    <span>Режимы</span>
+                    <span class="arrow">&#x25BC;</span>
+                </button>
+                <div class="dropdown-panel hidden" id="dropdownPanel"></div>
+            </div>
+        </div>
+        <div class="input-row">
+            <div class="input-wrapper" id="inputWrapper">
+                <button class="plus-btn" id="plusBtn" title="Прикрепить">
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>
+                </button>
+                <input type="text" id="userInput" placeholder="Спроси что-нибудь..." autofocus>
+                <div class="plus-menu" id="plusMenu">
+                    <button onclick="triggerFile('image')">
+                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="3" rx="2" ry="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.1-3.1a2 2 0 0 0-2.814.015L9 19.72"/></svg>
+                        Изображение
+                    </button>
+                    <button onclick="triggerFile('file')">
+                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/></svg>
+                        Файл
+                    </button>
+                </div>
+            </div>
+            <button class="send-btn" onclick="sendMessage()">
+                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M22 2 11 13"/><path d="m22 2-7 20-4-9-9-4 20-7z"/></svg>
+            </button>
+        </div>
+    </div>
+    <input type="file" id="imageInput" class="hidden-file-input" accept="image/*" onchange="handleFile(this, 'image')">
+    <input type="file" id="fileInput" class="hidden-file-input" onchange="handleFile(this, 'file')">
+
+    <script src="/static/app.js"></script>
+</body>
+</html>
