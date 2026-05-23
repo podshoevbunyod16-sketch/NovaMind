@@ -12,6 +12,7 @@ let currentMode    = 'chat';
 let msgCount       = 0;
 let chatHistory    = JSON.parse(localStorage.getItem('nova_history') || '[]');
 let selectedModelName = 'Nova Ultra';
+let inputMode      = null;
 
 // ========== DOM-ЭЛЕМЕНТЫ ==========
 const input         = document.getElementById('chat-input');
@@ -38,6 +39,14 @@ if (!localStorage.getItem('nova_user_nick')) {
   if (isAdmin && adminLink) {
     adminLink.style.display = 'flex';
   }
+  
+  // Аватарка Google
+  const googleAvatar = localStorage.getItem('nova_user_avatar');
+  const avatarEl = document.querySelector('.user-avatar');
+  if (googleAvatar && avatarEl) {
+    avatarEl.innerHTML = `<img src="${googleAvatar}" style="width:100%;height:100%;border-radius:50%;object-fit:cover;">`;
+    avatarEl.style.background = 'none';
+  }
 })();
 
 // ========== ВЫХОД ==========
@@ -45,6 +54,8 @@ function logout() {
   localStorage.removeItem('nova_user_nick');
   localStorage.removeItem('nova_user_code');
   localStorage.removeItem('nova_is_admin');
+  localStorage.removeItem('nova_google_login');
+  localStorage.removeItem('nova_user_avatar');
   window.location.href = '/';
 }
 
@@ -84,13 +95,44 @@ function toggleAttachMenu() {
   document.getElementById('attachDropdown').classList.toggle('open');
 }
 
+
 function attachImage() {
   document.getElementById('attachDropdown').classList.remove('open');
   const el = document.createElement('input');
   el.type = 'file';
   el.accept = 'image/*';
   el.onchange = (e) => {
-    if (e.target.files[0]) showNotification('Изображение прикреплено', 'success');
+    const file = e.target.files[0];
+    if (!file) return;
+    
+    // Показываем сообщение в чате
+    appendMessage('user', '📷 Анализ изображения: ' + file.name);
+    
+    // Загружаем на сервер
+    const formData = new FormData();
+    formData.append('image', file);
+    
+    showTyping();
+    fetch('/upload_image', {
+      method: 'POST',
+      body: formData
+    })
+    .then(r => r.json())
+    .then(data => {
+      removeTyping();
+      if (data.error) {
+        appendMessage('ai', 'Ошибка: ' + data.error);
+      } else if (data.result) {
+        appendMessage('ai', data.result);
+      } else {
+        // Если сервер не анализирует — просто показываем путь
+        appendMessage('ai', '✅ Изображение загружено: ' + (data.filepath || data.filename || file.name));
+      }
+    })
+    .catch(() => {
+      removeTyping();
+      appendMessage('ai', 'Ошибка загрузки изображения');
+    });
   };
   el.click();
 }
@@ -99,40 +141,102 @@ function attachDocument() {
   document.getElementById('attachDropdown').classList.remove('open');
   const el = document.createElement('input');
   el.type = 'file';
+  el.accept = '.txt,.pdf,.doc,.docx,.png,.jpg,.jpeg,.json,.csv,.py,.js,.html,.css';
   el.onchange = (e) => {
-    if (e.target.files[0]) showNotification('Файл прикреплён', 'success');
+    const file = e.target.files[0];
+    if (!file) return;
+    
+    appendMessage('user', '📁 Файл: ' + file.name);
+    
+    const formData = new FormData();
+    formData.append('file', file);
+    
+    showTyping();
+    fetch('/upload_file', {
+      method: 'POST',
+      body: formData
+    })
+    .then(r => r.json())
+    .then(data => {
+      removeTyping();
+      if (data.error) {
+        appendMessage('ai', 'Ошибка: ' + data.error);
+      } else {
+        appendMessage('ai', '✅ Файл загружен: ' + (data.filepath || data.filename || file.name) + '\n\n' + (data.preview || ''));
+      }
+    })
+    .catch(() => {
+      removeTyping();
+      appendMessage('ai', 'Ошибка загрузки файла');
+    });
   };
   el.click();
 }
 
-document.addEventListener('click', (e) => {
-  const dd = document.getElementById('attachDropdown');
-  const btn = document.getElementById('btn-attach');
-  if (dd && !dd.contains(e.target) && e.target !== btn && !btn.contains(e.target)) {
-    dd.classList.remove('open');
-  }
-});
+
+
+// ========== РЕЖИМЫ КОМАНД ==========
+function activateMode(mode) {
+  inputMode = mode;
+  input.placeholder = mode.placeholder;
+  input.value = '';
+  input.focus();
+}
 
 // ========== ОТПРАВКА СООБЩЕНИЙ ==========
 async function sendMessage(text) {
   const msg = (text || input.value).trim();
   if (!msg || isTyping) return;
 
+  let finalMsg = msg;
+
+  // Если активен режим — формируем команду
+  if (inputMode && !msg.startsWith('/')) {
+    finalMsg = inputMode.prefix + msg;
+    inputMode = null;
+    input.placeholder = 'Напишите сообщение или нажмите 🎤 для голосового ввода...';
+  }
+
   hideWelcome();
-  appendMessage('user', msg);
+  appendMessage('user', finalMsg);
 
   input.value = '';
   input.style.height = 'auto';
   sendBtn.disabled = true;
-  addToHistory(msg);
+  addToHistory(finalMsg);
   showTyping();
 
+  const isCommand = finalMsg.startsWith('/');
+
+  // Если команда — отправляем на /command
+  if (isCommand) {
+    try {
+      const resp = await fetch('/command', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ command: finalMsg })
+      });
+      const data = await resp.json();
+      removeTyping();
+      if (data.error) {
+        appendMessage('ai', 'Ошибка: ' + data.error);
+      } else {
+        appendMessage('ai', data.result || data.reply || 'Готово');
+      }
+    } catch (e) {
+      removeTyping();
+      appendMessage('ai', 'Ошибка соединения');
+    }
+    return;
+  }
+
+  // Если включён поиск — используем DuckDuckGo
   if (webSearchOn) {
     try {
       const resp = await fetch('/command', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ command: '/search ' + msg })
+        body: JSON.stringify({ command: '/search ' + finalMsg })
       });
       const data = await resp.json();
       removeTyping();
@@ -148,11 +252,16 @@ async function sendMessage(text) {
     return;
   }
 
-  try {
+  // Обычный запрос к ИИ
+  // Обычный запрос к ИИ
+try {
     const resp = await fetch('/send', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message: msg, reasoning: reasoningOn })
+      body: JSON.stringify({ 
+        message: finalMsg, 
+        reasoning: reasoningOn  // ← передаём флаг рассуждения
+      })
     });
     const data = await resp.json();
     removeTyping();
@@ -161,27 +270,38 @@ async function sendMessage(text) {
     } else {
       appendMessage('ai', data.reply);
     }
-  } catch (e) {
+} catch (e) {
     removeTyping();
     appendMessage('ai', 'Ошибка соединения');
-  }
+}
 }
 
 function sendSuggestion(text) { sendMessage(text); }
 function hideWelcome() { if (welcomeScreen) welcomeScreen.style.display = 'none'; }
 
-// ========== СООБЩЕНИЯ ==========
+// ========== СООБЩЕНИЯ (С ПОДДЕРЖКОЙ ИЗОБРАЖЕНИЙ) ==========
 function appendMessage(role, content) {
   msgCount++;
   const isAI = role === 'ai';
   const wrap = document.createElement('div');
   wrap.className = 'message ' + (role === 'user' ? 'user' : 'ai');
-  const formatted = isAI ? formatContent(content) : escapeHtml(content);
+  
+  let formatted = isAI ? formatContent(content) : escapeHtml(content);
+  let imageHtml = '';
+  
+  // Проверяем, есть ли Markdown-изображение ![Image](url)
+  const imageMatch = content.match(/!\[Image\]\((.*?)\)/);
+  if (imageMatch) {
+    imageHtml = `<img src="${imageMatch[1]}" alt="Generated image" style="max-width: 100%; border-radius: 12px; margin-top: 8px;" onload="scrollToBottom()">`;
+    // Убираем Markdown-разметку из текста
+    formatted = formatted.replace(/!\[Image\]\(.*?\)/, '');
+  }
+  
   wrap.innerHTML = `
     <div class="msg-avatar">${isAI ? '✦' : '👤'}</div>
     <div class="msg-body">
       <div class="msg-name">${isAI ? 'NovaMind' : 'Вы'}</div>
-      <div class="msg-bubble">${formatted}</div>
+      <div class="msg-bubble">${formatted}${imageHtml}</div>
     </div>`;
   chatContainer.appendChild(wrap);
   scrollToBottom();
@@ -192,13 +312,14 @@ function formatContent(text) {
   html = html.replace(/```(\w+)?\n?([\s\S]*?)```/g, (_, lang, code) => `<pre><code>${code.trim()}</code></pre>`);
   html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
   html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+  html = html.replace(/\*(.+?)\*/g, '<em>$1</em>');
   html = html.replace(/\n\n/g, '<br><br>');
   html = html.replace(/\n/g, '<br>');
   return html;
 }
 
 function escapeHtml(text) {
-  return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
 // ========== ИНДИКАТОР ПЕЧАТИ ==========
@@ -315,117 +436,6 @@ function showNotification(msg, type = 'info') {
   document.body.appendChild(toast);
   setTimeout(() => toast.remove(), 2500);
 }
-// ========== РЕЖИМЫ КОМАНД ==========
-let inputMode = null;
 
-function activateMode(mode) {
-  inputMode = mode;
-  input.placeholder = mode.placeholder;
-  input.value = '';
-  plusBtn.style.display = 'none';
-  if (typeof plusBtn !== 'undefined') plusBtn.style.display = 'none';
-  input.focus();
-  
-  // Подсветка кнопки функций (если есть)
-  if (typeof functionsToggle !== 'undefined') {
-    functionsToggle.classList.add('active');
-  }
-}
-
-function clearMode() {
-  inputMode = null;
-  input.placeholder = 'Напишите сообщение или нажмите 🎤 для голосового ввода...';
-  if (typeof functionsToggle !== 'undefined') {
-    functionsToggle.classList.remove('active');
-  }
-}
-
-// Обновлённая sendMessage с поддержкой inputMode
-async function sendMessage(text) {
-  const msg = (text || input.value).trim();
-  if (!msg || isTyping) return;
-
-  // Если активен режим — формируем команду
-  let finalMsg = msg;
-  let isCommand = msg.startsWith('/');
-  
-  if (inputMode && !isCommand) {
-    finalMsg = inputMode.prefix + msg;
-    isCommand = true;
-  }
-
-  hideWelcome();
-  appendMessage('user', finalMsg);
-
-  input.value = '';
-  input.style.height = 'auto';
-  sendBtn.disabled = true;
-  clearMode();
-  addToHistory(finalMsg);
-  showTyping();
-
-  // Если это команда — отправляем на /command
-  if (isCommand) {
-    try {
-      const resp = await fetch('/command', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ command: finalMsg })
-      });
-      const data = await resp.json();
-      removeTyping();
-      if (data.error) {
-        appendMessage('ai', 'Ошибка: ' + data.error);
-      } else {
-        appendMessage('ai', data.result || data.reply || 'Готово');
-      }
-    } catch (e) {
-      removeTyping();
-      appendMessage('ai', 'Ошибка соединения');
-    }
-    return;
-  }
-
-  // Если включён поиск — используем DuckDuckGo
-  if (webSearchOn) {
-    try {
-      const resp = await fetch('/command', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ command: '/search ' + finalMsg })
-      });
-      const data = await resp.json();
-      removeTyping();
-      if (data.error) {
-        appendMessage('ai', 'Ошибка: ' + data.error);
-      } else {
-        appendMessage('ai', '🔍 **Результаты поиска:**\n\n' + (data.result || 'Ничего не найдено'));
-      }
-    } catch (e) {
-      removeTyping();
-      appendMessage('ai', 'Ошибка поиска');
-    }
-    return;
-  }
-
-  // Обычный запрос к ИИ
-  try {
-    const resp = await fetch('/send', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message: finalMsg, reasoning: reasoningOn })
-    });
-    const data = await resp.json();
-    removeTyping();
-    if (data.error) {
-      appendMessage('ai', 'Ошибка: ' + data.error);
-    } else {
-      appendMessage('ai', data.reply);
-    }
-  } catch (e) {
-    removeTyping();
-    appendMessage('ai', 'Ошибка соединения');
-  }
-}
 // ========== ИНИЦИАЛИЗАЦИЯ ==========
 input.focus();

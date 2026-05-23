@@ -4,7 +4,7 @@ import json
 import requests
 import subprocess
 from datetime import datetime
-from flask import Flask, request, jsonify, render_template, send_file, session, send_from_directory
+from flask import Flask, request, jsonify, render_template, send_file, session, send_from_directory, redirect
 
 # ---------- Загрузка .env ----------
 env_path = os.path.join(os.path.dirname(__file__), ".env")
@@ -20,6 +20,7 @@ if os.path.exists(env_path):
 
 # ---------- Google OAuth ----------
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "")
+GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET", "")
 
 # ---------- Провайдеры ----------
 PROVIDERS = {
@@ -72,6 +73,29 @@ ADMIN_CREDENTIALS = {
     "admin": os.getenv("ADMIN_CODE", "007"),
 }
 ADMIN_SESSION_KEY = os.getenv("SESSION_SECRET", "nova-secret-key")
+
+# ---------- Кастомные алиасы ----------
+CUSTOM_COMMANDS_FILE = os.path.join(os.path.dirname(__file__), "custom_commands.json")
+custom_commands = {}
+
+def load_custom_commands():
+    global custom_commands
+    if os.path.exists(CUSTOM_COMMANDS_FILE):
+        try:
+            with open(CUSTOM_COMMANDS_FILE, "r", encoding="utf-8") as f:
+                custom_commands = json.load(f)
+            print(f"Загружено {len(custom_commands)} пользовательских команд")
+        except Exception as e:
+            print(f"Ошибка чтения custom_commands.json: {e}")
+            custom_commands = {}
+    else:
+        custom_commands = {}
+
+def save_custom_commands():
+    with open(CUSTOM_COMMANDS_FILE, "w", encoding="utf-8") as f:
+        json.dump(custom_commands, f, ensure_ascii=False, indent=2)
+
+load_custom_commands()
 
 # ---------- Плагины ----------
 plugins = {}
@@ -133,6 +157,57 @@ def admin_login_page():
     """Админ-панель"""
     return render_template('admin.html')
 
+# ========== GOOGLE OAUTH ==========
+
+@app.route('/auth/google/callback')
+def auth_google_callback():
+    """Обработка ответа от Google OAuth"""
+    code = request.args.get('code')
+    error = request.args.get('error')
+    
+    if error:
+        return f'Ошибка авторизации: {error}', 400
+    if not code:
+        return 'Не получен код авторизации', 400
+    
+    token_url = "https://oauth2.googleapis.com/token"
+    token_data = {
+        "code": code,
+        "client_id": GOOGLE_CLIENT_ID,
+        "client_secret": GOOGLE_CLIENT_SECRET,
+        "redirect_uri": "http://localhost:5000/auth/google/callback",
+        "grant_type": "authorization_code"
+    }
+    
+    try:
+        token_resp = requests.post(token_url, data=token_data, timeout=10)
+        token_resp.raise_for_status()
+        token_json = token_resp.json()
+        
+        id_token_jwt = token_json.get("id_token")
+        if not id_token_jwt:
+            return 'Не получен ID токен', 400
+        
+        import base64 as b64
+        payload = id_token_jwt.split('.')[1]
+        payload += '=' * (4 - len(payload) % 4)
+        user_info = json.loads(b64.urlsafe_b64decode(payload).decode('utf-8'))
+        
+        nick = user_info.get('name', user_info.get('email', 'User').split('@')[0])
+        email = user_info.get('email', '')
+        picture = user_info.get('picture', '')
+        
+        session['nova_user_nick'] = nick
+        session['nova_user_email'] = email
+        session['nova_user_avatar'] = picture
+        session['nova_google_login'] = True
+        session['nova_is_admin'] = False
+        
+        return redirect(f'/chat?nick={nick}&email={email}')
+        
+    except Exception as e:
+        return f'Ошибка авторизации: {str(e)}', 500
+
 # ========== API АВТОРИЗАЦИИ ==========
 
 @app.route('/api/admin/login', methods=['POST'])
@@ -165,28 +240,36 @@ def admin_check():
     return jsonify({'logged_in': False})
 
 # ========== ЧАТ ==========
-
 @app.route('/send', methods=['POST'])
 def send():
     """Отправка сообщения к ИИ"""
     global contents
     data = request.get_json()
     message = data.get('message', '').strip()
+    reasoning = data.get('reasoning', False)  # ← получаем флаг
+    
     if not message:
         return jsonify({'error': 'Пустое сообщение'})
 
     contents.append({"role": "user", "content": message})
-    provider = PROVIDERS[current_provider]
+    
+    # Если включён режим рассуждения — используем DeepSeek R1
+    if reasoning:
+        provider = PROVIDERS.get("openrouter", PROVIDERS[current_provider])
+        model = "deepseek/deepseek-chat-v3-0324"
+    else:
+        provider = PROVIDERS[current_provider]
+        model = current_model
 
     payload = {
-        "model": current_model,
+        "model": model,
         "messages": [{"role": "system", "content": system_prompt}] + contents,
         "temperature": 0.7,
-        "max_tokens": 3000,
+        "max_tokens": 4000,  # больше токенов для рассуждений
     }
 
     try:
-        resp = requests.post(provider["url"], json=payload, headers=provider["headers"], timeout=60)
+        resp = requests.post(provider["url"], json=payload, headers=provider["headers"], timeout=90)
         resp.raise_for_status()
         data = resp.json()
         reply = data["choices"][0]["message"]["content"]
@@ -198,12 +281,11 @@ def send():
         if contents and contents[-1]["role"] == "user":
             contents.pop()
         return jsonify({'error': str(e)})
-
 # ========== КОМАНДЫ ==========
 
 @app.route('/command', methods=['POST'])
 def handle_command():
-    """Обработка команд (/search, /code, /image, плагины)"""
+    """Обработка команд (/search, /code, /image, плагины, алиасы)"""
     global contents
     data = request.get_json()
     cmd_line = data.get('command', '').strip()
@@ -222,6 +304,41 @@ def handle_command():
         results = search_web(query)
         return jsonify({'result': results or 'Ничего не найдено'})
 
+    # Генерация изображений (Pollinations.ai)
+    if cmd == "image":
+        prompt = " ".join(args)
+        if not prompt:
+            return jsonify({'error': 'Укажите описание изображения'})
+        
+        import base64 as b64
+        import urllib.parse
+        
+        encoded_prompt = urllib.parse.quote(prompt)
+        img_url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=1024&height=1024&nologo=true"
+        
+        try:
+            img_resp = requests.get(img_url, timeout=30)
+            img_resp.raise_for_status()
+            
+            # Сохраняем в папку generated_images
+            img_dir = os.path.join(os.path.dirname(__file__), "generated_images")
+            os.makedirs(img_dir, exist_ok=True)
+            
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"image_{timestamp}.png"
+            filepath = os.path.join(img_dir, filename)
+            
+            with open(filepath, "wb") as f:
+                f.write(img_resp.content)
+            
+            # Возвращаем HTML с отображением картинки
+            image_url = f"/generated_image?file={filename}"
+            return jsonify({
+                'result': f'✅ Изображение сгенерировано:\n\n![Image]({image_url})'
+            })
+        except Exception as e:
+            return jsonify({'error': f'Ошибка генерации: {e}'})
+
     # Плагины
     if cmd in plugins:
         try:
@@ -229,6 +346,39 @@ def handle_command():
             return jsonify({'result': result if result else 'OK'})
         except Exception as e:
             return jsonify({'error': str(e)})
+
+    # Кастомные алиасы
+    if cmd in custom_commands:
+        cc = custom_commands[cmd]
+        if cc["type"] == "plugin":
+            plugin_name = cc["plugin"]
+            if plugin_name in plugins:
+                try:
+                    result = plugins[plugin_name](list(cc.get("args_template", [])) + args)
+                    return jsonify({'result': str(result) if result else "OK"})
+                except Exception as e:
+                    return jsonify({'error': str(e)})
+        elif cc["type"] == "llm":
+            prompt_template = cc.get("prompt", "{query}")
+            query = " ".join(args) if args else ""
+            rendered_prompt = prompt_template.replace("{query}", query)
+            contents.append({"role": "user", "content": rendered_prompt})
+            provider = PROVIDERS[current_provider]
+            payload = {
+                "model": current_model,
+                "messages": [{"role": "system", "content": system_prompt}] + contents,
+                "temperature": 0.7,
+                "max_tokens": 3000,
+            }
+            try:
+                resp = requests.post(provider["url"], json=payload, headers=provider["headers"])
+                resp.raise_for_status()
+                data_resp = resp.json()
+                reply = data_resp["choices"][0]["message"]["content"]
+                contents.append({"role": "assistant", "content": reply})
+                return jsonify({'result': reply})
+            except Exception as e:
+                return jsonify({'error': str(e)})
 
     # Встроенные команды
     if cmd == "clear":
@@ -265,7 +415,164 @@ def handle_command():
         except Exception as e:
             return jsonify({'error': str(e)})
 
+    # Управление алиасами
+    if cmd == "alias":
+        if not args:
+            if not custom_commands:
+                return jsonify({'result': 'Нет пользовательских команд. Добавьте через /alias add <имя> plugin <плагин> или /alias add <имя> llm <промпт>'})
+            info = "Ваши команды:\n"
+            for name, cc in custom_commands.items():
+                info += f"/{name} → {cc['type']}\n"
+            return jsonify({'result': info})
+        
+        subcmd = args[0].lower()
+        if subcmd == "add":
+            if len(args) < 3:
+                return jsonify({'error': '/alias add <имя> plugin <плагин> или /alias add <имя> llm <промпт>'})
+            name = args[1]
+            type_ = args[2].lower()
+            if type_ == "plugin":
+                if len(args) < 4:
+                    return jsonify({'error': 'Укажите плагин'})
+                plugin_name = args[3]
+                preset_args = args[4:] if len(args) > 4 else []
+                custom_commands[name] = {"type": "plugin", "plugin": plugin_name, "args_template": preset_args}
+            else:
+                prompt = " ".join(args[3:]) if len(args) > 3 else "{query}"
+                custom_commands[name] = {"type": "llm", "prompt": prompt}
+            save_custom_commands()
+            return jsonify({'result': f'Команда /{name} добавлена. Перезагрузите страницу.'})
+        elif subcmd == "remove":
+            if len(args) < 2:
+                return jsonify({'error': 'Укажите имя команды'})
+            name = args[1]
+            if name in custom_commands:
+                del custom_commands[name]
+                save_custom_commands()
+                return jsonify({'result': f'Команда /{name} удалена'})
+            return jsonify({'error': 'Не найдена'})
+
     return jsonify({'error': f'Неизвестная команда: /{cmd}'})
+
+# ========== ОТДАЧА ИЗОБРАЖЕНИЙ ==========
+
+@app.route('/generated_image')
+def generated_image():
+    filename = request.args.get("file", "")
+    if not filename:
+        return jsonify({"error": "No filename"}), 400
+    safe_name = filename.replace("..", "").replace("/", "")
+    img_dir = os.path.join(os.path.dirname(__file__), "generated_images")
+    filepath = os.path.join(img_dir, safe_name)
+    if not os.path.exists(filepath):
+        return jsonify({"error": "File not found"}), 404
+    return send_file(filepath, mimetype='image/png')
+
+
+# ========== ЗАГРУЗКА ФАЙЛОВ ==========
+
+@app.route('/upload_image', methods=['POST'])
+def upload_image():
+    """Загрузка и анализ изображения"""
+    if 'image' not in request.files:
+        return jsonify({'error': 'Нет файла'}), 400
+    
+    file = request.files['image']
+    if file.filename == '':
+        return jsonify({'error': 'Файл не выбран'}), 400
+    
+    # Сохраняем файл
+    upload_dir = os.path.join(os.path.dirname(__file__), "uploads")
+    os.makedirs(upload_dir, exist_ok=True)
+    
+    import base64 as b64
+    filename = file.filename
+    filepath = os.path.join(upload_dir, filename)
+    file.save(filepath)
+    
+    # Анализируем через OpenRouter Gemini Vision (бесплатно)
+    try:
+        with open(filepath, "rb") as f:
+            image_data = b64.b64encode(f.read()).decode('utf-8')
+        
+        mime_type = "image/jpeg"
+        if filename.lower().endswith(".png"):
+            mime_type = "image/png"
+        elif filename.lower().endswith(".webp"):
+            mime_type = "image/webp"
+        
+        data_url = f"data:{mime_type};base64,{image_data}"
+        
+        api_key = os.getenv("OPENROUTER_API_KEY") or os.getenv("GROQ_API_KEY")
+        if api_key:
+            headers = {
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json"
+            }
+            payload = {
+                "model": "google/gemini-2.0-flash-001",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": "Подробно опиши, что изображено на этой картинке. Опиши объекты, цвета, настроение."},
+                            {"type": "image_url", "image_url": {"url": data_url}}
+                        ]
+                    }
+                ],
+                "max_tokens": 500
+            }
+            
+            resp = requests.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=payload, timeout=30)
+            resp.raise_for_status()
+            result = resp.json()
+            description = result["choices"][0]["message"]["content"]
+            
+            return jsonify({'result': f'📷 **Анализ изображения:**\n\n{description}', 'filepath': filepath})
+    
+    except:
+        pass
+    
+    return jsonify({'result': f'✅ Изображение сохранено: {filepath}', 'filepath': filepath})
+
+
+@app.route('/upload_file', methods=['POST'])
+def upload_file():
+    """Загрузка файла с предпросмотром содержимого"""
+    if 'file' not in request.files:
+        return jsonify({'error': 'Нет файла'}), 400
+    
+    file = request.files['file']
+    if file.filename == '':
+        return jsonify({'error': 'Файл не выбран'}), 400
+    
+    upload_dir = os.path.join(os.path.dirname(__file__), "uploads")
+    os.makedirs(upload_dir, exist_ok=True)
+    
+    filename = file.filename
+    filepath = os.path.join(upload_dir, filename)
+    file.save(filepath)
+    
+    # Пробуем прочитать содержимое текстовых файлов
+    preview = ""
+    try:
+        text_extensions = ['.txt', '.json', '.csv', '.py', '.js', '.html', '.css', '.md', '.xml', '.yaml', '.yml']
+        ext = os.path.splitext(filename)[1].lower()
+        
+        if ext in text_extensions:
+            with open(filepath, "r", encoding="utf-8", errors="ignore") as f:
+                content = f.read()[:3000]
+            preview = f"```\n{content}\n```"
+    except:
+        pass
+    
+    return jsonify({
+        'result': f'✅ Файл сохранён: {filepath}',
+        'filepath': filepath,
+        'filename': filename,
+        'preview': preview
+    })
+
 
 # ========== МОДЕЛИ ==========
 
@@ -301,7 +608,9 @@ def admin_stats():
         "current_model": current_model,
         "history_messages": len(contents),
         "plugins_loaded": list(plugins.keys()),
-        "system_prompt": system_prompt
+        "custom_commands": list(custom_commands.keys()),
+        "system_prompt": system_prompt,
+        "voice_enabled": os.environ.get("ASSISTANT_VOICE_REPLY", "0") == "1"
     })
 
 @app.route('/api/admin/settings', methods=['POST'])
@@ -383,61 +692,7 @@ def admin_load_code():
 @app.route('/static/<path:filename>')
 def static_files(filename):
     return send_from_directory('static', filename)
-@app.route('/auth/google/callback')
-def auth_google_callback():
-    """Обработка ответа от Google OAuth"""
-    code = request.args.get('code')
-    error = request.args.get('error')
-    
-    if error:
-        return f'Ошибка авторизации: {error}', 400
-    
-    if not code:
-        return 'Не получен код авторизации', 400
-    
-    # Обмениваем code на токен
-    token_url = "https://oauth2.googleapis.com/token"
-    token_data = {
-        "code": code,
-        "client_id": GOOGLE_CLIENT_ID,
-        "client_secret": os.getenv("GOOGLE_CLIENT_SECRET", ""),
-        "redirect_uri": "http://localhost:5000/auth/google/callback",
-        "grant_type": "authorization_code"
-    }
-    
-    try:
-        # Получаем токен
-        token_resp = requests.post(token_url, data=token_data, timeout=10)
-        token_resp.raise_for_status()
-        token_json = token_resp.json()
-        
-        id_token_jwt = token_json.get("id_token")
-        if not id_token_jwt:
-            return 'Не получен ID токен', 400
-        
-        # Декодируем JWT
-        payload = id_token_jwt.split('.')[1]
-        # Добавляем padding
-        payload += '=' * (4 - len(payload) % 4)
-        import base64
-        user_info = json.loads(base64.urlsafe_b64decode(payload).decode('utf-8'))
-        
-        nick = user_info.get('name', user_info.get('email', 'User').split('@')[0])
-        email = user_info.get('email', '')
-        picture = user_info.get('picture', '')
-        
-        # Сохраняем в сессии (или возвращаем на фронтенд)
-        session['nova_user_nick'] = nick
-        session['nova_user_email'] = email
-        session['nova_user_avatar'] = picture
-        session['nova_google_login'] = True
-        session['nova_is_admin'] = False
-        
-        # Перенаправляем в чат с параметрами
-        return redirect(f'/chat?nick={nick}&email={email}')
-        
-    except Exception as e:
-        return f'Ошибка авторизации: {str(e)}', 500
+
 # ========== ЗАПУСК ==========
 
 if __name__ == '__main__':

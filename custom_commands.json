@@ -1,7 +1,7 @@
 {
   "image": {
     "type": "plugin",
-    "plugin": "pol",
+    "plugin": "image",
     "args_template": []
   },
   "анализ_изображения": {
