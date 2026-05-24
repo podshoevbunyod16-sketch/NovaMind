@@ -1,0 +1,7 @@
+.ssh/
+.cache/
+.npm/
+*.json (если содержит API ключи)
+__pycache__/
+venv/
+.env
