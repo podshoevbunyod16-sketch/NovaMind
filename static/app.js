@@ -309,12 +309,45 @@ function appendMessage(role, content) {
 
 function formatContent(text) {
   let html = escapeHtml(text);
+  
+  // Блоки кода
   html = html.replace(/```(\w+)?\n?([\s\S]*?)```/g, (_, lang, code) => `<pre><code>${code.trim()}</code></pre>`);
+  
+  // Инлайн-код
   html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
+  
+  // Жирный
   html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+  
+  // Курсив
   html = html.replace(/\*(.+?)\*/g, '<em>$1</em>');
+  
+  // Таблицы
+  html = html.replace(/(\|[^\n]+\|\n\|[-| :]+\|\n(?:\|[^\n]+\|\n?)*)/g, (match) => {
+    const rows = match.trim().split('\n');
+    let tableHtml = '<table style="width:100%;border-collapse:collapse;margin:10px 0;">';
+    
+    rows.forEach((row, index) => {
+      const cells = row.split('|').filter(c => c.trim() !== '');
+      const tag = index === 0 ? 'th' : 'td';
+      
+      if (index === 1 && cells.every(c => /^[-| :]+$/.test(c))) return; // пропускаем разделитель
+      
+      tableHtml += '<tr>';
+      cells.forEach(cell => {
+        tableHtml += `<${tag} style="border:1px solid rgba(255,255,255,0.15);padding:8px 12px;text-align:left;">${cell.trim()}</${tag}>`;
+      });
+      tableHtml += '</tr>';
+    });
+    
+    tableHtml += '</table>';
+return `<div style="overflow-x: auto; max-width: 100%; -webkit-overflow-scrolling: touch;">${tableHtml}</div>`;
+  });
+  
+  // Переносы строк
   html = html.replace(/\n\n/g, '<br><br>');
   html = html.replace(/\n/g, '<br>');
+  
   return html;
 }
 

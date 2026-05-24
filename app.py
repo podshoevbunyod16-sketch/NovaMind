@@ -452,6 +452,86 @@ def handle_command():
                 return jsonify({'result': f'Команда /{name} удалена'})
             return jsonify({'error': 'Не найдена'})
 
+    # ========== ГЛУБОКОЕ ИССЛЕДОВАНИЕ ==========
+    if cmd == "research":
+        query = " ".join(args)
+        if not query:
+            return jsonify({'error': 'Укажите вопрос. Пример: /research Как работает нейросеть'})
+        
+        # Шаг 1: Поиск в интернете
+        search_result = search_web(query)
+        if not search_result:
+            search_result = "Информация не найдена в интернете."
+        
+        # Шаг 2: Анализ через Groq
+        provider = PROVIDERS["groq"]
+        analysis_prompt = f"""Проанализируй следующую информацию и выдели 3-5 ключевых фактов по вопросу: "{query}"
+
+Информация из интернета:
+{search_result}
+
+Выдели только ключевые факты, коротко."""
+        
+        try:
+            analysis_payload = {
+                "model": "openai/gpt-oss-120b",
+                "messages": [{"role": "user", "content": analysis_prompt}],
+                "temperature": 0.3,
+                "max_tokens": 1000,
+            }
+            analysis_resp = requests.post(
+                provider["url"], 
+                json=analysis_payload, 
+                headers=provider["headers"], 
+                timeout=60
+            )
+            analysis_resp.raise_for_status()
+            analysis = analysis_resp.json()["choices"][0]["message"]["content"]
+        except Exception as e:
+            analysis = f"Анализ не удался: {str(e)}.\n\nИспользую сырой поиск:\n{search_result[:1000]}"
+        
+        # Шаг 3: Финальный ответ (с таблицами!)
+        final_prompt = f"""На основе анализа напиши подробный, структурированный ответ на вопрос: "{query}"
+
+Анализ:
+{analysis}
+
+Требования к ответу:
+- Подробный (3-5 абзацев)
+- Если есть сравнения, характеристики, данные, списки — ОБЯЗАТЕЛЬНО используй Markdown-таблицы
+- Структурированный (с маркированными списками где уместно)
+- На русском языке
+- Укажи источники, если они есть в анализе
+
+Пример таблицы:
+| Характеристика | Значение |
+|---------------|----------|
+| Скорость      | 100 км/ч |
+| Вес           | 10 кг    |"""
+        
+        try:
+            final_payload = {
+                "model": "openai/gpt-oss-120b",
+                "messages": [{"role": "user", "content": final_prompt}],
+                "temperature": 0.5,
+                "max_tokens": 4000,
+            }
+            final_resp = requests.post(
+                provider["url"], 
+                json=final_payload, 
+                headers=provider["headers"], 
+                timeout=90
+            )
+            final_resp.raise_for_status()
+            final_answer = final_resp.json()["choices"][0]["message"]["content"]
+        except Exception as e:
+            final_answer = f"**🔍 Результаты поиска:**\n\n{search_result}\n\n**📊 Анализ:**\n\n{analysis}\n\n_(Финальный ответ не удалось сгенерировать: {str(e)})_"
+        
+        return jsonify({'result': final_answer})
+
+
+
+
     return jsonify({'error': f'Неизвестная команда: /{cmd}'})
 
 # ========== ОТДАЧА ИЗОБРАЖЕНИЙ ==========
@@ -466,6 +546,7 @@ def generated_image():
     filepath = os.path.join(img_dir, safe_name)
     if not os.path.exists(filepath):
         return jsonify({"error": "File not found"}), 404
+
     return send_file(filepath, mimetype='image/png')
 
 

@@ -41,7 +41,7 @@ html, body {
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: var(--accent); border-radius: 99px; }
 
-.app { display: flex; height: 90vh; position: relative; overflow: hidden; }
+.app { display: flex; height: 93vh; position: relative; overflow: hidden; }
 
 /* ── Sidebar ── */
 .sidebar {
