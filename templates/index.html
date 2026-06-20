@@ -70,7 +70,12 @@
         <span style="font-size:16px;">📚</span>
         Википедия
       </div>
+       
 
+      <div class="nav-item" onclick="openComposio(); closeSidebar();">
+        <span style="font-size:16px;">🔗</span>
+        Composio MCP
+      </div>
       <div class="nav-label" style="margin-top:6px;">История</div>
       <div id="historyContainer"></div>
 
@@ -105,21 +110,21 @@
       <div class="model-option selected" onclick="selectModel('Nova Ultra', this)">
         <div class="model-option-dot" style="background:#a78bfa;box-shadow:0 0 6px #a78bfa"></div>
         <div>
-          <div class="model-option-name">Nova Ultra</div>
+          <div class="model-option-name">Deepseek R1</div>
           <div class="model-option-desc">Самая мощная модель</div>
         </div>
       </div>
       <div class="model-option" onclick="selectModel('Nova Pro', this)">
         <div class="model-option-dot" style="background:#60a5fa;box-shadow:0 0 6px #60a5fa"></div>
         <div>
-          <div class="model-option-name">Nova Pro</div>
+          <div class="model-option-name">GPT OSS</div>
           <div class="model-option-desc">Баланс скорости и качества</div>
         </div>
       </div>
       <div class="model-option" onclick="selectModel('Nova Fast', this)">
         <div class="model-option-dot" style="background:#34d399;box-shadow:0 0 6px #34d399"></div>
         <div>
-          <div class="model-option-name">Nova Fast</div>
+          <div class="model-option-name">GLM 4.7</div>
           <div class="model-option-desc">Максимальная скорость</div>
         </div>
       </div>
@@ -135,7 +140,7 @@
 
       <button class="model-selector" id="modelSelectorBtn" onclick="toggleModelDropdown()">
         <div class="model-dot"></div>
-        <span id="currentModel">Nova Ultra</span>
+        <span id="currentModel">Deepseek R1</span>
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" style="width:11px;height:11px;"><polyline points="6 9 12 15 18 9"/></svg>
       </button>
 
@@ -239,7 +244,11 @@
 
   </main>
 </div>
-
+<script>
+  function openComposio() {
+      window.open('/composio', 'composio_window', 'width=1000,height=800');
+  }
+</script>
 <script src="/static/app.js"></script>
 <!-- Google Sign-In -->
 <script src="https://accounts.google.com/gsi/client" async defer></script>
@@ -276,6 +285,7 @@
         // Перенаправляем в чат
         window.location.href = '/chat';
     }
+
 </script>
 </body>
 </html>
