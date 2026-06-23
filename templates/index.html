@@ -215,7 +215,14 @@
           </button>
         </div>
       </div>
-
+        <!-- Кнопка авто поиска -->
+<button id="btn-auto-search" class="toolbar-btn" onclick="toggleAutoSearch()" title="Авто поиск">
+  <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <circle cx="11" cy="11" r="8"></circle>
+    <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+    <path d="M8 11h6M11 8v6" stroke="currentColor" stroke-width="1.5"></path>
+  </svg>
+</button>
       <div class="input-wrapper">
         <textarea id="chat-input" placeholder="Напишите сообщение..." rows="1" onkeydown="handleKey(event)" oninput="autoResize(this)"></textarea>
 

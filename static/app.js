@@ -8,12 +8,57 @@ let recognition    = null;
 let isTyping       = false;
 let webSearchOn    = false;
 let reasoningOn    = false;
+let autoSearchOn   = false;  // ← АВТО ПОИСК
 let currentMode    = 'chat';
 let msgCount       = 0;
 let chatHistory    = JSON.parse(localStorage.getItem('nova_history') || '[]');
 let selectedModelName = 'Nova Ultra';
 let inputMode      = null;
+// ══════════════════════════════════════════
+// ЗАЩИТА ОТ КОПИРОВАНИЯ ИНТЕРФЕЙСА
+// ══════════════════════════════════════════
 
+(function initCopyProtection() {
+  // Правый клик — только в сообщениях
+  document.addEventListener('contextmenu', function(e) {
+    const isInsideMessage = e.target.closest('.msg-bubble') !== null;
+    if (!isInsideMessage) {
+      e.preventDefault();
+      return false;
+    }
+  });
+
+  // Ctrl+C / Cmd+C — только в сообщениях
+  document.addEventListener('keydown', function(e) {
+    const selection = window.getSelection();
+    const isInsideMessage = selection?.anchorNode?.parentElement?.closest('.msg-bubble') !== null ||
+                            document.activeElement?.closest('.msg-bubble') !== null;
+    
+    if ((e.ctrlKey || e.metaKey) && e.key === 'c') {
+      if (!isInsideMessage) {
+        e.preventDefault();
+        showNotification('Копирование интерфейса запрещено. Выделите текст в сообщении.', 'warn');
+        return false;
+      }
+    }
+
+    // Ctrl+A — выделить всё (только в сообщениях)
+    if ((e.ctrlKey || e.metaKey) && e.key === 'a') {
+      if (!isInsideMessage) {
+        e.preventDefault();
+        return false;
+      }
+    }
+  });
+
+  // Drag & drop — только из сообщений
+  document.addEventListener('dragstart', function(e) {
+    if (!e.target.closest('.msg-bubble')) {
+      e.preventDefault();
+      return false;
+    }
+  });
+})();
 // ========== DOM-ЭЛЕМЕНТЫ ==========
 const input         = document.getElementById('chat-input');
 const sendBtn       = document.getElementById('sendBtn');
@@ -39,7 +84,7 @@ if (!localStorage.getItem('nova_user_nick')) {
   if (isAdmin && adminLink) {
     adminLink.style.display = 'flex';
   }
-  
+
   // Аватарка Google
   const googleAvatar = localStorage.getItem('nova_user_avatar');
   const avatarEl = document.querySelector('.user-avatar');
@@ -76,7 +121,7 @@ function handleKey(e) {
   }
 }
 
-// ========== ТРИ КНОПКИ ==========
+// ========== ЧЕТЫРЕ КНОПКИ (добавлен авто поиск) ==========
 function toggleWebSearch() {
   webSearchOn = !webSearchOn;
   const btn = document.getElementById('btn-web-search');
@@ -91,6 +136,20 @@ function toggleReasoning() {
   showNotification(reasoningOn ? 'Режим рассуждения включён' : 'Рассуждение выключено', 'info');
 }
 
+// ========== АВТО ПОИСК ==========
+function toggleAutoSearch() {
+  autoSearchOn = !autoSearchOn;
+  const btn = document.getElementById('btn-auto-search');
+  btn.classList.toggle('active', autoSearchOn);
+
+  if (autoSearchOn) {
+    showNotification('🔍 Авто поиск включён. AI будет искать актуальную информацию при необходимости.', 'info');
+  } else {
+    showNotification('🔍 Авто поиск выключен', 'info');
+  }
+}
+
+// ========== ПРИКРЕПИТЬ ==========
 function toggleAttachMenu() {
   document.getElementById('attachDropdown').classList.toggle('open');
 }
@@ -252,8 +311,49 @@ async function sendMessage(text) {
     return;
   }
 
-  // Если включён поиск — используем DuckDuckGo
-if (webSearchOn) {
+  // Если включён АВТО ПОИСК — сначала проверяем нужен ли поиск
+  if (autoSearchOn) {
+    try {
+      const resp = await fetch('/api/auto_search', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message: finalMsg })
+      });
+      const data = await resp.json();
+
+      if (data.error) {
+        removeTyping();
+        appendMessage('ai', '❌ Ошибка: ' + data.error);
+        return;
+      }
+
+      // Если поиск нужен — показываем индикатор поиска и результат
+      if (data.needs_search) {
+        // Обновляем индикатор
+        const typingEl = document.getElementById('typingIndicator');
+        if (typingEl) {
+          typingEl.querySelector('.msg-bubble').innerHTML = 
+            `<div style="display:flex;align-items:center;gap:8px;font-size:13px;color:#10b981;">
+              <span style="animation:spin 1s linear infinite;display:inline-block;">🔍</span>
+              Ищу в интернете: "${escapeHtml(data.search_query || finalMsg)}"...
+             </div>`;
+        }
+
+        // Ждём немного для эффекта
+        await new Promise(r => setTimeout(r, 800));
+        removeTyping();
+        appendMessage('ai', data.reply);
+        return;
+      }
+      // Если поиск НЕ нужен — продолжаем обычную отправку (ниже)
+    } catch (e) {
+      console.error('Auto search error:', e);
+      // При ошибке авто поиска — продолжаем обычную отправку
+    }
+  }
+
+  // Если включён ручной поиск — используем web_search_groq
+  if (webSearchOn) {
     try {
       const resp = await fetch('/api/web_search_groq', {
         method: 'POST',
@@ -273,15 +373,15 @@ if (webSearchOn) {
     }
     return;
   }
+
   // Обычный запрос к ИИ
-  // Обычный запрос к ИИ
-try {
+  try {
     const resp = await fetch('/send', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ 
         message: finalMsg, 
-        reasoning: reasoningOn  // ← передаём флаг рассуждения
+        reasoning: reasoningOn
       })
     });
     const data = await resp.json();
@@ -291,10 +391,10 @@ try {
     } else {
       appendMessage('ai', data.reply);
     }
-} catch (e) {
+  } catch (e) {
     removeTyping();
     appendMessage('ai', 'Ошибка соединения');
-}
+  }
 }
 
 function sendSuggestion(text) { sendMessage(text); }
@@ -363,45 +463,45 @@ function appendMessage(role, content) {
 
 function formatContent(text) {
   let html = escapeHtml(text);
-  
+
   // Блоки кода
   html = html.replace(/```(\w+)?\n?([\s\S]*?)```/g, (_, lang, code) => `<pre><code>${code.trim()}</code></pre>`);
-  
+
   // Инлайн-код
   html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
-  
+
   // Жирный
   html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
-  
+
   // Курсив
   html = html.replace(/\*(.+?)\*/g, '<em>$1</em>');
-  
+
   // Таблицы
   html = html.replace(/(\|[^\n]+\|\n\|[-| :]+\|\n(?:\|[^\n]+\|\n?)*)/g, (match) => {
     const rows = match.trim().split('\n');
     let tableHtml = '<table style="width:100%;border-collapse:collapse;margin:10px 0;">';
-    
+
     rows.forEach((row, index) => {
       const cells = row.split('|').filter(c => c.trim() !== '');
       const tag = index === 0 ? 'th' : 'td';
-      
-      if (index === 1 && cells.every(c => /^[-| :]+$/.test(c))) return; // пропускаем разделитель
-      
+
+      if (index === 1 && cells.every(c => /^[-| :]+$/.test(c))) return;
+
       tableHtml += '<tr>';
       cells.forEach(cell => {
         tableHtml += `<${tag} style="border:1px solid rgba(255,255,255,0.15);padding:8px 12px;text-align:left;">${cell.trim()}</${tag}>`;
       });
       tableHtml += '</tr>';
     });
-    
+
     tableHtml += '</table>';
-return `<div style="overflow-x: auto; max-width: 100%; -webkit-overflow-scrolling: touch;">${tableHtml}</div>`;
+    return `<div style="overflow-x: auto; max-width: 100%; -webkit-overflow-scrolling: touch;">${tableHtml}</div>`;
   });
-  
+
   // Переносы строк
   html = html.replace(/\n\n/g, '<br><br>');
   html = html.replace(/\n/g, '<br>');
-  
+
   return html;
 }
 
@@ -617,5 +717,6 @@ function composioAuthFromChat(toolkit) {
     appendMessage('ai', '❌ Ошибка соединения');
   });
 }
+
 // ========== ИНИЦИАЛИЗАЦИЯ ==========
 input.focus();
