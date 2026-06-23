@@ -174,25 +174,116 @@ load_plugins()
 # ---------- Flask ----------
 app = Flask(__name__)
 app.secret_key = ADMIN_SESSION_KEY
+# ---------- Поиск через APILayer Google Search ----------
+APILAYER_KEY = os.getenv("APILAYER_KEY", "")
 
-# ---------- Поиск DuckDuckGo ----------
 def search_web(query):
     try:
-        url = "https://api.duckduckgo.com/"
-        params = {"q": query, "format": "json", "no_html": 1, "skip_disambig": 1}
-        resp = requests.get(url, params=params, timeout=10)
+        url = "https://api.apilayer.com/google_search"
+        headers = {
+            "apikey": APILAYER_KEY
+        }
+        params = {
+            "q": query,
+            "hl": "ru",
+            "gl": "ru",
+            "num": 5
+        }
+        resp = requests.get(url, headers=headers, params=params, timeout=15)
+        resp.raise_for_status()
         data = resp.json()
+
         parts = []
-        if data.get("AbstractText"):
-            parts.append(data["AbstractText"])
-        for topic in data.get("RelatedTopics", [])[:5]:
-            if "Text" in topic:
-                parts.append(topic["Text"])
-        if not parts:
-            return None
-        return "Результаты поиска:\n" + "\n".join(f"- {p}" for p in parts)
-    except:
+
+        # Основные результаты
+        for item in data.get("organic_results", [])[:5]:
+            title = item.get("title", "")
+            snippet = item.get("snippet", "")
+            link = item.get("link", "")
+            if snippet:
+                parts.append(f"📌 **{title}**\n{snippet}\n🔗 {link}")
+
+        # Answer box если есть
+        answer = data.get("answer_box", {})
+        if answer:
+            answer_text = answer.get("answer") or answer.get("snippet") or ""
+            if answer_text:
+                parts.insert(0, f"✅ **Быстрый ответ:** {answer_text}")
+
+        if parts:
+            return "Результаты поиска Google:\n\n" + "\n\n".join(parts)
+
         return None
+
+    except Exception as e:
+        print(f"search_web error: {e}")
+        return None
+
+
+# ---------- Endpoint: Поиск + Groq ----------
+@app.route('/api/web_search_groq', methods=['POST'])
+def web_search_groq():
+    """Поиск через APILayer Google + обработка через Groq"""
+    global contents
+
+    data = request.get_json() or {}
+    query = data.get('query', '').strip()
+
+    if not query:
+        return jsonify({'error': 'Пустой запрос'})
+
+    # Шаг 1: Ищем через Google
+    search_result = search_web(query)
+
+    if not search_result:
+        search_result = "Поиск не дал результатов. Отвечай на основе своих знаний."
+
+    # Шаг 2: Groq анализирует и отвечает
+    provider = PROVIDERS["groq"]
+
+    groq_prompt = f"""Пользователь спросил: "{query}"
+
+Вот результаты из Google:
+{search_result}
+
+Твоя задача:
+- Дай подробный, полезный ответ на вопрос пользователя
+- Используй информацию из поиска
+- Добавь своё объяснение и понимание
+- Отвечай на русском языке
+- Используй Markdown: заголовки, списки, таблицы если нужно
+- В конце напиши: "🔍 *Ответ на основе поиска Google*" """
+
+    try:
+        payload = {
+            "model": "openai/gpt-oss-120b",
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": groq_prompt}
+            ],
+            "temperature": 0.5,
+            "max_tokens": 3000,
+        }
+        resp = requests.post(
+            provider["url"],
+            json=payload,
+            headers=provider["headers"],
+            timeout=90
+        )
+        resp.raise_for_status()
+        reply = resp.json()["choices"][0]["message"]["content"]
+
+        contents.append({"role": "user", "content": f"[Поиск Google] {query}"})
+        contents.append({"role": "assistant", "content": reply})
+        if len(contents) > 20:
+            contents = contents[-20:]
+
+        return jsonify({'reply': reply})
+
+    except Exception as e:
+        return jsonify({
+            'reply': f'🔍 **Результаты Google по запросу "{query}":**\n\n{search_result}\n\n*Groq недоступен: {str(e)}*'
+        })
 
 # ========== СТРАНИЦЫ ==========
 

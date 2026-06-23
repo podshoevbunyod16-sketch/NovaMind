@@ -231,27 +231,26 @@ async function sendMessage(text) {
   }
 
   // Если включён поиск — используем DuckDuckGo
-  if (webSearchOn) {
+if (webSearchOn) {
     try {
-      const resp = await fetch('/command', {
+      const resp = await fetch('/api/web_search_groq', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ command: '/search ' + finalMsg })
+        body: JSON.stringify({ query: finalMsg })
       });
       const data = await resp.json();
       removeTyping();
       if (data.error) {
-        appendMessage('ai', 'Ошибка: ' + data.error);
+        appendMessage('ai', '❌ Ошибка: ' + data.error);
       } else {
-        appendMessage('ai', '🔍 **Результаты поиска:**\n\n' + (data.result || 'Ничего не найдено'));
+        appendMessage('ai', data.reply);
       }
     } catch (e) {
       removeTyping();
-      appendMessage('ai', 'Ошибка поиска');
+      appendMessage('ai', '❌ Ошибка соединения при поиске');
     }
     return;
   }
-
   // Обычный запрос к ИИ
   // Обычный запрос к ИИ
 try {
