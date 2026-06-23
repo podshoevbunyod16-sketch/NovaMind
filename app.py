@@ -3,6 +3,7 @@ import sys
 import json
 import requests
 import subprocess
+import time
 from datetime import datetime
 from flask import Flask, request, jsonify, render_template, send_file, session, send_from_directory, redirect
 
@@ -22,12 +23,163 @@ if os.path.exists(env_path):
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "")
 GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET", "")
 
-# ---------- Провайдеры ----------
+# ============================================================
+# ========== GROQ API KEY ROTATION SYSTEM ====================
+# ============================================================
+
+# --- Загрузка всех Groq ключей ---
+GROQ_KEYS = []
+for i in range(1, 10):  # GROQ_API_KEY_1 ... GROQ_API_KEY_9
+    k = os.getenv(f"GROQ_API_KEY_{i}", "")
+    if k:
+        GROQ_KEYS.append({"key": k, "index": i, "exhausted_at": None})
+
+# Fallback: если нет нумерованных — берём основной
+if not GROQ_KEYS:
+    main_key = os.getenv("GROQ_API_KEY", "")
+    if main_key:
+        GROQ_KEYS.append({"key": main_key, "index": 0, "exhausted_at": None})
+
+groq_key_index = 0  # Текущий активный ключ
+
+# Cooldown: 1 день + 1 час = 90000 секунд
+GROQ_KEY_COOLDOWN = 90000
+
+
+def get_groq_key():
+    """Возвращает текущий активный Groq API ключ"""
+    global groq_key_index, GROQ_KEYS
+
+    if not GROQ_KEYS:
+        return ""
+
+    # Проверяем, не истёк ли cooldown у предыдущих ключей
+    now = time.time()
+    for key_info in GROQ_KEYS:
+        if key_info["exhausted_at"] and (now - key_info["exhausted_at"]) >= GROQ_KEY_COOLDOWN:
+            key_info["exhausted_at"] = None
+            print(f"[Groq Key] Ключ #{key_info['index']} восстановлен (cooldown истёк)")
+
+    # Ищем первый неисчерпанный ключ
+    for i in range(len(GROQ_KEYS)):
+        idx = (groq_key_index + i) % len(GROQ_KEYS)
+        if GROQ_KEYS[idx]["exhausted_at"] is None:
+            groq_key_index = idx
+            return GROQ_KEYS[idx]["key"]
+
+    # Все ключи на cooldown
+    return GROQ_KEYS[groq_key_index]["key"]
+
+
+def mark_groq_key_exhausted():
+    """Помечает текущий ключ как исчерпанный и переключается на следующий"""
+    global groq_key_index, GROQ_KEYS
+
+    if not GROQ_KEYS:
+        return
+
+    current_key = GROQ_KEYS[groq_key_index]
+    current_key["exhausted_at"] = time.time()
+    print(f"[Groq Key] Ключ #{current_key['index']} исчерпан, cooldown на 25 часов")
+
+    # Ищем следующий доступный ключ
+    found = False
+    for i in range(1, len(GROQ_KEYS)):
+        idx = (groq_key_index + i) % len(GROQ_KEYS)
+        if GROQ_KEYS[idx]["exhausted_at"] is None:
+            groq_key_index = idx
+            found = True
+            print(f"[Groq Key] Переключение на ключ #{GROQ_KEYS[idx]['index']}")
+            break
+
+    if not found:
+        print("[Groq Key] ВСЕ ключи исчерпаны! Ожидание восстановления...")
+
+
+def get_groq_key_status():
+    """Возвращает статус всех ключей"""
+    now = time.time()
+    status = []
+    for key_info in GROQ_KEYS:
+        if key_info["exhausted_at"] is None:
+            status.append({
+                "index": key_info["index"],
+                "active": (GROQ_KEYS.index(key_info) == groq_key_index),
+                "status": "active"
+            })
+        else:
+            remaining = max(0, GROQ_KEY_COOLDOWN - (now - key_info["exhausted_at"]))
+            status.append({
+                "index": key_info["index"],
+                "active": False,
+                "status": "cooldown",
+                "cooldown_remaining_sec": int(remaining),
+                "cooldown_remaining_hr": round(remaining / 3600, 2)
+            })
+    return status
+
+
+def groq_request_with_rotation(url, payload, headers, timeout=90, max_retries=3):
+    """
+    Выполняет запрос к Groq с автоматической ротацией ключей при rate limit.
+    Возвращает (response_data, None) или (None, error_message).
+    """
+    for attempt in range(max_retries):
+        current_key = get_groq_key()
+        if not current_key:
+            return None, "Нет доступных Groq API ключей"
+
+        headers["Authorization"] = f"Bearer {current_key}"
+
+        try:
+            resp = requests.post(url, json=payload, headers=headers, timeout=timeout)
+
+            # Rate limit / quota exceeded
+            if resp.status_code == 429:
+                error_text = resp.text.lower()
+                if "rate limit" in error_text or "quota" in error_text or "exceeded" in error_text:
+                    print(f"[Groq Key] Rate limit на ключе, ротируем...")
+                    mark_groq_key_exhausted()
+                    continue
+                else:
+                    time.sleep(2 ** attempt)
+                    continue
+
+            if resp.status_code == 401:
+                print(f"[Groq Key] 401 Unauthorized, ротируем...")
+                mark_groq_key_exhausted()
+                continue
+
+            resp.raise_for_status()
+            return resp.json(), None
+
+        except requests.exceptions.Timeout:
+            if attempt < max_retries - 1:
+                time.sleep(1)
+                continue
+            return None, "Таймаут запроса к Groq"
+        except requests.exceptions.RequestException as e:
+            error_str = str(e).lower()
+            if "rate limit" in error_str or "quota" in error_str or "429" in error_str:
+                print(f"[Groq Key] Rate limit detected in exception, ротируем...")
+                mark_groq_key_exhausted()
+                continue
+            if attempt < max_retries - 1:
+                time.sleep(1)
+                continue
+            return None, str(e)
+
+    return None, "Все Groq ключи исчерпаны или недоступны"
+
+
+# ============================================================
+# ========== ПРОВАЙДЕРЫ =====================================
+# ============================================================
+
 PROVIDERS = {
     "groq": {
         "url": "https://api.groq.com/openai/v1/chat/completions",
         "headers": {
-            "Authorization": f"Bearer {os.getenv('GROQ_API_KEY')}",
             "Content-Type": "application/json"
         },
         "models": [
@@ -37,27 +189,21 @@ PROVIDERS = {
         ]
     },
     "cerebras": {
-    "url": "https://api.cerebras.ai/v1/chat/completions",
-    "headers": {
-        "Authorization": "Bearer {CEREBRAS_API_KEY}",
-        "Content-Type": "application/json"
+        "url": "https://api.cerebras.ai/v1/chat/completions",
+        "headers": {
+            "Authorization": f"Bearer {os.getenv('CEREBRAS_API_KEY', '')}",
+            "Content-Type": "application/json"
+        },
+        "models": [
+            {"id": "qwen-3-235b-a22b-instruct-2507", "name": "Qwen 3 235B"},
+            {"id": "zai-glm-4.7", "name": "Z.ai GLM 4.7"},
+            {"id": "deepseek-r1-distill-llama-70b", "name": "DeepSeek R1 Distill Llama 70B"}
+        ]
     },
-    "models": [
-        {"id": "qwen-3-235b-a22b-instruct-2507", "name": "Qwen 3 235B"},
-        {"id": "zai-glm-4.7", "name": "Z.ai GLM 4.7"},
-        {"id": "deepseek-r1-distill-llama-70b", "name": "DeepSeek R1 Distill Llama 70B"}
-    ]
-},
-
-
-
-
-
-
     "openrouter": {
         "url": "https://openrouter.ai/api/v1/chat/completions",
         "headers": {
-            "Authorization": f"Bearer {os.getenv('OPENROUTER_API_KEY')}",
+            "Authorization": f"Bearer {os.getenv('OPENROUTER_API_KEY', '')}",
             "Content-Type": "application/json",
             "HTTP-Referer": "http://localhost:5000",
             "X-Title": "NovaMind AI"
@@ -174,28 +320,20 @@ load_plugins()
 # ---------- Flask ----------
 app = Flask(__name__)
 app.secret_key = ADMIN_SESSION_KEY
+
 # ---------- Поиск через APILayer Google Search ----------
 APILAYER_KEY = os.getenv("APILAYER_KEY", "")
 
 def search_web(query):
     try:
         url = "https://api.apilayer.com/google_search"
-        headers = {
-            "apikey": APILAYER_KEY
-        }
-        params = {
-            "q": query,
-            "hl": "ru",
-            "gl": "ru",
-            "num": 5
-        }
+        headers = {"apikey": APILAYER_KEY}
+        params = {"q": query, "hl": "ru", "gl": "ru", "num": 5}
         resp = requests.get(url, headers=headers, params=params, timeout=15)
         resp.raise_for_status()
         data = resp.json()
 
         parts = []
-
-        # Основные результаты
         for item in data.get("organic_results", [])[:5]:
             title = item.get("title", "")
             snippet = item.get("snippet", "")
@@ -203,7 +341,6 @@ def search_web(query):
             if snippet:
                 parts.append(f"📌 **{title}**\n{snippet}\n🔗 {link}")
 
-        # Answer box если есть
         answer = data.get("answer_box", {})
         if answer:
             answer_text = answer.get("answer") or answer.get("snippet") or ""
@@ -212,12 +349,146 @@ def search_web(query):
 
         if parts:
             return "Результаты поиска Google:\n\n" + "\n\n".join(parts)
-
         return None
-
     except Exception as e:
         print(f"search_web error: {e}")
         return None
+
+
+# ============================================================
+# ========== АВТО ПОИСК (Auto Search) ========================
+# ============================================================
+
+@app.route('/api/auto_search', methods=['POST'])
+def auto_search():
+    """
+    Авто поиск: определяет, нужен ли поиск в интернете,
+    ищет через APILayer Google Search, обрабатывает через Groq.
+    """
+    global contents
+
+    data = request.get_json() or {}
+    user_message = data.get('message', '').strip()
+
+    if not user_message:
+        return jsonify({'error': 'Пустое сообщение'})
+
+    provider = PROVIDERS["groq"]
+
+    # Шаг 1: Groq решает, нужен ли поиск
+    decision_prompt = f"""Ты — интеллектуальный фильтр для AI-ассистента.
+
+Пользователь написал: "{user_message}"
+
+Твоя задача: определить, нужны ли актуальные данные из интернета для ответа на этот запрос.
+
+Запросы, требующие поиска (новости, актуальные данные, события, цены, погода, спорт, технологии, политика, наука, кино, и т.д.):
+- "Какая сегодня погода?"
+- "Последние новости про ..."
+- "Курс доллара"
+- "Кто выиграл матч вчера?"
+- "Новейшие технологии ..."
+- "Какие фильмы вышли в 2026?"
+
+Запросы, НЕ требующие поиска (теория, логика, код, общие знания):
+- "Объясни рекурсию"
+- "Напиши код на Python"
+- "Как работает нейросеть"
+- "Переведи текст"
+- "Реши уравнение"
+
+Ответь ТОЛЬКО одним словом: SEARCH или DIRECT."""
+
+    decision_payload = {
+        "model": "llama-3.1-8b-instant",
+        "messages": [{"role": "user", "content": decision_prompt}],
+        "temperature": 0.1,
+        "max_tokens": 10,
+    }
+    data_decision, error = groq_request_with_rotation(
+        provider["url"], decision_payload, provider["headers"].copy(), timeout=15
+    )
+    if error:
+        print(f"Auto search decision error: {error}")
+        decision = "DIRECT"
+    else:
+        decision = data_decision["choices"][0]["message"]["content"].strip().upper()
+
+    if "SEARCH" not in decision:
+        return jsonify({'needs_search': False, 'reply': None})
+
+    # Шаг 2: Генерируем поисковый запрос
+    search_query_prompt = f"""Пользователь написал: "{user_message}"
+
+Сформулируй краткий поисковый запрос для Google (1-5 слов), который поможет найти актуальную информацию.
+
+Ответь ТОЛЬКО поисковым запросом, без кавычек и пояснений."""
+
+    query_payload = {
+        "model": "llama-3.1-8b-instant",
+        "messages": [{"role": "user", "content": search_query_prompt}],
+        "temperature": 0.1,
+        "max_tokens": 50,
+    }
+    data_query, error = groq_request_with_rotation(
+        provider["url"], query_payload, provider["headers"].copy(), timeout=15
+    )
+    if error:
+        print(f"Auto search query generation error: {error}")
+        search_query = user_message
+    else:
+        search_query = data_query["choices"][0]["message"]["content"].strip()
+        search_query = search_query.strip('"').strip("'")
+
+    # Шаг 3: Поиск через APILayer
+    search_result = search_web(search_query)
+    if not search_result:
+        search_result = "Поиск не дал результатов."
+
+    # Шаг 4: Финальный ответ через Groq
+    final_prompt = f"""Пользователь спросил: "{user_message}"
+
+Вот актуальная информация из интернета (Google Search):
+{search_result}
+
+Твоя задача:
+- Дай подробный, полезный ответ на вопрос пользователя
+- Используй информацию из поиска
+- Добавь своё объяснение и понимание
+- Отвечай на русском языке
+- Используй Markdown: заголовки, списки, таблицы если нужно
+- В конце напиши: "🔍 Ответ на основе поиска Google" """
+
+    final_payload = {
+        "model": current_model,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": final_prompt}
+        ],
+        "temperature": 0.5,
+        "max_tokens": 3000,
+    }
+    data_final, error = groq_request_with_rotation(
+        provider["url"], final_payload, provider["headers"].copy(), timeout=90
+    )
+    if error:
+        return jsonify({
+            'needs_search': True,
+            'search_query': search_query,
+            'reply': f'🔍 Результаты по Google "{search_query}":\n\n{search_result}\n\n_(Groq недоступен: {error})_'
+        })
+
+    reply = data_final["choices"][0]["message"]["content"]
+    contents.append({"role": "user", "content": f"[Авто поиск] {user_message}"})
+    contents.append({"role": "assistant", "content": reply})
+    if len(contents) > 20:
+        contents = contents[-20:]
+
+    return jsonify({
+        'needs_search': True,
+        'search_query': search_query,
+        'reply': reply
+    })
 
 
 # ---------- Endpoint: Поиск + Groq ----------
@@ -232,15 +503,11 @@ def web_search_groq():
     if not query:
         return jsonify({'error': 'Пустой запрос'})
 
-    # Шаг 1: Ищем через Google
     search_result = search_web(query)
-
     if not search_result:
         search_result = "Поиск не дал результатов. Отвечай на основе своих знаний."
 
-    # Шаг 2: Groq анализирует и отвечает
     provider = PROVIDERS["groq"]
-
     groq_prompt = f"""Пользователь спросил: "{query}"
 
 Вот результаты из Google:
@@ -254,67 +521,58 @@ def web_search_groq():
 - Используй Markdown: заголовки, списки, таблицы если нужно
 - В конце напиши: "🔍 *Ответ на основе поиска Google*" """
 
-    try:
-        payload = {
-            "model": "openai/gpt-oss-120b",
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": groq_prompt}
-            ],
-            "temperature": 0.5,
-            "max_tokens": 3000,
-        }
-        resp = requests.post(
-            provider["url"],
-            json=payload,
-            headers=provider["headers"],
-            timeout=90
-        )
-        resp.raise_for_status()
-        reply = resp.json()["choices"][0]["message"]["content"]
-
-        contents.append({"role": "user", "content": f"[Поиск Google] {query}"})
-        contents.append({"role": "assistant", "content": reply})
-        if len(contents) > 20:
-            contents = contents[-20:]
-
-        return jsonify({'reply': reply})
-
-    except Exception as e:
+    payload = {
+        "model": "openai/gpt-oss-120b",
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": groq_prompt}
+        ],
+        "temperature": 0.5,
+        "max_tokens": 3000,
+    }
+    data_resp, error = groq_request_with_rotation(
+        provider["url"], payload, provider["headers"].copy(), timeout=90
+    )
+    if error:
         return jsonify({
-            'reply': f'🔍 **Результаты Google по запросу "{query}":**\n\n{search_result}\n\n*Groq недоступен: {str(e)}*'
+            'reply': f'🔍 **Результаты Google по запросу "{query}":**\n\n{search_result}\n\n*Groq недоступен: {error}*'
         })
+
+    reply = data_resp["choices"][0]["message"]["content"]
+    contents.append({"role": "user", "content": f"[Поиск Google] {query}"})
+    contents.append({"role": "assistant", "content": reply})
+    if len(contents) > 20:
+        contents = contents[-20:]
+
+    return jsonify({'reply': reply})
+
 
 # ========== СТРАНИЦЫ ==========
 
 @app.route('/')
 def index():
-    """Страница входа с Google OAuth"""
     return render_template('auth.html', google_client_id=GOOGLE_CLIENT_ID)
 
 @app.route('/chat')
 def chat_page():
-    """Основной интерфейс чата"""
     return render_template('index.html')
 
 @app.route('/admin/login')
 def admin_login_page():
-    """Админ-панель"""
     return render_template('admin.html')
 
 # ========== GOOGLE OAUTH ==========
 
 @app.route('/auth/google/callback')
 def auth_google_callback():
-    """Обработка ответа от Google OAuth"""
     code = request.args.get('code')
     error = request.args.get('error')
-    
+
     if error:
         return f'Ошибка авторизации: {error}', 400
     if not code:
         return 'Не получен код авторизации', 400
-    
+
     token_url = "https://oauth2.googleapis.com/token"
     token_data = {
         "code": code,
@@ -323,33 +581,32 @@ def auth_google_callback():
         "redirect_uri": "http://localhost:5000/auth/google/callback",
         "grant_type": "authorization_code"
     }
-    
+
     try:
         token_resp = requests.post(token_url, data=token_data, timeout=10)
         token_resp.raise_for_status()
         token_json = token_resp.json()
-        
+
         id_token_jwt = token_json.get("id_token")
         if not id_token_jwt:
             return 'Не получен ID токен', 400
-        
+
         import base64 as b64
         payload = id_token_jwt.split('.')[1]
         payload += '=' * (4 - len(payload) % 4)
         user_info = json.loads(b64.urlsafe_b64decode(payload).decode('utf-8'))
-        
+
         nick = user_info.get('name', user_info.get('email', 'User').split('@')[0])
         email = user_info.get('email', '')
         picture = user_info.get('picture', '')
-        
+
         session['nova_user_nick'] = nick
         session['nova_user_email'] = email
         session['nova_user_avatar'] = picture
         session['nova_google_login'] = True
         session['nova_is_admin'] = False
-        
+
         return redirect(f'/chat?nick={nick}&email={email}')
-        
     except Exception as e:
         return f'Ошибка авторизации: {str(e)}', 500
 
@@ -357,14 +614,12 @@ def auth_google_callback():
 
 @app.route('/api/admin/login', methods=['POST'])
 def admin_login():
-    """Проверка кода администратора"""
     data = request.get_json() or {}
     username = data.get('username', 'admin').strip()
     code = data.get('code', '').strip()
 
     if username not in ADMIN_CREDENTIALS:
         return jsonify({'success': False, 'error': 'Неверный логин'})
-
     if ADMIN_CREDENTIALS[username] != code:
         return jsonify({'success': False, 'error': 'Неверный код'})
 
@@ -373,13 +628,11 @@ def admin_login():
 
 @app.route('/api/admin/logout', methods=['POST'])
 def admin_logout():
-    """Выход из админ-панели"""
     session.clear()
     return jsonify({'success': True})
 
 @app.route('/api/admin/check')
 def admin_check():
-    """Проверка авторизации админа"""
     if session.get('admin_logged_in'):
         return jsonify({'logged_in': True, 'username': session.get('admin_username', 'admin')})
     return jsonify({'logged_in': False})
@@ -391,14 +644,13 @@ def send():
     global contents
     data = request.get_json()
     message = data.get('message', '').strip()
-    reasoning = data.get('reasoning', False)  # ← получаем флаг
-    
+    reasoning = data.get('reasoning', False)
+
     if not message:
         return jsonify({'error': 'Пустое сообщение'})
 
     contents.append({"role": "user", "content": message})
-    
-    # Если включён режим рассуждения — используем DeepSeek R1
+
     if reasoning:
         provider = PROVIDERS.get("cerebras", PROVIDERS[current_provider])
         model = "zai-glm-4.7"
@@ -410,22 +662,24 @@ def send():
         "model": model,
         "messages": [{"role": "system", "content": system_prompt}] + contents,
         "temperature": 0.7,
-        "max_tokens": 4000,  # больше токенов для рассуждений
+        "max_tokens": 4000,
     }
 
-    try:
-        resp = requests.post(provider["url"], json=payload, headers=provider["headers"], timeout=90)
-        resp.raise_for_status()
-        data = resp.json()
-        reply = data["choices"][0]["message"]["content"]
-        contents.append({"role": "assistant", "content": reply})
-        if len(contents) > 20:
-            contents = contents[-20:]
-        return jsonify({'reply': reply})
-    except Exception as e:
+    data_resp, error = groq_request_with_rotation(
+        provider["url"], payload, provider["headers"].copy(), timeout=90
+    )
+    if error:
         if contents and contents[-1]["role"] == "user":
             contents.pop()
-        return jsonify({'error': str(e)})
+        return jsonify({'error': error})
+
+    reply = data_resp["choices"][0]["message"]["content"]
+    contents.append({"role": "assistant", "content": reply})
+    if len(contents) > 20:
+        contents = contents[-20:]
+    return jsonify({'reply': reply})
+
+
 # ========== КОМАНДЫ ==========
 
 @app.route('/command', methods=['POST'])
@@ -454,29 +708,27 @@ def handle_command():
         prompt = " ".join(args)
         if not prompt:
             return jsonify({'error': 'Укажите описание изображения'})
-        
+
         import base64 as b64
         import urllib.parse
-        
+
         encoded_prompt = urllib.parse.quote(prompt)
         img_url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=1024&height=1024&nologo=true"
-        
+
         try:
             img_resp = requests.get(img_url, timeout=30)
             img_resp.raise_for_status()
-            
-            # Сохраняем в папку generated_images
+
             img_dir = os.path.join(os.path.dirname(__file__), "generated_images")
             os.makedirs(img_dir, exist_ok=True)
-            
+
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             filename = f"image_{timestamp}.png"
             filepath = os.path.join(img_dir, filename)
-            
+
             with open(filepath, "wb") as f:
                 f.write(img_resp.content)
-            
-            # Возвращаем HTML с отображением картинки
+
             image_url = f"/generated_image?file={filename}"
             return jsonify({
                 'result': f'✅ Изображение сгенерировано:\n\n![Image]({image_url})'
@@ -515,15 +767,14 @@ def handle_command():
                 "temperature": 0.7,
                 "max_tokens": 3000,
             }
-            try:
-                resp = requests.post(provider["url"], json=payload, headers=provider["headers"])
-                resp.raise_for_status()
-                data_resp = resp.json()
-                reply = data_resp["choices"][0]["message"]["content"]
-                contents.append({"role": "assistant", "content": reply})
-                return jsonify({'result': reply})
-            except Exception as e:
-                return jsonify({'error': str(e)})
+            data_resp, error = groq_request_with_rotation(
+                provider["url"], payload, provider["headers"].copy()
+            )
+            if error:
+                return jsonify({'error': error})
+            reply = data_resp["choices"][0]["message"]["content"]
+            contents.append({"role": "assistant", "content": reply})
+            return jsonify({'result': reply})
 
     # Встроенные команды
     if cmd == "clear":
@@ -540,7 +791,7 @@ def handle_command():
         query = " ".join(args)
         if not query:
             return jsonify({'error': 'Укажите, какой код создать'})
-        
+
         provider = PROVIDERS[current_provider]
         payload = {
             "model": current_model,
@@ -551,14 +802,13 @@ def handle_command():
             "temperature": 0.3,
             "max_tokens": 3000,
         }
-        try:
-            resp = requests.post(provider["url"], json=payload, headers=provider["headers"], timeout=60)
-            resp.raise_for_status()
-            data = resp.json()
-            reply = data["choices"][0]["message"]["content"]
-            return jsonify({'result': reply})
-        except Exception as e:
-            return jsonify({'error': str(e)})
+        data_resp, error = groq_request_with_rotation(
+            provider["url"], payload, provider["headers"].copy(), timeout=60
+        )
+        if error:
+            return jsonify({'error': error})
+        reply = data_resp["choices"][0]["message"]["content"]
+        return jsonify({'result': reply})
 
     # Управление алиасами
     if cmd == "alias":
@@ -569,7 +819,7 @@ def handle_command():
             for name, cc in custom_commands.items():
                 info += f"/{name} → {cc['type']}\n"
             return jsonify({'result': info})
-        
+
         subcmd = args[0].lower()
         if subcmd == "add":
             if len(args) < 3:
@@ -602,13 +852,11 @@ def handle_command():
         query = " ".join(args)
         if not query:
             return jsonify({'error': 'Укажите вопрос. Пример: /research Как работает нейросеть'})
-        
-        # Шаг 1: Поиск в интернете
+
         search_result = search_web(query)
         if not search_result:
             search_result = "Информация не найдена в интернете."
-        
-        # Шаг 2: Анализ через Groq
+
         provider = PROVIDERS["groq"]
         analysis_prompt = f"""Проанализируй следующую информацию и выдели 3-5 ключевых фактов по вопросу: "{query}"
 
@@ -616,26 +864,21 @@ def handle_command():
 {search_result}
 
 Выдели только ключевые факты, коротко."""
-        
-        try:
-            analysis_payload = {
-                "model": "openai/gpt-oss-120b",
-                "messages": [{"role": "user", "content": analysis_prompt}],
-                "temperature": 0.3,
-                "max_tokens": 1000,
-            }
-            analysis_resp = requests.post(
-                provider["url"], 
-                json=analysis_payload, 
-                headers=provider["headers"], 
-                timeout=60
-            )
-            analysis_resp.raise_for_status()
-            analysis = analysis_resp.json()["choices"][0]["message"]["content"]
-        except Exception as e:
-            analysis = f"Анализ не удался: {str(e)}.\n\nИспользую сырой поиск:\n{search_result[:1000]}"
-        
-        # Шаг 3: Финальный ответ (с таблицами!)
+
+        analysis_payload = {
+            "model": "openai/gpt-oss-120b",
+            "messages": [{"role": "user", "content": analysis_prompt}],
+            "temperature": 0.3,
+            "max_tokens": 1000,
+        }
+        data_analysis, error = groq_request_with_rotation(
+            provider["url"], analysis_payload, provider["headers"].copy(), timeout=60
+        )
+        if error:
+            analysis = f"Анализ не удался: {error}.\n\nИспользую сырой поиск:\n{search_result[:1000]}"
+        else:
+            analysis = data_analysis["choices"][0]["message"]["content"]
+
         final_prompt = f"""На основе анализа напиши подробный, структурированный ответ на вопрос: "{query}"
 
 Анализ:
@@ -651,33 +894,27 @@ def handle_command():
 Пример таблицы:
 | Характеристика | Значение |
 |---------------|----------|
-| Скорость      | 100 км/ч |
-| Вес           | 10 кг    |"""
-        
-        try:
-            final_payload = {
-                "model": "openai/gpt-oss-120b",
-                "messages": [{"role": "user", "content": final_prompt}],
-                "temperature": 0.5,
-                "max_tokens": 4000,
-            }
-            final_resp = requests.post(
-                provider["url"], 
-                json=final_payload, 
-                headers=provider["headers"], 
-                timeout=90
-            )
-            final_resp.raise_for_status()
-            final_answer = final_resp.json()["choices"][0]["message"]["content"]
-        except Exception as e:
-            final_answer = f"**🔍 Результаты поиска:**\n\n{search_result}\n\n**📊 Анализ:**\n\n{analysis}\n\n_(Финальный ответ не удалось сгенерировать: {str(e)})_"
-        
+| Скорость | 100 км/ч |
+| Вес | 10 кг |"""
+
+        final_payload = {
+            "model": "openai/gpt-oss-120b",
+            "messages": [{"role": "user", "content": final_prompt}],
+            "temperature": 0.5,
+            "max_tokens": 4000,
+        }
+        data_final, error = groq_request_with_rotation(
+            provider["url"], final_payload, provider["headers"].copy(), timeout=90
+        )
+        if error:
+            final_answer = f"**🔍 Результаты поиска:**\n\n{search_result}\n\n**📊 Анализ:**\n\n{analysis}\n\n_(Финальный ответ не удалось сгенерировать: {error})_"
+        else:
+            final_answer = data_final["choices"][0]["message"]["content"]
+
         return jsonify({'result': final_answer})
 
-
-
-
     return jsonify({'error': f'Неизвестная команда: /{cmd}'})
+
 
 # ========== ОТДАЧА ИЗОБРАЖЕНИЙ ==========
 
@@ -691,7 +928,6 @@ def generated_image():
     filepath = os.path.join(img_dir, safe_name)
     if not os.path.exists(filepath):
         return jsonify({"error": "File not found"}), 404
-
     return send_file(filepath, mimetype='image/png')
 
 
@@ -718,26 +954,26 @@ def upload_image():
 1. КРАТКИЙ ИТОГ (одно предложение): что это за сцена/объект в целом.
 
 2. ДЕТАЛЬНЫЙ ПЕРЕЧЕНЬ ОБЪЕКТОВ:
-   - Люди (пол, возраст, одежда, поза, действия, количество).
-   - Животные, растения, транспорт, строения, мебель, техника, продукты.
-   - Надписи: распознай весь видимый текст (названия, цифры, кнопки) — даже если мелко, укажи предполагаемый вариант.
-   - Материалы и фактуры (дерево, стекло, бетон, ткань).
-   - Окружающая обстановка (помещение, улица, природа, погода, время суток).
+ - Люди (пол, возраст, одежда, поза, действия, количество).
+ - Животные, растения, транспорт, строения, мебель, техника, продукты.
+ - Надписи: распознай весь видимый текст (названия, цифры, кнопки) — даже если мелко, укажи предполагаемый вариант.
+ - Материалы и фактуры (дерево, стекло, бетон, ткань).
+ - Окружающая обстановка (помещение, улица, природа, погода, время суток).
 
 3. КЛАССИФИКАЦИЯ:
-   - Тип изображения: фотография, рисунок, схема, скриншот, коллаж, ИИ‑генерация.
-   - Если это фото — определи жанр (портрет, пейзаж, натюрморт, репортаж, макросъёмка).
-   - Если это предмет — назови его точное имя (модель, марка, вид), если возможно.
+ - Тип изображения: фотография, рисунок, схема, скриншот, коллаж, ИИ‑генерация.
+ - Если это фото — определи жанр (портрет, пейзаж, натюрморт, репортаж, макросъёмка).
+ - Если это предмет — назови его точное имя (модель, марка, вид), если возможно.
 
 4. РАСШИФРОВКА КОНТЕКСТА (что происходит):
-   - Действия людей или движущихся объектов.
-   - Взаимодействие между объектами.
-   - Назначение сцены (например: «производственный цех», «кухня ресторана», «парковка»).
+ - Действия людей или движущихся объектов.
+ - Взаимодействие между объектами.
+ - Назначение сцены (например: «производственный цех», «кухня ресторана», «парковка»).
 
 5. ДОПОЛНИТЕЛЬНЫЕ ДЕТАЛИ (только факты):
-   - Цветовая гамма основных элементов.
-   - Заметные дефекты (царапины, блики, засветы, шумы) — если есть.
-   - Скрытые детали на заднем плане (часто ИИ их пропускает — укажи явно).
+ - Цветовая гамма основных элементов.
+ - Заметные дефекты (царапины, блики, засветы, шумы) — если есть.
+ - Скрытые детали на заднем плане (часто ИИ их пропускает — укажи явно).
 
 **Важно:** Если какой‑то объект не удаётся однозначно распознать, напиши «неопределённо» и предложи 2–3 наиболее вероятных варианта.
 
@@ -765,9 +1001,9 @@ def upload_image():
 
         data_url = f"data:{mime_type};base64,{image_data}"
 
-        groq_key = os.getenv("GROQ_API_KEY", "")
+        groq_key = get_groq_key()
         if not groq_key:
-            return jsonify({'error': 'GROQ_API_KEY не задан в .env'})
+            return jsonify({'error': 'Нет доступных Groq API ключей'})
 
         headers = {
             "Authorization": f"Bearer {groq_key}",
@@ -786,14 +1022,16 @@ def upload_image():
             ],
             "max_tokens": 1500
         }
-        resp = requests.post(
+        data_resp, error = groq_request_with_rotation(
             "https://api.groq.com/openai/v1/chat/completions",
-            headers=headers,
-            json=payload,
+            payload,
+            headers,
             timeout=30
         )
-        resp.raise_for_status()
-        description = resp.json()["choices"][0]["message"]["content"]
+        if error:
+            return jsonify({'error': f'Ошибка анализа изображения: {error}'})
+
+        description = data_resp["choices"][0]["message"]["content"]
 
         contents.append({"role": "user", "content": f"[Изображение: {filename}] {user_desc}"})
         contents.append({"role": "assistant", "content": description})
@@ -879,41 +1117,35 @@ def upload_file():
 Отвечай на русском языке. Используй Markdown форматирование."""
 
     groq_error = None
-    try:
-        provider = PROVIDERS["groq"]
-        payload = {
-            "model": "llama-3.3-70b-versatile",
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": analysis_prompt}
-            ],
-            "temperature": 0.3,
-            "max_tokens": 3000,
-        }
-        resp = requests.post(
-            provider["url"],
-            json=payload,
-            headers=provider["headers"],
-            timeout=60
-        )
-        resp.raise_for_status()
-        reply = resp.json()["choices"][0]["message"]["content"]
-
+    provider = PROVIDERS["groq"]
+    payload = {
+        "model": "llama-3.3-70b-versatile",
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": analysis_prompt}
+        ],
+        "temperature": 0.3,
+        "max_tokens": 3000,
+    }
+    data_resp, error = groq_request_with_rotation(
+        provider["url"], payload, provider["headers"].copy(), timeout=60
+    )
+    if error:
+        groq_error = error
+        print(f"Groq upload_file error: {error}")
+    else:
+        reply = data_resp["choices"][0]["message"]["content"]
         contents.append({"role": "user", "content": f"[Файл: {filename}] {user_desc}"})
         contents.append({"role": "assistant", "content": reply})
         if len(contents) > 20:
             contents = contents[-20:]
-
         return jsonify({
             'result': f'''📁 **Анализ файла {filename} (Groq):**
 
 {reply}'''
         })
 
-    except Exception as e1:
-        groq_error = str(e1)
-        print(f"Groq upload_file error: {e1}")
-
+    # Fallback на Cerebras
     try:
         cerebras_key = os.getenv("CEREBRAS_API_KEY", "")
         if not cerebras_key:
@@ -969,7 +1201,6 @@ def upload_file():
 
 @app.route('/models_list')
 def models_list():
-    """Список доступных моделей"""
     providers_list = []
     for key, data in PROVIDERS.items():
         providers_list.append({"provider": key, "list": data["models"]})
@@ -977,7 +1208,6 @@ def models_list():
 
 @app.route('/switch_model')
 def switch_model():
-    """Переключение модели"""
     global current_provider, current_model
     model_id = request.args.get('model_id', '')
     for key, data in PROVIDERS.items():
@@ -988,11 +1218,11 @@ def switch_model():
                 return jsonify({"success": True, "provider": key})
     return jsonify({'error': 'Модель не найдена'}), 400
 
+
 # ========== АДМИН API ==========
 
 @app.route('/api/admin/stats')
 def admin_stats():
-    """Статистика для админ-панели"""
     return jsonify({
         "models": PROVIDERS,
         "current_provider": current_provider,
@@ -1006,7 +1236,6 @@ def admin_stats():
 
 @app.route('/api/admin/settings', methods=['POST'])
 def admin_settings():
-    """Сохранение настроек"""
     global system_prompt, current_provider, current_model
     data = request.get_json() or {}
     if "system_prompt" in data:
@@ -1024,7 +1253,6 @@ def admin_settings():
 
 @app.route('/api/admin/save_code', methods=['POST'])
 def admin_save_code():
-    """Сохранение кода из админ-панели"""
     data = request.get_json() or {}
     filename = data.get("filename", "script.py")
     code = data.get("code", "")
@@ -1039,7 +1267,6 @@ def admin_save_code():
 
 @app.route('/api/admin/run_saved_code', methods=['POST'])
 def admin_run_saved_code():
-    """Запуск сохранённого кода"""
     data = request.get_json() or {}
     filename = data.get("filename", "script.py")
     code_dir = os.path.join(os.path.dirname(__file__), "saved_codes")
@@ -1059,7 +1286,6 @@ def admin_run_saved_code():
 
 @app.route('/api/admin/saved_codes')
 def admin_saved_codes():
-    """Список сохранённых файлов"""
     code_dir = os.path.join(os.path.dirname(__file__), "saved_codes")
     if not os.path.exists(code_dir):
         return jsonify({"files": []})
@@ -1068,7 +1294,6 @@ def admin_saved_codes():
 
 @app.route('/api/admin/load_code')
 def admin_load_code():
-    """Загрузка кода из файла"""
     filename = request.args.get("file", "")
     code_dir = os.path.join(os.path.dirname(__file__), "saved_codes")
     filepath = os.path.join(code_dir, filename)
@@ -1078,17 +1303,38 @@ def admin_load_code():
         code = f.read()
     return jsonify({"code": code, "filename": filename})
 
+
+# ========== СТАТУС КЛЮЧЕЙ GROQ (админка) ==========
+
+@app.route('/api/admin/groq_keys')
+def admin_groq_keys():
+    """Статус всех Groq API ключей"""
+    return jsonify({
+        "keys": get_groq_key_status(),
+        "current_key_index": groq_key_index,
+        "total_keys": len(GROQ_KEYS),
+        "cooldown_hours": GROQ_KEY_COOLDOWN / 3600
+    })
+
+@app.route('/api/admin/groq_keys/reset', methods=['POST'])
+def admin_reset_groq_keys():
+    """Сбросить все cooldown'ы (для админа)"""
+    global groq_key_index
+    for key_info in GROQ_KEYS:
+        key_info["exhausted_at"] = None
+    groq_key_index = 0
+    return jsonify({"success": True, "message": "Все ключи сброшены"})
+
+
 # ========== СТАТИКА ==========
 
-@app.route('/static/<path:filename>')
+@app.route('/static/')
 def static_files(filename):
     return send_from_directory('static', filename)
-
 
 @app.route('/composio')
 def composio_page():
     return render_template('composio.html')
-
 
 @app.route('/api/composio/connect', methods=['POST'])
 def composio_connect():
@@ -1096,18 +1342,9 @@ def composio_connect():
     api_key = data.get('api_key', '')
     if not api_key:
         return jsonify({'error': 'API ключ не указан'}), 400
-
-    # Проверяем ключ — запрашиваем apps
     try:
-        headers = {
-            'x-api-key': api_key,
-            'Content-Type': 'application/json'
-        }
-        resp = requests.get(
-            'https://backend.composio.dev/api/v3.1/toolkits?limit=5',
-            headers=headers,
-            timeout=10
-        )
+        headers = {'x-api-key': api_key, 'Content-Type': 'application/json'}
+        resp = requests.get('https://backend.composio.dev/api/v3.1/toolkits?limit=5', headers=headers, timeout=10)
         if resp.status_code == 401:
             return jsonify({'error': 'Неверный API ключ'}), 401
         resp.raise_for_status()
@@ -1116,47 +1353,31 @@ def composio_connect():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
-
 @app.route('/api/composio/integrations', methods=['GET'])
 def composio_integrations():
     api_key = os.getenv('COMPOSIO_API_KEY', '')
     if not api_key:
         return jsonify({'error': 'Composio не подключен'}), 400
     try:
-        headers = {
-            'x-api-key': api_key,
-            'Content-Type': 'application/json'
-        }
-        # Получаем список тулкитов
-        resp = requests.get(
-            'https://backend.composio.dev/api/v3.1/toolkits?limit=50',
-            headers=headers,
-            timeout=10
-        )
+        headers = {'x-api-key': api_key, 'Content-Type': 'application/json'}
+        resp = requests.get('https://backend.composio.dev/api/v3.1/toolkits?limit=50', headers=headers, timeout=10)
         resp.raise_for_status()
         return jsonify({'integrations': resp.json()})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
-
 @app.route('/api/composio/connected_accounts', methods=['GET'])
 def composio_connected_accounts():
-    """Список подключённых аккаунтов пользователя"""
     api_key = os.getenv('COMPOSIO_API_KEY', '')
     if not api_key:
         return jsonify({'error': 'Composio не подключен'}), 400
     try:
         headers = {'x-api-key': api_key, 'Content-Type': 'application/json'}
-        resp = requests.get(
-            'https://backend.composio.dev/api/v3.1/connected_accounts',
-            headers=headers,
-            timeout=10
-        )
+        resp = requests.get('https://backend.composio.dev/api/v3.1/connected_accounts', headers=headers, timeout=10)
         resp.raise_for_status()
         return jsonify(resp.json())
     except Exception as e:
         return jsonify({'error': str(e)}), 500
-
 
 @app.route('/api/composio/connect_account', methods=['POST'])
 def composio_connect_account():
@@ -1168,45 +1389,20 @@ def composio_connect_account():
     if not toolkit:
         return jsonify({'error': 'Укажи toolkit'}), 400
     try:
-        headers = {
-            'x-api-key': api_key,
-            'Content-Type': 'application/json'
-        }
-
-        # ШАГ 1: Создаём Tool Router сессию
-        session_resp = requests.post(
-            'https://backend.composio.dev/api/v3.1/tool_router/session',
-            headers=headers,
-            json={"user_id": "novauser"},
-            timeout=10
-        )
+        headers = {'x-api-key': api_key, 'Content-Type': 'application/json'}
+        session_resp = requests.post('https://backend.composio.dev/api/v3.1/tool_router/session', headers=headers, json={"user_id": "novauser"}, timeout=10)
         session_resp.raise_for_status()
         session_data = session_resp.json()
         session_id = session_data.get('session_id', '')
-
         if not session_id:
             return jsonify({'error': 'Не удалось создать сессию'}), 500
-
-        # ШАГ 2: Через сессию получаем OAuth ссылку для тулкита
-        link_resp = requests.post(
-            f'https://backend.composio.dev/api/v3/tool_router/session/{session_id}/link',
-            headers=headers,
-            json={"toolkit": toolkit},
-            timeout=10
-        )
+        link_resp = requests.post(f'https://backend.composio.dev/api/v3/tool_router/session/{session_id}/link', headers=headers, json={"toolkit": toolkit}, timeout=10)
         link_resp.raise_for_status()
         link_data = link_resp.json()
-
         redirect_url = link_data.get('redirect_url', '')
-        return jsonify({
-            'success': True,
-            'redirect_url': redirect_url,
-            'connected_account_id': link_data.get('connected_account_id', '')
-        })
-
+        return jsonify({'success': True, 'redirect_url': redirect_url, 'connected_account_id': link_data.get('connected_account_id', '')})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
-
 
 @app.route('/api/composio/execute', methods=['POST'])
 def composio_execute():
@@ -1221,24 +1417,14 @@ def composio_execute():
         return jsonify({'error': 'Укажи действие'}), 400
     try:
         headers = {'x-api-key': api_key, 'Content-Type': 'application/json'}
-        payload = {
-            "input": params,
-            "allow_tracing": True
-        }
+        payload = {"input": params, "allow_tracing": True}
         if connected_account_id:
             payload["connected_account_id"] = connected_account_id
-
-        resp = requests.post(
-            f'https://backend.composio.dev/api/v2/actions/{action_name}/execute',
-            json=payload,
-            headers=headers,
-            timeout=30
-        )
+        resp = requests.post(f'https://backend.composio.dev/api/v2/actions/{action_name}/execute', json=payload, headers=headers, timeout=30)
         resp.raise_for_status()
         return jsonify({'result': resp.json()})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
-
 
 @app.route('/api/composio/actions', methods=['GET'])
 def composio_actions():
@@ -1256,6 +1442,8 @@ def composio_actions():
         return jsonify(resp.json())
     except Exception as e:
         return jsonify({'error': str(e)}), 500
+
+
 # ========== ЗАПУСК ==========
 
 if __name__ == '__main__':
