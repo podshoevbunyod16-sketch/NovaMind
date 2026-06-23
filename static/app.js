@@ -285,18 +285,51 @@ function appendMessage(role, content) {
   const isAI = role === 'ai';
   const wrap = document.createElement('div');
   wrap.className = 'message ' + (role === 'user' ? 'user' : 'ai');
-  
+
+  // ══ COMPOSIO КАРТОЧКИ ══
+  if (isAI && content.startsWith('COMPOSIO_CARDS:')) {
+    const json = content.replace('COMPOSIO_CARDS:', '');
+    try {
+      const cards = JSON.parse(json);
+      wrap.innerHTML = `
+        <div class="msg-avatar">✦</div>
+        <div class="msg-body">
+          <div class="msg-name">NovaMind</div>
+          <div class="msg-bubble">${renderComposioCards(cards)}</div>
+        </div>`;
+      chatContainer.appendChild(wrap);
+      scrollToBottom();
+      return;
+    } catch(e) {}
+  }
+
+  // ══ COMPOSIO AUTH КНОПКА ══
+  if (isAI && content.startsWith('COMPOSIO_AUTH:')) {
+    const withoutPrefix = content.replace('COMPOSIO_AUTH:', '');
+    const colonIdx = withoutPrefix.indexOf(':');
+    const toolkit = withoutPrefix.substring(0, colonIdx);
+    const url = withoutPrefix.substring(colonIdx + 1);
+    wrap.innerHTML = `
+      <div class="msg-avatar">✦</div>
+      <div class="msg-body">
+        <div class="msg-name">NovaMind</div>
+        <div class="msg-bubble">${renderComposioAuth(toolkit, url)}</div>
+      </div>`;
+    chatContainer.appendChild(wrap);
+    scrollToBottom();
+    return;
+  }
+
+  // ══ ОБЫЧНОЕ СООБЩЕНИЕ ══
   let formatted = isAI ? formatContent(content) : escapeHtml(content);
   let imageHtml = '';
-  
-  // Проверяем, есть ли Markdown-изображение ![Image](url)
+
   const imageMatch = content.match(/!\[Image\]\((.*?)\)/);
   if (imageMatch) {
-    imageHtml = `<img src="${imageMatch[1]}" alt="Generated image" style="max-width: 100%; border-radius: 12px; margin-top: 8px;" onload="scrollToBottom()">`;
-    // Убираем Markdown-разметку из текста
+    imageHtml = `<img src="${imageMatch[1]}" alt="Generated image" style="max-width:100%;border-radius:12px;margin-top:8px;" onload="scrollToBottom()">`;
     formatted = formatted.replace(/!\[Image\]\(.*?\)/, '');
   }
-  
+
   wrap.innerHTML = `
     <div class="msg-avatar">${isAI ? '✦' : '👤'}</div>
     <div class="msg-body">
@@ -470,5 +503,98 @@ function showNotification(msg, type = 'info') {
   setTimeout(() => toast.remove(), 2500);
 }
 
+
+// ══════════════════════════════════════════
+// COMPOSIO — рендер карточек и авторизации
+// ══════════════════════════════════════════
+const COMPOSIO_ICONS = {
+  github:'🐙', gmail:'📧', notion:'📝', slack:'💬',
+  googlecalendar:'📅', googledrive:'☁️', trello:'📋',
+  twitter:'🐦', discord:'🎮', jira:'🔵', linear:'⚡',
+  youtube:'▶️', shopify:'🛒', hubspot:'🟠', airtable:'🗃️',
+  dropbox:'📦', figma:'🎨', stripe:'💳', zoom:'📹', asana:'🎯'
+};
+
+function renderComposioCards(cards) {
+  let grid = '';
+  cards.forEach(card => {
+    const icon = COMPOSIO_ICONS[card.slug] || '🔗';
+    const border = card.connected ? '#10b981' : '#3730a3';
+    const statusColor = card.connected ? '#10b981' : '#6b7280';
+    const statusText = card.connected ? '✅ Подключено' : 'Нажми — подключить';
+    const dot = card.connected
+      ? '<div style="position:absolute;top:5px;right:5px;width:7px;height:7px;background:#10b981;border-radius:50%;"></div>'
+      : '';
+
+    grid += `
+      <div onclick="composioAuthFromChat('${card.slug}')"
+        style="position:relative;background:#0f0f1a;border:1px solid ${border};
+        border-radius:10px;padding:12px 8px;text-align:center;cursor:pointer;
+        transition:transform .2s;"
+        onmouseover="this.style.transform='translateY(-2px)'"
+        onmouseout="this.style.transform='translateY(0)'">
+        ${dot}
+        <div style="font-size:22px;margin-bottom:5px;">${icon}</div>
+        <div style="font-size:11px;font-weight:600;color:#e2e8f0;">${card.name}</div>
+        <div style="font-size:10px;margin-top:3px;color:${statusColor};">${statusText}</div>
+      </div>`;
+  });
+
+  return `
+    <div style="font-weight:600;color:#a5b4fc;margin-bottom:10px;">
+      🧩 Интеграции Composio — нажми для подключения:
+    </div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(120px,1fr));gap:8px;">
+      ${grid}
+    </div>
+    <div style="margin-top:10px;font-size:11px;color:#6b7280;">
+      💡 После подключения используй <code>/composio accounts</code> для проверки
+    </div>`;
+}
+
+function renderComposioAuth(toolkit, url) {
+  const icon = COMPOSIO_ICONS[toolkit] || '🔗';
+  return `
+    <div style="background:#1a1a2e;border:1px solid #3730a3;border-radius:12px;padding:16px;">
+      <div style="font-size:28px;margin-bottom:8px;">${icon}</div>
+      <div style="font-size:14px;font-weight:700;color:#a5b4fc;margin-bottom:6px;">
+        Подключить ${toolkit.toUpperCase()}
+      </div>
+      <div style="font-size:12px;color:#9ca3af;margin-bottom:14px;">
+        Нажми кнопку ниже — откроется страница авторизации.<br>
+        После входа вернись и введи <code>/composio accounts</code>
+      </div>
+      <a href="${url}" target="_blank"
+        style="display:inline-block;background:linear-gradient(135deg,#4f46e5,#7c3aed);
+        color:#fff;padding:10px 20px;border-radius:9px;font-size:13px;
+        font-weight:600;text-decoration:none;">
+        🔐 Войти в ${toolkit.toUpperCase()} →
+      </a>
+      <div style="margin-top:10px;font-size:11px;color:#6b7280;">
+        После: <code>/composio tools ${toolkit}</code> или
+        <code>/composio do покажи данные из ${toolkit}</code>
+      </div>
+    </div>`;
+}
+
+function composioAuthFromChat(toolkit) {
+  hideWelcome();
+  appendMessage('user', `/composio auth ${toolkit}`);
+  showTyping();
+  fetch('/command', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({command: `/composio auth ${toolkit}`})
+  })
+  .then(r => r.json())
+  .then(data => {
+    removeTyping();
+    appendMessage('ai', data.result || data.error || 'Ошибка');
+  })
+  .catch(() => {
+    removeTyping();
+    appendMessage('ai', '❌ Ошибка соединения');
+  });
+}
 // ========== ИНИЦИАЛИЗАЦИЯ ==========
 input.focus();
