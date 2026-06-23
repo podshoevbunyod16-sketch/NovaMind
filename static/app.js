@@ -104,14 +104,24 @@ function attachImage() {
   el.onchange = (e) => {
     const file = e.target.files[0];
     if (!file) return;
-    
-    // Показываем сообщение в чате
-    appendMessage('user', '📷 Анализ изображения: ' + file.name);
-    
-    // Загружаем на сервер
+
+    // Показываем диалог с описанием
+    const userDesc = prompt(
+      '📷 Что сделать с этим изображением?\n\nОставь пустым — AI сам опишет что видит',
+      ''
+    );
+
+    // Если нажал Отмена
+    if (userDesc === null) return;
+
+    const desc = userDesc.trim() || 'Подробно опиши что изображено на картинке. Опиши объекты, цвета, текст если есть, настроение и детали.';
+
+    appendMessage('user', '📷 ' + file.name + (userDesc ? '\n💬 ' + userDesc : ''));
+
     const formData = new FormData();
     formData.append('image', file);
-    
+    formData.append('description', desc);
+
     showTyping();
     fetch('/upload_image', {
       method: 'POST',
@@ -121,17 +131,16 @@ function attachImage() {
     .then(data => {
       removeTyping();
       if (data.error) {
-        appendMessage('ai', 'Ошибка: ' + data.error);
+        appendMessage('ai', '❌ Ошибка: ' + data.error);
       } else if (data.result) {
         appendMessage('ai', data.result);
       } else {
-        // Если сервер не анализирует — просто показываем путь
-        appendMessage('ai', '✅ Изображение загружено: ' + (data.filepath || data.filename || file.name));
+        appendMessage('ai', '⚠️ Изображение сохранено, но анализ не вернул результат.');
       }
     })
     .catch(() => {
       removeTyping();
-      appendMessage('ai', 'Ошибка загрузки изображения');
+      appendMessage('ai', '❌ Ошибка загрузки изображения');
     });
   };
   el.click();
@@ -141,16 +150,28 @@ function attachDocument() {
   document.getElementById('attachDropdown').classList.remove('open');
   const el = document.createElement('input');
   el.type = 'file';
-  el.accept = '.txt,.pdf,.doc,.docx,.png,.jpg,.jpeg,.json,.csv,.py,.js,.html,.css';
+  el.accept = '.txt,.json,.csv,.py,.js,.html,.css,.md,.xml,.yaml,.yml,.log,.ini,.cfg';
   el.onchange = (e) => {
     const file = e.target.files[0];
     if (!file) return;
-    
-    appendMessage('user', '📁 Файл: ' + file.name);
-    
+
+    // Показываем диалог с описанием
+    const userDesc = prompt(
+      '📁 Что сделать с файлом "' + file.name + '"?\n\nПример: найди ошибки, объясни код, сделай резюме\nОставь пустым — AI сам решит что делать',
+      ''
+    );
+
+    // Если нажал Отмена
+    if (userDesc === null) return;
+
+    const desc = userDesc.trim() || '';
+
+    appendMessage('user', '📁 ' + file.name + (userDesc ? '\n💬 ' + userDesc : ''));
+
     const formData = new FormData();
     formData.append('file', file);
-    
+    formData.append('description', desc);
+
     showTyping();
     fetch('/upload_file', {
       method: 'POST',
@@ -160,19 +181,20 @@ function attachDocument() {
     .then(data => {
       removeTyping();
       if (data.error) {
-        appendMessage('ai', 'Ошибка: ' + data.error);
+        appendMessage('ai', '❌ Ошибка: ' + data.error);
+      } else if (data.result) {
+        appendMessage('ai', data.result);
       } else {
-        appendMessage('ai', '✅ Файл загружен: ' + (data.filepath || data.filename || file.name) + '\n\n' + (data.preview || ''));
+        appendMessage('ai', '⚠️ Файл сохранён, но анализ не вернул результат.');
       }
     })
     .catch(() => {
       removeTyping();
-      appendMessage('ai', 'Ошибка загрузки файла');
+      appendMessage('ai', '❌ Ошибка загрузки файла');
     });
   };
   el.click();
 }
-
 
 
 // ========== РЕЖИМЫ КОМАНД ==========
