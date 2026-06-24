@@ -947,37 +947,7 @@ def upload_image():
 
     user_desc = request.form.get('description', '').strip()
     if not user_desc:
-        user_desc = '''Ты — эксперт по визуальному распознаванию. Рассмотри изображение с максимальным увеличением деталей. Твоя задача — дать строго фактическое, объективное описание того, что изображено. Никаких оценок красоты, композиции или эмоций — только идентификация сущностей.
-
-Выдай ответ в такой структуре:
-
-1. КРАТКИЙ ИТОГ (одно предложение): что это за сцена/объект в целом.
-
-2. ДЕТАЛЬНЫЙ ПЕРЕЧЕНЬ ОБЪЕКТОВ:
- - Люди (пол, возраст, одежда, поза, действия, количество).
- - Животные, растения, транспорт, строения, мебель, техника, продукты.
- - Надписи: распознай весь видимый текст (названия, цифры, кнопки) — даже если мелко, укажи предполагаемый вариант.
- - Материалы и фактуры (дерево, стекло, бетон, ткань).
- - Окружающая обстановка (помещение, улица, природа, погода, время суток).
-
-3. КЛАССИФИКАЦИЯ:
- - Тип изображения: фотография, рисунок, схема, скриншот, коллаж, ИИ‑генерация.
- - Если это фото — определи жанр (портрет, пейзаж, натюрморт, репортаж, макросъёмка).
- - Если это предмет — назови его точное имя (модель, марка, вид), если возможно.
-
-4. РАСШИФРОВКА КОНТЕКСТА (что происходит):
- - Действия людей или движущихся объектов.
- - Взаимодействие между объектами.
- - Назначение сцены (например: «производственный цех», «кухня ресторана», «парковка»).
-
-5. ДОПОЛНИТЕЛЬНЫЕ ДЕТАЛИ (только факты):
- - Цветовая гамма основных элементов.
- - Заметные дефекты (царапины, блики, засветы, шумы) — если есть.
- - Скрытые детали на заднем плане (часто ИИ их пропускает — укажи явно).
-
-**Важно:** Если какой‑то объект не удаётся однозначно распознать, напиши «неопределённо» и предложи 2–3 наиболее вероятных варианта.
-
-Финал: в конце одной строкой дай **максимально сжатый пересказ** (в стиле тега alt для слабовидящих) — чтобы человек, не видящий картинку, понял суть за 5 секунд.'''
+        user_desc = 'Подробно опиши что изображено на картинке. Опиши объекты, цвета, текст если есть, настроение и все детали.'
 
     upload_dir = os.path.join(os.path.dirname(__file__), "uploads")
     os.makedirs(upload_dir, exist_ok=True)
@@ -1001,9 +971,9 @@ def upload_image():
 
         data_url = f"data:{mime_type};base64,{image_data}"
 
-        groq_key = get_groq_key()
+        groq_key = os.getenv("GROQ_API_KEY", "")
         if not groq_key:
-            return jsonify({'error': 'Нет доступных Groq API ключей'})
+            return jsonify({'error': 'GROQ_API_KEY не задан в .env'})
 
         headers = {
             "Authorization": f"Bearer {groq_key}",
@@ -1022,16 +992,14 @@ def upload_image():
             ],
             "max_tokens": 1500
         }
-        data_resp, error = groq_request_with_rotation(
+        resp = requests.post(
             "https://api.groq.com/openai/v1/chat/completions",
-            payload,
-            headers,
+            headers=headers,
+            json=payload,
             timeout=30
         )
-        if error:
-            return jsonify({'error': f'Ошибка анализа изображения: {error}'})
-
-        description = data_resp["choices"][0]["message"]["content"]
+        resp.raise_for_status()
+        description = resp.json()["choices"][0]["message"]["content"]
 
         contents.append({"role": "user", "content": f"[Изображение: {filename}] {user_desc}"})
         contents.append({"role": "assistant", "content": description})
@@ -1117,35 +1085,41 @@ def upload_file():
 Отвечай на русском языке. Используй Markdown форматирование."""
 
     groq_error = None
-    provider = PROVIDERS["groq"]
-    payload = {
-        "model": "llama-3.3-70b-versatile",
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": analysis_prompt}
-        ],
-        "temperature": 0.3,
-        "max_tokens": 3000,
-    }
-    data_resp, error = groq_request_with_rotation(
-        provider["url"], payload, provider["headers"].copy(), timeout=60
-    )
-    if error:
-        groq_error = error
-        print(f"Groq upload_file error: {error}")
-    else:
-        reply = data_resp["choices"][0]["message"]["content"]
+    try:
+        provider = PROVIDERS["groq"]
+        payload = {
+            "model": "llama-3.3-70b-versatile",
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": analysis_prompt}
+            ],
+            "temperature": 0.3,
+            "max_tokens": 3000,
+        }
+        resp = requests.post(
+            provider["url"],
+            json=payload,
+            headers=provider["headers"],
+            timeout=60
+        )
+        resp.raise_for_status()
+        reply = resp.json()["choices"][0]["message"]["content"]
+
         contents.append({"role": "user", "content": f"[Файл: {filename}] {user_desc}"})
         contents.append({"role": "assistant", "content": reply})
         if len(contents) > 20:
             contents = contents[-20:]
+
         return jsonify({
             'result': f'''📁 **Анализ файла {filename} (Groq):**
 
 {reply}'''
         })
 
-    # Fallback на Cerebras
+    except Exception as e1:
+        groq_error = str(e1)
+        print(f"Groq upload_file error: {e1}")
+
     try:
         cerebras_key = os.getenv("CEREBRAS_API_KEY", "")
         if not cerebras_key:
