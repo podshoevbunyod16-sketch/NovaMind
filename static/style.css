@@ -402,3 +402,18 @@ button, input, select, textarea {
   -ms-user-select: text;
   user-select: text;
 }
+.logo-img {
+  height: 60px;
+  width: auto;
+  display: block;
+  object-fit: contain; /* сохраняет пропорции */
+}
+.welcome-logo {
+  mask-image: linear-gradient(to bottom, black, white);
+  -webkit-mask-image: linear-gradient(to bottom, black, white);
+  width: 140px;          /* или нужный размер */
+  height: auto;
+  display: block;
+  margin: 0 auto 20px;   /* центрирование и отступ снизу */
+  border-radius: 12px;   /* если нужны скруглённые углы */
+}

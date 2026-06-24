@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
-  <title>AI Ассистент NovaMind</title>
+  <title>AI Ассистент Khirad</title>
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
@@ -17,11 +17,9 @@
 
     <div class="sidebar-header">
       <div class="logo">
-        <div class="logo-icon">✦</div>
-        <div>
-          <div class="logo-text">NovaMind</div>
-          <div class="logo-sub">ai</div>
-        </div>
+        <img src="/static/images/image.png" alt="NovaMind" class="logo-img">
+          <div class="logo-text">Khirad</div>
+          <div class="logo-sub">Assistant</div>
       </div>
       <button class="btn-new-chat" onclick="newChat()">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
@@ -30,7 +28,6 @@
     </div>
 
     <div class="sidebar-body">
-
       <div class="nav-label">Основные</div>
 
       <div class="nav-item active" onclick="setActive(this, 'chat')">
@@ -158,8 +155,8 @@
     <!-- Chat -->
     <div class="chat-container" id="chatContainer">
       <div class="welcome" id="welcomeScreen">
-        <div class="welcome-orb">✦</div>
-        <h1>Привет! Я <span>NovaMind</span></h1>
+        <img src="/static/images/image.png" alt="Khirad" class="welcome-logo">
+        <h1>Привет! Я <span>Khirad</span></h1>
         <p>Ваш интеллектуальный AI-ассистент. Задайте любой вопрос или используйте инструменты из боковой панели.</p>
         <div class="suggestions">
           <div class="suggestion-card" onclick="activateMode({prefix: '/services weather ', placeholder: 'Введите город для погоды...'})">
@@ -246,7 +243,7 @@
         </div>
       </div>
 
-      <div class="input-footer">NovaMind может ошибаться. Проверяйте важную информацию.</div>
+      <div class="input-footer">Khirad может ошибаться. Проверяйте важную информацию.</div>
     </div>
 
   </main>
