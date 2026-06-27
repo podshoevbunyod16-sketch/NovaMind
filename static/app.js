@@ -12,6 +12,7 @@ let autoSearchOn   = false;  // ← АВТО ПОИСК
 let currentMode    = 'chat';
 let msgCount       = 0;
 let chatHistory    = JSON.parse(localStorage.getItem('nova_history') || '[]');
+let serverHistory  = []; // Полная история сообщений с сервера (для авторизованных пользователей)
 let selectedModelName = 'Nova Ultra';
 let inputMode      = null;
 // ══════════════════════════════════════════
@@ -59,6 +60,178 @@ let inputMode      = null;
     }
   });
 })();
+
+// ========== ЗАГРУЗКА ИСТОРИИ С СЕРВЕРА ==========
+async function loadServerHistory() {
+  try {
+    const resp = await fetch('/api/history');
+    const data = await resp.json();
+    if (data.history && Array.isArray(data.history)) {
+      serverHistory = data.history;
+      // Отрисовываем историю в чате
+      const chatArea = document.getElementById('chatArea');
+      chatArea.innerHTML = '';
+      for (const msg of serverHistory) {
+        if (msg.role === 'user') {
+          appendMessage('user', msg.content);
+        } else if (msg.role === 'assistant') {
+          appendMessage('ai', msg.content);
+        }
+      }
+      scrollToBottom();
+      // Обновляем историю в сайдбаре
+      updateSidebarHistory(serverHistory);
+    }
+  } catch (e) {
+    console.log('Server history load error:', e);
+  }
+}
+
+
+// ========== ОБНОВЛЕНИЕ ИСТОРИИ В САЙДБАРЕ ==========
+function updateSidebarHistory(history) {
+  console.log('[Sidebar] Updating with', history ? history.length : 0, 'messages');
+  const container = document.getElementById('historyContainer');
+  console.log('[Sidebar] Container found:', !!container);
+
+  if (!container) {
+    console.error('[Sidebar] historyContainer not found!');
+    return;
+  }
+
+  container.innerHTML = '';
+
+  // Добавляем заголовок
+  const header = document.createElement('div');
+  header.className = 'history-section-header';
+  header.textContent = 'История чатов';
+  container.appendChild(header);
+
+  if (!history || history.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'history-empty';
+    empty.textContent = 'Нет истории';
+    container.appendChild(empty);
+    return;
+  }
+
+  // Группируем сообщения по диалогам
+  let dialogs = [];
+  let currentDialog = null;
+
+  for (let i = 0; i < history.length; i++) {
+    const msg = history[i];
+    if (msg.role === 'user') {
+      if (currentDialog) dialogs.push(currentDialog);
+      currentDialog = {
+        title: msg.content.substring(0, 30) + (msg.content.length > 30 ? '...' : ''),
+        messages: [msg]
+      };
+    } else if (currentDialog) {
+      currentDialog.messages.push(msg);
+    }
+  }
+  if (currentDialog) dialogs.push(currentDialog);
+
+  // Последние 10 диалогов
+  const recentDialogs = dialogs.slice(-10).reverse();
+
+  for (const dialog of recentDialogs) {
+    const item = document.createElement('div');
+    item.className = 'history-item';
+
+    const textDiv = document.createElement('div');
+    textDiv.className = 'history-item-text';
+    textDiv.textContent = dialog.title;
+
+    const actionsDiv = document.createElement('div');
+    actionsDiv.className = 'history-item-actions';
+
+    const loadBtn = document.createElement('button');
+    loadBtn.textContent = '↩';
+    loadBtn.title = 'Загрузить';
+    loadBtn.onclick = (e) => {
+      e.stopPropagation();
+      loadDialogFromHistory(dialog.messages);
+    };
+
+    const delBtn = document.createElement('button');
+    delBtn.textContent = '×';
+    delBtn.title = 'Удалить';
+    delBtn.onclick = (e) => {
+      e.stopPropagation();
+      deleteDialog(dialog.title);
+    };
+
+    actionsDiv.appendChild(loadBtn);
+    actionsDiv.appendChild(delBtn);
+
+    item.appendChild(textDiv);
+    item.appendChild(actionsDiv);
+
+    item.onclick = () => loadDialogFromHistory(dialog.messages);
+    container.appendChild(item);
+  }
+
+  console.log('[Sidebar] Added', recentDialogs.length, 'dialogs');
+}
+
+function loadDialogFromHistory(messages) {
+  const chatArea = document.getElementById('chatArea');
+  chatArea.innerHTML = '';
+  for (const msg of messages) {
+    appendMessage(msg.role === 'user' ? 'user' : 'ai', msg.content);
+  }
+  scrollToBottom();
+  closeSidebar();
+}
+
+function deleteDialog(title) {
+  // Удаляем диалог из истории (по заголовку)
+  if (!serverHistory || serverHistory.length === 0) return;
+
+  // Находим индекс первого сообщения с этим заголовком
+  let startIdx = -1;
+  for (let i = 0; i < serverHistory.length; i++) {
+    if (serverHistory[i].role === 'user' && 
+        serverHistory[i].content.substring(0, 35) === title.substring(0, 35)) {
+      startIdx = i;
+      break;
+    }
+  }
+
+  if (startIdx === -1) return;
+
+  // Находим конец диалога (следующее сообщение user или конец массива)
+  let endIdx = serverHistory.length;
+  for (let i = startIdx + 1; i < serverHistory.length; i++) {
+    if (serverHistory[i].role === 'user') {
+      endIdx = i;
+      break;
+    }
+  }
+
+  // Удаляем диалог
+  serverHistory.splice(startIdx, endIdx - startIdx);
+  setServerHistory(serverHistory);
+  updateSidebarHistory(serverHistory);
+}
+
+function setServerHistory(history) {
+  serverHistory = history;
+  // Сохраняем на сервере
+  fetch('/api/history/save', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({history: history})
+  }).catch(() => {});
+}
+
+// Загружаем историю при старте
+setTimeout(() => {
+  loadServerHistory();
+}, 500);
+
 // ========== DOM-ЭЛЕМЕНТЫ ==========
 const input         = document.getElementById('chat-input');
 const sendBtn       = document.getElementById('sendBtn');
@@ -101,6 +274,7 @@ function logout() {
   localStorage.removeItem('nova_is_admin');
   localStorage.removeItem('nova_google_login');
   localStorage.removeItem('nova_user_avatar');
+  serverHistory = [];
   window.location.href = '/';
 }
 
@@ -196,6 +370,7 @@ function attachImage() {
       } else {
         appendMessage('ai', '⚠️ Изображение сохранено, но анализ не вернул результат.');
       }
+      saveServerHistory(); // Сохраняем историю на сервере
     })
     .catch(() => {
       removeTyping();
@@ -246,6 +421,7 @@ function attachDocument() {
       } else {
         appendMessage('ai', '⚠️ Файл сохранён, но анализ не вернул результат.');
       }
+      saveServerHistory(); // Сохраняем историю на сервере
     })
     .catch(() => {
       removeTyping();
@@ -303,6 +479,7 @@ async function sendMessage(text) {
         appendMessage('ai', 'Ошибка: ' + data.error);
       } else {
         appendMessage('ai', data.result || data.reply || 'Готово');
+        saveServerHistory(); // Сохраняем историю на сервере
       }
     } catch (e) {
       removeTyping();
@@ -343,6 +520,7 @@ async function sendMessage(text) {
         await new Promise(r => setTimeout(r, 800));
         removeTyping();
         appendMessage('ai', data.reply);
+        saveServerHistory(); // Сохраняем историю на сервере
         return;
       }
       // Если поиск НЕ нужен — продолжаем обычную отправку (ниже)
@@ -390,6 +568,7 @@ async function sendMessage(text) {
       appendMessage('ai', 'Ошибка: ' + data.error);
     } else {
       appendMessage('ai', data.reply);
+      saveServerHistory(); // Сохраняем историю на сервере
     }
   } catch (e) {
     removeTyping();
@@ -595,13 +774,41 @@ function newChat() {
   welcomeScreen.style.display = 'flex';
   msgCount = 0;
 }
-function clearChat() { newChat(); }
+function clearChat() { 
+  newChat(); 
+  // Очищаем историю на сервере
+  fetch('/api/history/clear', {method: 'DELETE'}).catch(() => {});
+}
 function shareChat() {
   navigator.clipboard.writeText(window.location.href).then(() => showNotification('Ссылка скопирована', 'success'));
 }
 function scrollToBottom() {
   setTimeout(() => chatContainer.scrollTo({ top: chatContainer.scrollHeight, behavior: 'smooth' }), 50);
 }
+async function saveServerHistory() {
+  try {
+    const messages = [];
+    const bubbles = document.querySelectorAll('.msg-bubble');
+    let currentRole = null;
+    let currentContent = '';
+    for (const bubble of bubbles) {
+      const isUser = bubble.closest('.message')?.classList.contains('user');
+      const role = isUser ? 'user' : 'assistant';
+      const text = bubble.textContent || '';
+      if (text.trim()) {
+        messages.push({role: role, content: text.trim()});
+      }
+    }
+    await fetch('/api/history/save', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({history: messages})
+    });
+  } catch (e) {
+    console.log('Save history error:', e);
+  }
+}
+
 function addToHistory(text) {
   if (chatHistory.includes(text)) return;
   chatHistory.unshift(text);
@@ -711,6 +918,7 @@ function composioAuthFromChat(toolkit) {
   .then(data => {
     removeTyping();
     appendMessage('ai', data.result || data.error || 'Ошибка');
+    saveServerHistory(); // Сохраняем историю на сервере
   })
   .catch(() => {
     removeTyping();

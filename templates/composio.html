@@ -73,7 +73,6 @@
     .tab-content{display:none;}
     .tab-content.active{display:block;}
 
-    /* INTEGRATIONS */
     .int-grid{
       display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:10px;
     }
@@ -99,7 +98,6 @@
       width:7px;height:7px;background:#f59e0b;border-radius:50%;
     }
 
-    /* CONNECTED ACCOUNTS */
     .acc-list{display:flex;flex-direction:column;gap:8px;}
     .acc-item{
       background:#0f0f1a;border:1px solid #2d2b55;border-radius:9px;
@@ -115,7 +113,6 @@
     }
     .acc-badge.inactive{background:#2d0000;color:#f87171;border-color:#7f1d1d;}
 
-    /* TOOLS */
     .tools-list{display:flex;flex-direction:column;gap:7px;}
     .tool-item{
       background:#0f0f1a;border:1px solid #2d2b55;border-radius:9px;
@@ -126,7 +123,6 @@
     .tool-name{font-size:12px;font-weight:600;color:#e2e8f0;}
     .tool-desc{font-size:10px;color:#6b7280;margin-top:2px;}
 
-    /* CHAT */
     .model-select{
       background:#0f0f1a;border:1px solid #3730a3;color:#e2e8f0;
       padding:8px 10px;border-radius:9px;font-size:12px;
@@ -186,7 +182,6 @@
       padding:2px 7px;border-radius:10px;margin-left:6px;
     }
 
-    /* MODAL */
     .modal-overlay{
       display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);
       z-index:100;align-items:center;justify-content:center;
@@ -421,14 +416,14 @@ async function loadIntegrations() {
 
   await loadConnectedAccounts(true);
 
-  // ИСПРАВЛЕНИЕ: toolkit может быть объектом
   const connectedToolkits = new Set(
     connectedAccounts
       .filter(a => a.status === 'ACTIVE')
       .map(a => {
         const t = a.toolkit || a.app_name || '';
-        return (typeof t === 'string' ? t : t.slug || '').toLowerCase();
+        return (typeof t === 'string' ? t : (t.slug || '')).toLowerCase();
       })
+      .filter(Boolean)
   );
 
   grid.innerHTML = '';
@@ -449,6 +444,7 @@ async function loadIntegrations() {
     grid.appendChild(card);
   });
 }
+
 // ══════════════════════════════════
 // CONNECTED ACCOUNTS
 // ══════════════════════════════════
@@ -472,7 +468,6 @@ async function loadConnectedAccounts(silent = false) {
   }
 }
 
-
 function renderAccounts(items) {
   const el = document.getElementById('accList');
   if (!items.length) {
@@ -482,12 +477,11 @@ function renderAccounts(items) {
   el.innerHTML = '';
   el.className = 'acc-list';
   items.forEach(acc => {
-    // ИСПРАВЛЕНИЕ: toolkit приходит как объект {slug: "github"}
     const toolkitRaw = acc.toolkit || acc.appName || acc.app_name || {};
-    const toolkit = typeof toolkitRaw === 'string' 
-      ? toolkitRaw 
+    const toolkit = typeof toolkitRaw === 'string'
+      ? toolkitRaw
       : (toolkitRaw.slug || toolkitRaw.name || '?');
-    
+
     const info = KNOWN_INTEGRATIONS.find(i =>
       i.id.toLowerCase() === toolkit.toLowerCase()
     );
@@ -508,7 +502,6 @@ function renderAccounts(items) {
   });
 }
 
-
 // ══════════════════════════════════
 // TOOLS
 // ══════════════════════════════════
@@ -519,7 +512,9 @@ async function loadTools() {
       '<div class="empty"><div>🛠️</div>Сначала подключи интеграцию</div>';
     return;
   }
-  const toolkit = connectedAccounts[0].toolkit || connectedAccounts[0].app_name || '';
+  // ИСПРАВЛЕНО: toolkit может быть объектом — извлекаем slug
+  const toolkitRaw = connectedAccounts[0].toolkit || connectedAccounts[0].app_name || '';
+  const toolkit = typeof toolkitRaw === 'string' ? toolkitRaw : (toolkitRaw.slug || '');
   const accId = connectedAccounts[0].id || '';
   loadToolsFor(toolkit, accId);
 }
@@ -531,8 +526,14 @@ async function loadToolsFor(toolkit, accId) {
     '<div class="empty"><div class="loader"></div></div>';
 
   try {
-    const r = await fetch(`/api/composio/actions?toolkit=${toolkit}`);
+    // ИСПРАВЛЕНО: encodeURIComponent для безопасности
+    const r = await fetch(`/api/composio/actions?toolkit=${encodeURIComponent(toolkit)}`);
     const d = await r.json();
+    if (d.error) {
+      document.getElementById('toolsList').innerHTML =
+        `<div class="empty"><div>❌</div>${d.error}</div>`;
+      return;
+    }
     const items = d.items || d.actions || d.data || [];
     allTools = items.map(a => ({...a, connected_account_id: accId}));
     document.getElementById('cnt-tools').textContent = allTools.length;
@@ -619,7 +620,6 @@ async function doConnectAccount() {
       document.getElementById('modalConnectBtn').onclick = () => {
         closeModal(); loadIntegrations(); loadConnectedAccounts();
       };
-      // Автооткрытие
       window.open(d.redirect_url, '_blank');
     } else {
       alert('Ошибка: ' + (d.error || JSON.stringify(d)));
@@ -661,20 +661,21 @@ async function sendChat() {
   addMsg('user', text);
   input.value = '';
 
-  // Loader
   const box = document.getElementById('chatBox');
   const ldr = document.createElement('div');
   ldr.id = 'ldr'; ldr.className = 'msg ai';
   ldr.innerHTML = '<div class="msg-av">🤖</div><div class="msg-bub"><div class="loader"></div></div>';
   box.appendChild(ldr); box.scrollTop = box.scrollHeight;
 
-  // Формируем контекст инструментов
   const toolsCtx = allTools.length
     ? allTools.slice(0,20).map(t=>`- ${t.name||t.slug}: ${(t.description||'').slice(0,60)}`).join('\n')
     : 'Инструменты не загружены — попроси пользователя открыть вкладку "Инструменты"';
 
   const connCtx = connectedAccounts.length
-    ? connectedAccounts.map(a=>`${a.toolkit||a.app_name} (id:${a.id})`).join(', ')
+    ? connectedAccounts.map(a=>{
+        const t = a.toolkit || a.app_name || '?';
+        return (typeof t === 'string' ? t : (t.slug || '?')) + ' (id:' + (a.id||'?') + ')';
+      }).join(', ')
     : 'нет';
 
   try {
@@ -696,17 +697,14 @@ ${toolsCtx}
     document.getElementById('ldr')?.remove();
 
     if (d.reply) {
-      // Ищем TOOL:... в ответе
       const toolMatch = d.reply.match(/TOOL:([A-Z0-9_]+)/);
       let toolName = null, toolResult = null;
 
       if (toolMatch) {
         toolName = toolMatch[1];
-        // Ищем connected_account для этого инструмента
         const tool = allTools.find(t => (t.name||t.slug||'').toUpperCase() === toolName);
         const accId = tool?.connected_account_id || connectedAccounts[0]?.id || '';
 
-        // Реально выполняем!
         try {
           const execR = await fetch('/api/composio/execute', {
             method:'POST',

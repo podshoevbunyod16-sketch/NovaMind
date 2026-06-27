@@ -417,3 +417,67 @@ button, input, select, textarea {
   margin: 0 auto 20px;   /* центрирование и отступ снизу */
   border-radius: 12px;   /* если нужны скруглённые углы */
 }
+/* ========== ИСТОРИЯ В САЙДБАРЕ ========== */
+#historyContainer {
+  padding: 10px 0;
+  max-height: 300px;
+  overflow-y: auto;
+}
+
+.history-empty {
+  color: #888;
+  text-align: center;
+  padding: 20px;
+  font-size: 13px;
+}
+
+.history-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 12px;
+  margin: 4px 8px;
+  background: rgba(255,255,255,0.05);
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background 0.2s;
+  font-size: 13px;
+}
+
+.history-item:hover {
+  background: rgba(255,255,255,0.1);
+}
+
+.history-item-text {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #e0e0e0;
+}
+
+.history-item-actions {
+  display: flex;
+  gap: 4px;
+  opacity: 0;
+  transition: opacity 0.2s;
+}
+
+.history-item:hover .history-item-actions {
+  opacity: 1;
+}
+
+.history-item-actions button {
+  background: none;
+  border: none;
+  color: #888;
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 14px;
+}
+
+.history-item-actions button:hover {
+  color: #fff;
+  background: rgba(255,255,255,0.1);
+}

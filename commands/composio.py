@@ -116,39 +116,66 @@ def get_active_accounts():
         return []
 
 
+def get_all_accounts():
+    """Все аккаунты включая неактивные"""
+    try:
+        resp = requests.get(f'{BASE}/v3.1/connected_accounts', headers=headers(), timeout=10)
+        resp.raise_for_status()
+        return resp.json().get('items', [])
+    except:
+        return []
+
+
+def delete_account(connected_account_id):
+    """Удаляет подключённый аккаунт по ID"""
+    try:
+        resp = requests.delete(
+            f'{BASE}/v3.1/connected_accounts/{connected_account_id}',
+            headers=headers(),
+            timeout=10
+        )
+        if resp.status_code in (200, 204):
+            return {'success': True, 'message': 'Аккаунт удалён'}
+        return {'success': False, 'error': resp.text[:200], 'status': resp.status_code}
+    except Exception as e:
+        return {'success': False, 'error': str(e)}
+
+
 def get_toolkit_slug(account):
     t = account.get('toolkit', {})
     return t.get('slug', '') if isinstance(t, dict) else str(t)
 
 
-def check_slug_exists(slug):
-    """Проверяем slug — 404 значит не существует"""
+def check_slug_exists(slug, connected_account_id):
+    """ИСПРАВЛЕНО: Проверяем slug с connected_account_id"""
     try:
         resp = requests.post(
             f'{BASE}/v3.1/tools/execute/{slug}',
             headers=headers(),
-            json={'arguments': {}, 'user_id': 'novauser'},
+            json={
+                'arguments': {},
+                'user_id': 'novauser',
+                'connected_account_id': connected_account_id
+            },
             timeout=10
         )
-        return resp.status_code != 404
+        return resp.status_code in (200, 201, 202, 400, 422)
     except:
         return False
 
 
-def find_tool_slug(task, toolkit=''):
-    """
-    3 уровня поиска:
-    1. Словарь известных slugов
-    2. Groq угадывает + проверка
-    3. Возврат Groq slug без проверки
-    """
+def find_tool_slug(task, connected_account_id='', toolkit=''):
     task_lower = task.lower()
 
     # Уровень 1: словарь известных slugов
     for key, slug in KNOWN_SLUGS.items():
         if key in task_lower:
             print(f"[Composio] Словарь: {slug}")
-            return slug
+            if connected_account_id and check_slug_exists(slug, connected_account_id):
+                return slug
+            elif not connected_account_id:
+                return slug
+            print(f"[Composio] ⚠️ Slug из словаря не прошёл проверку: {slug}")
 
     # Уровень 2: Groq угадывает slug
     accounts = get_active_accounts()
@@ -189,29 +216,22 @@ def find_tool_slug(task, toolkit=''):
     if result:
         slug = result.strip().upper().split()[0]
         print(f"[Composio] Groq предлагает: {slug}")
-
-        # Проверяем существует ли
-        if check_slug_exists(slug):
+        if connected_account_id and check_slug_exists(slug, connected_account_id):
             print(f"[Composio] ✅ Slug подтверждён")
             return slug
         else:
-            print(f"[Composio] ⚠️ Slug не найден, используем как есть")
-            return slug  # всё равно пробуем — может параметры не те
-
+            print(f"[Composio] ⚠️ Slug не проверен, используем как есть")
+            return slug
     return None
 
 
-def execute_tool(tool_name, params, user_id='novauser'):
-    """
-    ✅ ГЛАВНОЕ ИСПРАВЛЕНИЕ: НЕ передаём connected_account_id!
-    Composio сам выбирает правильный аккаунт по user_id
-    """
+def execute_tool(tool_name, params, connected_account_id, user_id='novauser'):
     try:
         payload = {
             'arguments': params if params else {},
-            'user_id': user_id
+            'user_id': user_id,
+            'connected_account_id': connected_account_id
         }
-
         resp = requests.post(
             f'{BASE}/v3.1/tools/execute/{tool_name}',
             headers=headers(),
@@ -219,7 +239,6 @@ def execute_tool(tool_name, params, user_id='novauser'):
             timeout=30
         )
         print(f'[Composio] execute {tool_name} → {resp.status_code}')
-
         if resp.ok:
             return resp.json()
         try:
@@ -231,9 +250,7 @@ def execute_tool(tool_name, params, user_id='novauser'):
 
 
 def ai_extract_params(task, tool_name, prev_result=''):
-    """Groq извлекает параметры"""
     prev_str = f"\nРезультат предыдущего шага:\n{prev_result[:500]}" if prev_result else ""
-
     prompt = f"""Задача: {task}
 Инструмент Composio: {tool_name}
 {prev_str}
@@ -253,16 +270,13 @@ def ai_extract_params(task, tool_name, prev_result=''):
 
 Ответь ТОЛЬКО JSON: {{"params": {{"key": "value"}}}}
 Если параметр неизвестен — не включай его."""
-
     result = groq_call([{"role": "user", "content": prompt}], max_tokens=300)
     parsed = parse_json_safe(result)
     return parsed.get('params', {}) if parsed else {}
 
 
 def ai_format_result(task, tool_name, result):
-    """Groq красиво форматирует результат"""
     result_str = json.dumps(result, ensure_ascii=False)[:2000] if isinstance(result, (dict, list)) else str(result)[:2000]
-
     prompt = f"""Задача была: {task}
 Инструмент: {tool_name}
 Результат от API:
@@ -271,7 +285,6 @@ def ai_format_result(task, tool_name, result):
 Напиши красивый понятный ответ на русском языке.
 Покажи реальные данные — имена, ссылки, даты.
 Используй эмодзи и Markdown."""
-
     formatted = groq_call([{"role": "user", "content": prompt}], max_tokens=600, temperature=0.3)
     return formatted or format_raw(result, tool_name)
 
@@ -300,56 +313,42 @@ def format_raw(result, tool_name):
 
 
 def run_agent(task):
-    """Главный агентный цикл"""
     key = COMPOSIO_API_KEY()
     if not key:
         return '❌ Добавь COMPOSIO_API_KEY в .env!'
-
     accounts = get_active_accounts()
     if not accounts:
         return '❌ Нет подключённых аккаунтов!\nПодключи: `/composio auth github`'
-
+    connected_account_id = accounts[0].get('id') or accounts[0].get('nanoid', '')
+    if not connected_account_id:
+        return '❌ Не удалось получить ID подключённого аккаунта'
     log = f'🤖 **NovaMind Agent**\n\n'
     log += f'📋 Задача: _{task}_\n'
-    log += f'🔗 Аккаунтов: {len(accounts)}\n\n'
+    log += f'🔗 Аккаунтов: {len(accounts)}\n'
+    log += f'🆔 Использую аккаунт: `{connected_account_id[:20]}...`\n\n'
     log += '─' * 30 + '\n\n'
-
-    # Шаг 1: Находим инструмент
     log += '**🧠 Выбираю инструмент...**\n'
-    tool_name = find_tool_slug(task)
-
+    tool_name = find_tool_slug(task, connected_account_id)
     if not tool_name:
         return log + '❌ Не смог определить инструмент\n\nПопробуй точнее описать задачу'
-
     log += f'🛠️ Инструмент: **{tool_name}**\n\n'
-
-    # Шаг 2: Извлекаем параметры
     params = ai_extract_params(task, tool_name)
     if params:
         log += f'⚙️ Параметры: `{json.dumps(params, ensure_ascii=False)}`\n\n'
     else:
         log += f'⚙️ Параметры: не нужны\n\n'
-
-    # Шаг 3: Выполняем БЕЗ connected_account_id
     log += f'**🚀 Выполняю...**\n\n'
-    result = execute_tool(tool_name, params)
-
-    # Проверяем ошибку
+    result = execute_tool(tool_name, params, connected_account_id)
     if isinstance(result, dict) and not result.get('successful', True):
         error = result.get('error', '')
         err_str = json.dumps(error, ensure_ascii=False) if isinstance(error, dict) else str(error)
-
-        # Если ошибка параметров — показываем подсказку
         if 'missing' in err_str.lower():
             missing = err_str
             log += f'⚠️ Не хватает параметров: `{missing[:200]}`\n\n'
             log += f'💡 Попробуй уточнить запрос, например:\n'
             log += f'`/composio do создай репозиторий МОЙ-ПРОЕКТ на GitHub`'
             return log
-
         return log + f'❌ Ошибка: `{err_str[:300]}`'
-
-    # Шаг 4: Форматируем результат
     formatted = ai_format_result(task, tool_name, result)
     log += f'**Результат:**\n\n{formatted}'
     return log
@@ -366,6 +365,8 @@ def run(args):
 `/composio accounts` — мои аккаунты
 `/composio tools <toolkit>` — инструменты тулкита
 `/composio auth <toolkit>` — подключить интеграцию
+`/composio delete <ID>` — удалить аккаунт
+`/composio delete-all` — удалить все аккаунты
 `/composio execute <SLUG>` — выполнить напрямую
 `/composio list` — все интеграции
 `/composio search <название>` — поиск интеграции
@@ -391,14 +392,28 @@ def run(args):
             return '❌ Добавь COMPOSIO_API_KEY в .env'
         accounts = get_active_accounts()
         if not accounts:
-            return '📭 Нет аккаунтов\n\nПодключи: `/composio auth github`'
-        result = f'👤 **Подключённые аккаунты** ({len(accounts)}):\n\n'
+            return '📭 Нет активных аккаунтов\n\nПодключи: `/composio auth github`'
+        result = f'👤 **Активные аккаунты** ({len(accounts)}):\n\n'
         for acc in accounts:
             slug = get_toolkit_slug(acc)
             uid = acc.get('user_id', '?')
-            result += f'✅ **{slug.upper()}** (user: `{uid}`)\n'
+            acc_id = acc.get('id') or acc.get('nanoid', '?')
+            status = acc.get('status', 'UNKNOWN')
+            result += f'✅ **{slug.upper()}** (status: `{status}`)\n'
+            result += f'   🆔 ID: `{acc_id}`\n'
+            result += f'   👤 User: `{uid}`\n'
             result += f'   🛠️ `/composio tools {slug}`\n'
-            result += f'   🤖 `/composio do задача через {slug}`\n\n'
+            result += f'   🗑️ `/composio delete {acc_id}`\n\n'
+        # Показываем все аккаунты
+        all_acc = get_all_accounts()
+        inactive = [a for a in all_acc if a.get('status') != 'ACTIVE']
+        if inactive:
+            result += f'\n⚠️ **Неактивные** ({len(inactive)}):\n'
+            for acc in inactive:
+                slug = get_toolkit_slug(acc)
+                acc_id = acc.get('id') or acc.get('nanoid', '?')
+                status = acc.get('status', '?')
+                result += f'• **{slug.upper()}** — `{status}` (ID: `{acc_id}`)\n'
         return result
 
     elif cmd == 'tools':
@@ -412,7 +427,7 @@ def run(args):
             all_items = []
             for page in range(1, 4):
                 resp = requests.get(
-                    f'{BASE}/v3.1/tools?toolkit_slug={toolkit}&limit=50&page={page}',
+                    f'{BASE}/v3.1/tools?toolkit_slug={toolkit}&toolkit_versions=latest&limit=50&page={page}',
                     headers=headers(), timeout=10
                 )
                 if not resp.ok:
@@ -445,10 +460,11 @@ def run(args):
             return '❌ `/composio auth github`'
         toolkit = args[1].lower()
         try:
+            user_id = 'novauser'
             sess_resp = requests.post(
                 f'{BASE}/v3.1/tool_router/session',
                 headers=headers(),
-                json={"user_id": "novauser"},
+                json={"user_id": user_id},
                 timeout=10
             )
             sess_resp.raise_for_status()
@@ -458,7 +474,7 @@ def run(args):
             link_resp = requests.post(
                 f'{BASE}/v3.1/tool_router/session/{session_id}/link',
                 headers=headers(),
-                json={"toolkit": toolkit},
+                json={"toolkit": toolkit, "user_id": user_id},
                 timeout=10
             )
             link_resp.raise_for_status()
@@ -468,6 +484,37 @@ def run(args):
             return f'COMPOSIO_AUTH:{toolkit}:{redirect_url}'
         except Exception as e:
             return f'❌ Ошибка: {str(e)}'
+
+    elif cmd == 'delete':
+        key = COMPOSIO_API_KEY()
+        if not key:
+            return '❌ API ключ не найден'
+        if len(args) < 2:
+            return '❌ `/composio delete <ID_аккаунта>`\n\nПосмотри ID: `/composio accounts`'
+        account_id = args[1]
+        result = delete_account(account_id)
+        if result['success']:
+            return f'✅ Аккаунт `{account_id[:30]}...` удалён'
+        return f'❌ Ошибка удаления: {result.get("error", "неизвестно")} (status: {result.get("status", "?")})'
+
+    elif cmd == 'delete-all':
+        key = COMPOSIO_API_KEY()
+        if not key:
+            return '❌ API ключ не найден'
+        all_acc = get_all_accounts()
+        if not all_acc:
+            return '📭 Нет аккаунтов для удаления'
+        deleted = 0
+        failed = 0
+        for acc in all_acc:
+            acc_id = acc.get('id') or acc.get('nanoid', '')
+            if acc_id:
+                result = delete_account(acc_id)
+                if result['success']:
+                    deleted += 1
+                else:
+                    failed += 1
+        return f'🗑️ Удалено: {deleted}, Ошибок: {failed}'
 
     elif cmd == 'list':
         key = COMPOSIO_API_KEY()
@@ -529,7 +576,11 @@ def run(args):
                 params = json.loads(' '.join(args[2:]))
             except:
                 params = {'query': ' '.join(args[2:])}
-        result = execute_tool(action_name, params)
+        accounts = get_active_accounts()
+        if not accounts:
+            return '❌ Нет подключённых аккаунтов для выполнения'
+        connected_account_id = accounts[0].get('id') or accounts[0].get('nanoid', '')
+        result = execute_tool(action_name, params, connected_account_id)
         return format_raw(result, action_name)
 
     elif cmd == 'menu':
