@@ -220,6 +220,7 @@
         .auth-form__social {
             display: flex;
             gap: 10px;
+            justify-content: center;
         }
 
         .auth-form__social-btn {
@@ -266,6 +267,24 @@
             min-height: 18px;
         }
 
+        .auth-loading {
+            text-align: center;
+            padding: 40px;
+            color: #7c3aed;
+            font-size: 15px;
+        }
+
+        .auth-loading i {
+            font-size: 32px;
+            display: block;
+            margin-bottom: 12px;
+            animation: spin 1s linear infinite;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
         @media (max-width: 480px) {
             .auth-modal__container {
                 position: fixed;
@@ -290,28 +309,39 @@
     <div class="auth-modal">
         <div class="auth-modal__container">
 
+            <!-- Загрузка (автовход) -->
+            <div class="auth-form" id="loadingForm" style="display:none;">
+                <div class="auth-loading">
+                    <i class="fas fa-spinner"></i>
+                    Входим в аккаунт...
+                </div>
+            </div>
+
             <!-- ═══════════ ВХОД ═══════════ -->
             <div class="auth-form active" id="loginForm">
                 <div class="auth-form__header">
-                          
+                    <div class="auth-form__logo">
+                        <span class="auth-form__logo-icon">NM</span>
+                        <span>Khirad</span>
+                    </div>
                     <h2>Вход в аккаунт</h2>
                     <p>Войдите, чтобы использовать AI-ассистента Khirad</p>
                 </div>
 
                 <div class="auth-form__body">
                     <div class="auth-form__group">
-                        <label>Никнейм</label>
+                        <label>Email</label>
                         <div class="auth-form__input-wrap">
-                            <i class="fas fa-user"></i>
-                            <input type="text" placeholder="Введите никнейм" id="loginNick">
+                            <i class="fas fa-envelope"></i>
+                            <input type="email" placeholder="Введите email" id="loginEmail" autocomplete="email">
                         </div>
                     </div>
 
                     <div class="auth-form__group">
-                        <label>Код доступа</label>
+                        <label>Пароль</label>
                         <div class="auth-form__input-wrap">
                             <i class="fas fa-lock"></i>
-                            <input type="password" placeholder="Введите код" id="loginCode">
+                            <input type="password" placeholder="Введите пароль" id="loginCode" autocomplete="current-password">
                             <button type="button" class="auth-form__toggle-password" onclick="togglePassword('loginCode', this)">
                                 <i class="fas fa-eye"></i>
                             </button>
@@ -328,14 +358,11 @@
                     <button class="auth-form__submit" onclick="handleLogin()">Войти</button>
                     <p class="auth-error" id="loginError"></p>
 
-                    <div class="auth-form__divider"><span>или</span></div>
+                    <div class="auth-form__divider"><span>или войти через</span></div>
 
                     <div class="auth-form__social">
                         <!-- Google Sign-In кнопка -->
-                        <div id="g_id_signin" style="flex: 1; display: flex; justify-content: center;"></div>
-                        <button class="auth-form__social-btn" onclick="quickLogin('Guest')" type="button">
-                            <i class="fas fa-user"></i> Гость
-                        </button>
+                        <div id="g_id_signin" style="display:flex; justify-content:center; width:100%;"></div>
                     </div>
                 </div>
 
@@ -358,20 +385,37 @@
                 <div class="auth-form__body">
                     <div class="auth-form__group">
                         <label>Никнейм *</label>
-                        <input type="text" placeholder="Ваш никнейм" id="regNick">
-                    </div>
-
-                    <div class="auth-form__group">
-                        <label>Код доступа *</label>
                         <div class="auth-form__input-wrap">
-                            <i class="fas fa-lock"></i>
-                            <input type="password" placeholder="Придумайте код (минимум 3 символа)" id="regCode">
+                            <i class="fas fa-user"></i>
+                            <input type="text" placeholder="Ваш никнейм" id="regNick" autocomplete="nickname">
                         </div>
                     </div>
 
                     <div class="auth-form__group">
-                        <label>Подтвердите код *</label>
-                        <input type="password" placeholder="Повторите код" id="regCodeConfirm">
+                        <label>Email *</label>
+                        <div class="auth-form__input-wrap">
+                            <i class="fas fa-envelope"></i>
+                            <input type="email" placeholder="Ваш email" id="regEmail" autocomplete="email">
+                        </div>
+                    </div>
+
+                    <div class="auth-form__group">
+                        <label>Пароль *</label>
+                        <div class="auth-form__input-wrap">
+                            <i class="fas fa-lock"></i>
+                            <input type="password" placeholder="Придумайте пароль (минимум 4 символа)" id="regCode" autocomplete="new-password">
+                            <button type="button" class="auth-form__toggle-password" onclick="togglePassword('regCode', this)">
+                                <i class="fas fa-eye"></i>
+                            </button>
+                        </div>
+                    </div>
+
+                    <div class="auth-form__group">
+                        <label>Подтвердите пароль *</label>
+                        <div class="auth-form__input-wrap">
+                            <i class="fas fa-lock"></i>
+                            <input type="password" placeholder="Повторите пароль" id="regCodeConfirm" autocomplete="new-password">
+                        </div>
                     </div>
 
                     <label class="auth-form__checkbox" style="margin-bottom: 16px;">
@@ -396,7 +440,58 @@
     <script>
         const GOOGLE_CLIENT_ID = "{{ google_client_id }}";
 
-        // Инициализация Google Sign-In
+        // ══════════════════════════════════════════
+        // АВТОВХОД: Проверяем сохранённые данные
+        // ══════════════════════════════════════════
+        (function checkAutoLogin() {
+            const saved = localStorage.getItem('nova_remember_data');
+            if (!saved) return;
+            try {
+                const data = JSON.parse(saved);
+                // Проверяем срок (30 дней)
+                if (!data.expires || Date.now() > data.expires) {
+                    localStorage.removeItem('nova_remember_data');
+                    return;
+                }
+                // Есть сохранённые данные — показываем загрузку и входим
+                document.addEventListener('DOMContentLoaded', function() {
+                    document.getElementById('loginForm').style.display = 'none';
+                    document.getElementById('loadingForm').style.display = 'block';
+
+                    // Восстанавливаем данные в localStorage (совместимость с остальным кодом)
+                    localStorage.setItem('nova_user_nick', data.nick || '');
+                    localStorage.setItem('nova_user_email', data.email || '');
+                    localStorage.setItem('nova_user_avatar', data.avatar || '');
+                    localStorage.setItem('nova_is_admin', data.is_admin || 'false');
+                    if (data.google_login) {
+                        localStorage.setItem('nova_google_login', 'true');
+                    }
+
+                    setTimeout(function() {
+                        window.location.href = '/chat';
+                    }, 600);
+                });
+            } catch(e) {
+                localStorage.removeItem('nova_remember_data');
+            }
+        })();
+
+        // Сохраняем данные пользователя на 30 дней
+        function saveRememberMe(nick, email, avatar, isAdmin, googleLogin) {
+            const data = {
+                nick: nick,
+                email: email,
+                avatar: avatar || '',
+                is_admin: isAdmin || 'false',
+                google_login: googleLogin || false,
+                expires: Date.now() + (30 * 24 * 60 * 60 * 1000) // 30 дней
+            };
+            localStorage.setItem('nova_remember_data', JSON.stringify(data));
+        }
+
+        // ══════════════════════════════════════════
+        // Google Sign-In
+        // ══════════════════════════════════════════
         function initGoogleSignIn() {
             if (GOOGLE_CLIENT_ID && window.google) {
                 google.accounts.id.initialize({
@@ -413,13 +508,12 @@
                         size: 'large',
                         text: 'signin_with',
                         shape: 'pill',
-                        width: '100%'
+                        width: '320'
                     }
                 );
             }
         }
 
-        // Ждём загрузку Google SDK
         window.addEventListener('load', function() {
             setTimeout(initGoogleSignIn, 500);
         });
@@ -428,12 +522,17 @@
             try {
                 const payload = JSON.parse(atob(response.credential.split('.')[1]));
                 const nick = payload.name || payload.email.split('@')[0];
+                const email = payload.email || '';
+                const avatar = payload.picture || '';
 
                 localStorage.setItem('nova_user_nick', nick);
-                localStorage.setItem('nova_user_email', payload.email || '');
-                localStorage.setItem('nova_user_avatar', payload.picture || '');
+                localStorage.setItem('nova_user_email', email);
+                localStorage.setItem('nova_user_avatar', avatar);
                 localStorage.setItem('nova_is_admin', 'false');
                 localStorage.setItem('nova_google_login', 'true');
+
+                // Запоминаем Google пользователя на 30 дней
+                saveRememberMe(nick, email, avatar, 'false', true);
 
                 window.location.href = '/chat';
             } catch (e) {
@@ -441,6 +540,9 @@
             }
         }
 
+        // ══════════════════════════════════════════
+        // Обычный вход (email + пароль)
+        // ══════════════════════════════════════════
         function showForm(form) {
             document.getElementById('loginForm').style.display = form === 'login' ? 'block' : 'none';
             document.getElementById('registerForm').style.display = form === 'register' ? 'block' : 'none';
@@ -449,58 +551,118 @@
         function togglePassword(inputId, btn) {
             const input = document.getElementById(inputId);
             input.type = input.type === 'password' ? 'text' : 'password';
+            const icon = btn.querySelector('i');
+            if (icon) icon.className = input.type === 'password' ? 'fas fa-eye' : 'fas fa-eye-slash';
         }
 
         async function handleLogin() {
-            const nick = document.getElementById('loginNick').value.trim();
+            const email = document.getElementById('loginEmail').value.trim();
             const code = document.getElementById('loginCode').value.trim();
+            const remember = document.getElementById('rememberMe').checked;
             const errorEl = document.getElementById('loginError');
+            errorEl.textContent = '';
 
-            if (!nick || !code) {
+            if (!email || !code) {
                 errorEl.textContent = 'Заполните все поля';
                 return;
             }
 
-            localStorage.setItem('nova_user_nick', nick);
+            // Проверяем формат email
+            const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+            if (!emailRegex.test(email)) {
+                errorEl.textContent = 'Введите корректный email';
+                return;
+            }
 
+            const nick = email.split('@')[0];
+
+            // Пробуем войти через /api/auth/email
             try {
-                const resp = await fetch('/api/admin/login', {
+                const resp = await fetch('/api/auth/email', {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({username: 'admin', code: code})
+                    body: JSON.stringify({email: email, code: code, action: 'login'})
                 });
                 const data = await resp.json();
-                localStorage.setItem('nova_is_admin', data.success ? 'true' : 'false');
-                window.location.href = '/chat';
-            } catch (e) {
-                localStorage.setItem('nova_is_admin', 'false');
-                window.location.href = '/chat';
+
+                if (data.success) {
+                    const userNick = data.nick || nick;
+                    localStorage.setItem('nova_user_nick', userNick);
+                    localStorage.setItem('nova_user_email', email);
+                    localStorage.setItem('nova_user_avatar', data.avatar || '');
+                    localStorage.setItem('nova_is_admin', data.is_admin ? 'true' : 'false');
+
+                    if (remember) {
+                        saveRememberMe(userNick, email, data.avatar || '', data.is_admin ? 'true' : 'false', false);
+                    } else {
+                        localStorage.removeItem('nova_remember_data');
+                    }
+
+                    window.location.href = '/chat';
+                } else {
+                    errorEl.textContent = data.error || 'Неверный email или пароль';
+                }
+            } catch(e) {
+                errorEl.textContent = 'Ошибка подключения. Попробуйте снова.';
             }
         }
 
-        function handleRegister() {
+        async function handleRegister() {
             const nick = document.getElementById('regNick').value.trim();
+            const email = document.getElementById('regEmail').value.trim();
             const code = document.getElementById('regCode').value.trim();
             const confirm = document.getElementById('regCodeConfirm').value.trim();
             const agree = document.getElementById('regAgree').checked;
             const errorEl = document.getElementById('regError');
+            errorEl.textContent = '';
 
-            if (!nick || !code) { errorEl.textContent = 'Заполните все поля'; return; }
-            if (code.length < 3) { errorEl.textContent = 'Код должен быть не менее 3 символов'; return; }
-            if (code !== confirm) { errorEl.textContent = 'Коды не совпадают'; return; }
+            if (!nick || !email || !code) { errorEl.textContent = 'Заполните все поля'; return; }
+
+            const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+            if (!emailRegex.test(email)) { errorEl.textContent = 'Введите корректный email'; return; }
+
+            if (code.length < 4) { errorEl.textContent = 'Пароль должен быть не менее 4 символов'; return; }
+            if (code !== confirm) { errorEl.textContent = 'Пароли не совпадают'; return; }
             if (!agree) { errorEl.textContent = 'Примите условия использования'; return; }
 
-            localStorage.setItem('nova_user_nick', nick);
-            localStorage.setItem('nova_user_code', code);
-            localStorage.setItem('nova_is_admin', 'false');
-            window.location.href = '/chat';
+            errorEl.textContent = 'Регистрация...';
+            errorEl.style.color = '#7c3aed';
+
+            try {
+                const resp = await fetch('/api/auth/email', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({email: email, code: code, nick: nick, action: 'register'})
+                });
+                const data = await resp.json();
+
+                if (data.success) {
+                    localStorage.setItem('nova_user_nick', nick);
+                    localStorage.setItem('nova_user_email', email);
+                    localStorage.setItem('nova_user_avatar', '');
+                    localStorage.setItem('nova_is_admin', 'false');
+                    // Запоминаем на 30 дней после регистрации
+                    saveRememberMe(nick, email, '', 'false', false);
+                    window.location.href = '/chat';
+                } else {
+                    errorEl.style.color = '#ef4444';
+                    errorEl.textContent = data.error || 'Ошибка регистрации';
+                }
+            } catch(e) {
+                errorEl.style.color = '#ef4444';
+                errorEl.textContent = 'Ошибка подключения. Попробуйте снова.';
+            }
         }
 
-        function quickLogin(type) {
-            document.getElementById('loginNick').value = type + '_User';
-            document.getElementById('loginCode').value = type.toLowerCase() + '_' + Date.now();
-            handleLogin();
-        }
+        // Enter для отправки
+        document.addEventListener('DOMContentLoaded', function() {
+            document.getElementById('loginCode').addEventListener('keydown', function(e) {
+                if (e.key === 'Enter') handleLogin();
+            });
+            document.getElementById('loginEmail').addEventListener('keydown', function(e) {
+                if (e.key === 'Enter') handleLogin();
+            });
+        });
     </script>
 </body>
 </html>
