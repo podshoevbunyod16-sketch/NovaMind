@@ -1,4 +1,3 @@
-# YouTubegopro
 # 🧠 NovaMind - AI-Powered Web Assistant
 
 ![Python](https://img.shields.io/badge/Python-3.8+-blue)

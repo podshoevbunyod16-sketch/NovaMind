@@ -1,6 +1,55 @@
+# Python
 __pycache__/
 *.pyc
-.env
+*.pyo
+*.pyd
+*.egg-info/
+*.egg
+.eggs/
 venv/
-*.log
+env/
+.env
+
+# IDE / OS
+.vscode/
+.idea/
 .DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# Логи
+*.log
+logs/
+
+# Секреты и приватные данные (КРИТИЧНО — не коммитить)
+.ssh/
+*.pem
+*.key
+secrets/
+.env.local
+.env.*.local
+
+# npm / node (служебный мусор)
+.npm/
+node_modules/
+.cache/
+
+# Личные данные пользователей (НЕ коммитить в публичный репозиторий)
+uploads/*
+!uploads/.gitkeep
+downloads/bunyod/chat_history.json
+downloads/bunyod/chat_history_*.json
+
+# Сгенерированные данные (временные, не нужны в репе)
+generated_images/*
+!generated_images/.gitkeep
+generated_codes/*
+saved_codes/*
+downloads/bunyod.zip
+
+# Системные файлы Linux
+*.tmp
+*.bak
+*.orig
