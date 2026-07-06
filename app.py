@@ -1618,6 +1618,298 @@ def composio_actions():
 
 
 
+# ============================================================
+# ========== MCP (Model Context Protocol) ===================
+# ============================================================
+
+# Lazy import — mcp_client может быть не установлен
+try:
+    from mcp_client import (
+        get_client as get_mcp_client,
+        sync_call_tool,
+        sync_connect_all as mcp_sync_connect_all,
+        sync_disconnect_all as mcp_sync_disconnect_all,
+        MCPClient,
+    )
+    MCP_INTEGRATION = True
+except Exception as e:
+    print(f"[MCP] Не удалось импортировать mcp_client: {e}")
+    MCP_INTEGRATION = False
+
+
+@app.route("/mcp")
+def mcp_page():
+    """UI панель управления MCP серверами"""
+    return render_template("mcp.html")
+
+
+@app.route("/api/mcp/status")
+def mcp_status():
+    """Статус MCP клиента и всех серверов"""
+    if not MCP_INTEGRATION:
+        return jsonify({"available": False, "error": "mcp_client не загружен"}), 503
+    client = get_mcp_client()
+    return jsonify(client.get_status())
+
+
+@app.route("/api/mcp/servers", methods=["GET"])
+def mcp_list_servers():
+    """Список серверов из конфига"""
+    if not MCP_INTEGRATION:
+        return jsonify({"error": "MCP не доступен"}), 503
+    client = get_mcp_client()
+    return jsonify({"servers": {n: c.to_dict() for n, c in client.servers.items()}})
+
+
+@app.route("/api/mcp/servers", methods=["POST"])
+def mcp_add_server():
+    """Добавить новый сервер в конфиг"""
+    if not MCP_INTEGRATION:
+        return jsonify({"error": "MCP не доступен"}), 503
+    data = request.get_json() or {}
+    name = data.get("name", "").strip()
+    if not name:
+        return jsonify({"error": "Укажи name"}), 400
+
+    client = get_mcp_client()
+    from mcp_client import MCPServerConfig
+    client.servers[name] = MCPServerConfig.from_dict(name, data)
+    client.save_config()
+    return jsonify({"success": True, "name": name})
+
+
+@app.route("/api/mcp/servers/<name>", methods=["PUT"])
+def mcp_update_server(name):
+    """Обновить сервер (включить/выключить, поменять args)"""
+    if not MCP_INTEGRATION:
+        return jsonify({"error": "MCP не доступен"}), 503
+    client = get_mcp_client()
+    if name not in client.servers:
+        return jsonify({"error": "Сервер не найден"}), 404
+    data = request.get_json() or {}
+    cfg = client.servers[name]
+    if "enabled" in data:
+        cfg.enabled = bool(data["enabled"])
+    if "command" in data:
+        cfg.command = data["command"]
+    if "args" in data:
+        cfg.args = data["args"]
+    if "env" in data:
+        cfg.env = data["env"]
+    if "description" in data:
+        cfg.description = data["description"]
+    client.save_config()
+    return jsonify({"success": True})
+
+
+@app.route("/api/mcp/servers/<name>", methods=["DELETE"])
+def mcp_delete_server(name):
+    """Удалить сервер из конфига"""
+    if not MCP_INTEGRATION:
+        return jsonify({"error": "MCP не доступен"}), 503
+    client = get_mcp_client()
+    if name not in client.servers:
+        return jsonify({"error": "Сервер не найден"}), 404
+    del client.servers[name]
+    client.save_config()
+    return jsonify({"success": True})
+
+
+@app.route("/api/mcp/connect", methods=["POST"])
+def mcp_connect():
+    """Подключиться ко всем enabled серверам (или к одному)"""
+    if not MCP_INTEGRATION:
+        return jsonify({"error": "MCP не доступен"}), 503
+    data = request.get_json() or {}
+    name = data.get("name")
+    client = get_mcp_client()
+    try:
+        if name:
+            ok = client._runner.run(client.connect_server(name), timeout=60)
+            return jsonify({"success": ok, "server": name, "status": client.get_status()})
+        else:
+            client._runner.run(client.connect_all(), timeout=180)
+            return jsonify({"success": True, "status": client.get_status()})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/mcp/disconnect", methods=["POST"])
+def mcp_disconnect():
+    """Отключиться от сервера или от всех"""
+    if not MCP_INTEGRATION:
+        return jsonify({"error": "MCP не доступен"}), 503
+    data = request.get_json() or {}
+    name = data.get("name")
+    client = get_mcp_client()
+    try:
+        if name:
+            client._runner.run(client.disconnect_server(name), timeout=30)
+        else:
+            client._runner.run(client.disconnect_all(), timeout=60)
+        return jsonify({"success": True, "status": client.get_status()})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/mcp/tools")
+def mcp_list_tools():
+    """Список всех tools со всех подключённых серверов"""
+    if not MCP_INTEGRATION:
+        return jsonify({"error": "MCP не доступен"}), 503
+    client = get_mcp_client()
+    tools = client.list_tools()
+    return jsonify({
+        "tools": [
+            {
+                "key": f"{t.server_name}.{t.name}",
+                "server": t.server_name,
+                "name": t.name,
+                "description": t.description,
+                "input_schema": t.input_schema,
+            }
+            for t in tools
+        ],
+        "count": len(tools),
+    })
+
+
+@app.route("/api/mcp/call", methods=["POST"])
+def mcp_call_tool():
+    """Вызвать tool на подключённом сервере"""
+    if not MCP_INTEGRATION:
+        return jsonify({"error": "MCP не доступен"}), 503
+    data = request.get_json() or {}
+    tool_key = data.get("tool", "")
+    arguments = data.get("arguments", {})
+    if not tool_key:
+        return jsonify({"error": "Укажи tool в формате server.tool_name"}), 400
+
+    try:
+        result = sync_call_tool(tool_key, arguments)
+        return jsonify({"success": True, "result": result, "tool": tool_key})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/mcp/chat", methods=["POST"])
+def mcp_chat():
+    """
+    Умный чат через MCP tools.
+    AI сама решает какой tool вызвать на основе запроса пользователя.
+    """
+    if not MCP_INTEGRATION:
+        return jsonify({"error": "MCP не доступен"}), 503
+
+    data = request.get_json() or {}
+    user_message = data.get("message", "").strip()
+    if not user_message:
+        return jsonify({"error": "Пустое сообщение"})
+
+    client = get_mcp_client()
+    tools = client.list_tools()
+
+    if not tools:
+        return jsonify({
+            "error": "Нет подключённых MCP серверов. Зайди в /mcp и подключи.",
+            "hint": "Подключи filesystem или github чтобы начать"
+        }), 400
+
+    # Формируем описание tools для AI (как function calling)
+    tools_desc = "\n".join([
+        f"- {t.server_name}.{t.name}: {t.description} (args: {json.dumps(t.input_schema, ensure_ascii=False)[:200]})"
+        for t in tools
+    ])
+
+    # Просим AI решить, нужен ли tool и какой
+    decision_prompt = f"""Пользователь написал: "{user_message}"
+
+Доступные инструменты (MCP tools):
+{tools_desc}
+
+Если для ответа нужен один из этих инструментов, ответь в формате:
+TOOL: server.tool_name
+ARGS: {{"key": "value"}}
+QUERY: что спросить у пользователя (если нужно уточнение)
+
+Если инструмент не нужен (можно ответить текстом), ответь:
+DIRECT: краткий ответ"""
+
+    try:
+        provider = PROVIDERS["groq"]
+        payload = {
+            "model": "llama-3.1-8b-instant",
+            "messages": [{"role": "user", "content": decision_prompt}],
+            "temperature": 0.1,
+            "max_tokens": 300,
+        }
+        resp, error = groq_request_with_rotation(
+            provider["url"], payload, provider["headers"].copy(), timeout=20
+        )
+        if error:
+            return jsonify({"error": f"AI недоступен: {error}"}), 503
+
+        decision_text = resp["choices"][0]["message"]["content"].strip()
+
+        # Парсим решение
+        if decision_text.startswith("DIRECT:"):
+            reply = decision_text[7:].strip()
+            append_to_history("user", user_message)
+            append_to_history("assistant", reply)
+            return jsonify({"type": "direct", "reply": reply})
+
+        if decision_text.startswith("TOOL:"):
+            lines = decision_text.split("\n")
+            tool_key = lines[0].replace("TOOL:", "").strip()
+            args = {}
+            for line in lines[1:]:
+                if line.startswith("ARGS:"):
+                    try:
+                        args = json.loads(line[5:].strip())
+                    except:
+                        pass
+
+            # Вызываем tool
+            result = sync_call_tool(tool_key, args)
+
+            # AI генерирует финальный ответ на основе результата
+            final_prompt = f"""Пользователь спросил: "{user_message}"
+
+Я вызвал инструмент {tool_key} и получил:
+{result}
+
+Сформулируй краткий и понятный ответ пользователю на основе этого результата."""
+
+            final_payload = {
+                "model": current_model,
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": final_prompt}
+                ],
+                "temperature": 0.5,
+                "max_tokens": 2000,
+            }
+            final_resp, final_error = groq_request_with_rotation(
+                provider["url"], final_payload, provider["headers"].copy(), timeout=60
+            )
+            if final_error:
+                # Возвращаем сырой результат
+                append_to_history("user", user_message)
+                append_to_history("assistant", f"[{tool_key}] {result}")
+                return jsonify({"type": "tool", "tool": tool_key, "args": args, "result": result})
+
+            reply = final_resp["choices"][0]["message"]["content"]
+            append_to_history("user", user_message)
+            append_to_history("assistant", reply)
+            return jsonify({"type": "tool", "tool": tool_key, "args": args, "result": result, "reply": reply})
+
+        # Если AI ничего внятного не сказал
+        return jsonify({"type": "direct", "reply": decision_text})
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 # ========== API ИСТОРИИ ЧАТОВ ==========
 
 @app.route("/api/history")

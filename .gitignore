@@ -52,4 +52,6 @@ downloads/bunyod.zip
 # Системные файлы Linux
 *.tmp
 *.bak
-*.orig
+*.origtest_mcp_server.py
+
+# Тестовые/служебные скрипты (не в продакшене)

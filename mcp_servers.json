@@ -1,0 +1,45 @@
+{
+  "mcpServers": {
+    "filesystem": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-filesystem",
+        "/root"
+      ],
+      "env": {},
+      "enabled": false,
+      "description": "Доступ к файлам на компьютере (отключён по умолчанию)"
+    },
+    "github": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-github"
+      ],
+      "env": {
+        "GITHUB_TOKEN": ""
+      },
+      "enabled": false,
+      "description": "Работа с GitHub: PR, issues, репозитории"
+    },
+    "fetch": {
+      "command": "uvx",
+      "args": [
+        "mcp-server-fetch"
+      ],
+      "env": {},
+      "enabled": false,
+      "description": "HTTP-запросы к любым URL"
+    },
+    "test": {
+      "command": "python3",
+      "args": [
+        "test_mcp_server.py"
+      ],
+      "env": {},
+      "enabled": true,
+      "description": "ping+time"
+    }
+  }
+}
