@@ -292,6 +292,18 @@ def groq_request_with_rotation(url, payload, headers, timeout=90, max_retries=3)
 # ============================================================
 
 PROVIDERS = {
+    # ... существующие провайдеры ...
+    "llama_local": {
+        "url": "http://127.0.0.1:8080/v1/chat/completions",
+        "headers": {
+            "Content-Type": "application/json"
+            # ⚠️ Для llama.cpp ключ не требуется, но заголовок можно оставить пустым
+        },
+        "models": [
+            {"id": "local-model", "name": "Local Llama (Qwen2.5)"}
+        ]
+    }
+}
     "groq": {
         "url": "https://api.groq.com/openai/v1/chat/completions",
         "headers": {"Content-Type": "application/json"},
@@ -328,8 +340,8 @@ PROVIDERS = {
     }
 }
 
-current_provider = "groq"
-current_model = "openai/gpt-oss-120b"
+current_provider = "llama_local"
+current_model = "local-model"
 
 system_prompt = """ Ты - продвинутый AI ассистент NovaMind, ориентированный на практическую пользу.
 
