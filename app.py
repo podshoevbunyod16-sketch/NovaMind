@@ -292,25 +292,15 @@ def groq_request_with_rotation(url, payload, headers, timeout=90, max_retries=3)
 # ============================================================
 
 PROVIDERS = {
-    # ... существующие провайдеры ...
-    "llama_local": {
-        "url": "http://127.0.0.1:8080/v1/chat/completions",
-        "headers": {
-            "Content-Type": "application/json"
-            # ⚠️ Для llama.cpp ключ не требуется, но заголовок можно оставить пустым
-        },
-        "models": [
-            {"id": "local-model", "name": "Local Llama (Qwen2.5)"}
-        ]
-    }
-}
     "groq": {
         "url": "https://api.groq.com/openai/v1/chat/completions",
         "headers": {"Content-Type": "application/json"},
         "models": [
-            {"id": "openai/gpt-oss-120b", "name": "GPT-OSS 120B"},
-            {"id": "llama-3.3-70b-versatile", "name": "Llama 3.3 70B"},
-            {"id": "llama-3.1-8b-instant", "name": "Llama 3.1 8B"},
+            {"id": "openai/gpt-oss-120b",          "name": "GPT-OSS 120B"},
+            {"id": "llama-3.3-70b-versatile",       "name": "Llama 3.3 70B"},
+            {"id": "llama-3.1-8b-instant",          "name": "Llama 3.1 8B"},
+            {"id": "moonshotai/kimi-k2-instruct",   "name": "Kimi K2"},
+            {"id": "compound-beta",                  "name": "Compound Beta"},
         ]
     },
     "cerebras": {
@@ -321,8 +311,8 @@ PROVIDERS = {
         },
         "models": [
             {"id": "qwen-3-235b-a22b-instruct-2507", "name": "Qwen 3 235B"},
-            {"id": "zai-glm-4.7", "name": "Z.ai GLM 4.7"},
-            {"id": "deepseek-r1-distill-llama-70b", "name": "DeepSeek R1 Distill Llama 70B"}
+            {"id": "zai-glm-4.7",                    "name": "Z.ai GLM 4.7"},
+            {"id": "deepseek-r1-distill-llama-70b",  "name": "DeepSeek R1 70B"}
         ]
     },
     "openrouter": {
@@ -334,8 +324,22 @@ PROVIDERS = {
             "X-Title": "NovaMind AI"
         },
         "models": [
-            {"id": "google/gemini-2.0-flash-001", "name": "Gemini 2.0 Flash (Free)"},
-            {"id": "deepseek/deepseek-chat-v3-0324", "name": "DeepSeek R1 (Free)"},
+            {"id": "google/gemini-2.0-flash-001",             "name": "Gemini 2.0 Flash (Free)"},
+            {"id": "deepseek/deepseek-chat-v3-0324:free",     "name": "DeepSeek V3 (Free)"},
+            {"id": "meta-llama/llama-3.3-70b-instruct:free",  "name": "Llama 3.3 70B (Free)"},
+            {"id": "mistralai/mistral-7b-instruct:free",      "name": "Mistral 7B (Free)"},
+        ]
+    },
+    "ollama": {
+        "url": f"{os.getenv('OLLAMA_URL', 'http://localhost:11434')}/api/chat",
+        "headers": {"Content-Type": "application/json"},
+        "models": []
+    },
+    "llama_local": {
+        "url": "http://127.0.0.1:8080/v1/chat/completions",
+        "headers": {"Content-Type": "application/json"},
+        "models": [
+            {"id": "local-model", "name": "Local Llama.cpp"}
         ]
     }
 }
@@ -991,6 +995,33 @@ def send():
         "temperature": 0.7,
         "max_tokens": 4000,
     }
+    # ── Ollama требует другой формат ──
+    if current_provider == "ollama":
+        ollama_url = os.getenv("OLLAMA_URL", "http://localhost:11434")
+        ollama_payload = {
+            "model": current_model,
+            "messages": payload["messages"],
+            "stream": False,
+            "options": {"temperature": 0.7}
+        }
+        try:
+            resp = requests.post(
+                f"{ollama_url}/api/chat",
+                json=ollama_payload,
+                headers={"Content-Type": "application/json"},
+                timeout=120
+            )
+            resp.raise_for_status()
+            reply = resp.json()["message"]["content"]
+        except Exception as e:
+            contents = get_current_contents()
+            if contents and contents[-1]["role"] == "user":
+                contents.pop()
+                set_current_contents(contents)
+            return jsonify({"error": f"Ollama: {e}"})
+        append_to_history("assistant", reply)
+        return jsonify({"reply": reply})
+
     data_resp, error = groq_request_with_rotation(
         provider["url"], payload, provider["headers"].copy(), timeout=90
     )
@@ -1405,14 +1436,40 @@ def models_list():
 @app.route('/switch_model')
 def switch_model():
     global current_provider, current_model
-    model_id = request.args.get('model_id', '')
+    model_id   = request.args.get('model_id', '')
+    provider_id = request.args.get('provider_id', '')
+    # Direct provider+model switch (new behaviour)
+    if provider_id and provider_id in PROVIDERS:
+        current_provider = provider_id
+        current_model    = model_id
+        return jsonify({"success": True, "provider": provider_id, "model": model_id})
+    # Legacy: search by model_id across all providers
     for key, data in PROVIDERS.items():
         for m in data["models"]:
             if m["id"] == model_id:
                 current_provider = key
-                current_model = model_id
+                current_model    = model_id
                 return jsonify({"success": True, "provider": key})
+    # Allow any model string for Ollama / llama_local
+    if model_id:
+        current_model = model_id
+        return jsonify({"success": True, "provider": current_provider, "model": model_id})
     return jsonify({'error': 'Модель не найдена'}), 400
+
+@app.route('/api/ollama/models')
+def ollama_models():
+    """Динамически загружает список моделей из локального Ollama"""
+    ollama_url = os.getenv("OLLAMA_URL", "http://localhost:11434")
+    try:
+        resp = requests.get(f"{ollama_url}/api/tags", timeout=5)
+        resp.raise_for_status()
+        models = resp.json().get("models", [])
+        result = [{"id": m["name"], "name": m["name"]} for m in models]
+        # Update PROVIDERS["ollama"]["models"] in memory
+        PROVIDERS["ollama"]["models"] = result
+        return jsonify({"success": True, "models": result, "ollama_url": ollama_url})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e), "models": []})
 
 @app.route('/api/admin/stats')
 def admin_stats():
