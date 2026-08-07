@@ -336,10 +336,19 @@ PROVIDERS = {
         "models": []
     },
     "llama_local": {
-        "url": "http://127.0.0.1:8080/v1/chat/completions",
+        "url": f"{os.getenv('LLAMA_CPP_URL', 'http://127.0.0.1:8080')}/v1/chat/completions",
         "headers": {"Content-Type": "application/json"},
         "models": [
-            {"id": "local-model", "name": "Local Llama.cpp"}
+            {"id": "local-model",      "name": "Llama.cpp (авто)"},
+            {"id": "qwen2.5-7b",       "name": "Qwen 2.5 7B"},
+            {"id": "qwen2.5-3b",       "name": "Qwen 2.5 3B"},
+            {"id": "llama-3.2-3b",     "name": "Llama 3.2 3B"},
+            {"id": "llama-3.1-8b",     "name": "Llama 3.1 8B"},
+            {"id": "mistral-7b",       "name": "Mistral 7B"},
+            {"id": "phi-3-mini",       "name": "Phi-3 Mini"},
+            {"id": "gemma-2-2b",       "name": "Gemma 2 2B"},
+            {"id": "deepseek-r1-1.5b", "name": "DeepSeek R1 1.5B"},
+            {"id": "deepseek-r1-7b",   "name": "DeepSeek R1 7B"},
         ]
     }
 }
@@ -1022,6 +1031,35 @@ def send():
         append_to_history("assistant", reply)
         return jsonify({"reply": reply})
 
+    # ── llama.cpp — OpenAI-совместимый API, но без обязательного ключа ──
+    if current_provider == "llama_local":
+        llama_url = os.getenv("LLAMA_CPP_URL", "http://127.0.0.1:8080")
+        llama_payload = {
+            "model": current_model,
+            "messages": payload["messages"],
+            "temperature": payload.get("temperature", 0.7),
+            "max_tokens": payload.get("max_tokens", 4000),
+            "stream": False,
+        }
+        try:
+            resp = requests.post(
+                f"{llama_url}/v1/chat/completions",
+                json=llama_payload,
+                headers={"Content-Type": "application/json"},
+                timeout=300
+            )
+            resp.raise_for_status()
+            rjson = resp.json()
+            reply = rjson["choices"][0]["message"]["content"]
+        except Exception as e:
+            contents = get_current_contents()
+            if contents and contents[-1]["role"] == "user":
+                contents.pop()
+                set_current_contents(contents)
+            return jsonify({"error": f"llama.cpp: {e}"})
+        append_to_history("assistant", reply)
+        return jsonify({"reply": reply})
+
     data_resp, error = groq_request_with_rotation(
         provider["url"], payload, provider["headers"].copy(), timeout=90
     )
@@ -1455,6 +1493,64 @@ def switch_model():
         current_model = model_id
         return jsonify({"success": True, "provider": current_provider, "model": model_id})
     return jsonify({'error': 'Модель не найдена'}), 400
+
+
+@app.route('/api/llama/status')
+def llama_status():
+    """Проверяет доступность llama.cpp сервера"""
+    llama_url = os.getenv("LLAMA_CPP_URL", "http://127.0.0.1:8080")
+    try:
+        resp = requests.get(f"{llama_url}/health", timeout=4)
+        if resp.status_code == 200:
+            return jsonify({"success": True, "status": "ok", "url": llama_url})
+        # Некоторые версии llama.cpp не имеют /health — пробуем /v1/models
+        resp2 = requests.get(f"{llama_url}/v1/models", timeout=4)
+        resp2.raise_for_status()
+        return jsonify({"success": True, "status": "ok", "url": llama_url})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e), "url": llama_url})
+
+@app.route('/api/llama/models')
+def llama_models():
+    """Загружает список моделей из llama.cpp через /v1/models"""
+    llama_url = os.getenv("LLAMA_CPP_URL", "http://127.0.0.1:8080")
+    try:
+        resp = requests.get(f"{llama_url}/v1/models", timeout=5)
+        resp.raise_for_status()
+        data = resp.json()
+        models_raw = data.get("data", [data]) if isinstance(data, dict) else []
+        models = []
+        for m in models_raw:
+            mid  = m.get("id", "local-model")
+            name = mid.split("/")[-1] if "/" in mid else mid
+            models.append({"id": mid, "name": name})
+        if not models:
+            models = [{"id": "local-model", "name": "Llama.cpp (загружена)"}]
+        # Обновляем в памяти
+        PROVIDERS["llama_local"]["models"] = models
+        return jsonify({"success": True, "models": models, "url": llama_url})
+    except Exception as e:
+        # Возвращаем дефолтный список если /v1/models недоступен
+        default_models = PROVIDERS["llama_local"]["models"]
+        return jsonify({
+            "success": False,
+            "error": str(e),
+            "models": default_models,
+            "url": llama_url,
+            "hint": "Запусти llama.cpp с флагом --api-port 8080"
+        })
+
+@app.route('/api/llama/set_url', methods=['POST'])
+def llama_set_url():
+    """Меняет URL llama.cpp в рантайме"""
+    data = request.get_json() or {}
+    new_url = data.get("url", "").strip().rstrip("/")
+    if not new_url:
+        return jsonify({"error": "URL пустой"}), 400
+    os.environ["LLAMA_CPP_URL"] = new_url
+    # Обновляем в PROVIDERS
+    PROVIDERS["llama_local"]["url"] = f"{new_url}/v1/chat/completions"
+    return jsonify({"success": True, "url": new_url})
 
 @app.route('/api/ollama/models')
 def ollama_models():
