@@ -756,16 +756,106 @@ function setActive(el) {
 }
 
 // ========== МОДЕЛИ ==========
-function toggleModelDropdown() { modelDropdown.classList.toggle('open'); }
-function selectModel(name, el) {
-  document.querySelectorAll('.model-option').forEach(o => o.classList.remove('selected'));
-  el.classList.add('selected');
-  document.getElementById('currentModel').textContent = name;
-  modelDropdown.classList.remove('open');
+function toggleModelDropdown() {
+  modelDropdown.classList.toggle('open');
+  if (modelDropdown.classList.contains('open')) loadModelsFromServer();
 }
-document.addEventListener('click', (e) => {
-  if (!e.target.closest('#modelDropdown') && !e.target.closest('#modelSelectorBtn')) modelDropdown.classList.remove('open');
+
+async function loadModelsFromServer() {
+  try {
+    const resp = await fetch('/models_list');
+    const data = await resp.json();
+    renderModelDropdown(data.models, data.current);
+  } catch(e) { console.error('loadModels:', e); }
+}
+
+function renderModelDropdown(providersList, currentModelId) {
+  const dropdown = document.getElementById('modelDropdown');
+  dropdown.innerHTML = '';
+  const PC = {
+    groq:        {color:'#f97316', label:'⚡ Groq'},
+    cerebras:    {color:'#8b5cf6', label:'🧠 Cerebras'},
+    openrouter:  {color:'#06b6d4', label:'🌐 OpenRouter'},
+    ollama:      {color:'#f59e0b', label:'💻 Ollama (локальный)'},
+    llama_local: {color:'#10b981', label:'💻 Llama.cpp'},
+  };
+  providersList.forEach(({provider: key, list: models=[]}) => {
+    if (!models.length) return;
+    const {color, label} = PC[key] || {color:'#6c63ff', label: key};
+    const hdr = document.createElement('div');
+    hdr.style.cssText = `padding:6px 14px 3px;font-size:10px;font-weight:700;
+      text-transform:uppercase;letter-spacing:1px;color:${color};margin-top:6px;`;
+    hdr.textContent = label;
+    dropdown.appendChild(hdr);
+    models.forEach(m => {
+      const opt = document.createElement('div');
+      opt.className = 'model-option'+(m.id===currentModelId?' selected':'');
+      opt.innerHTML = `
+        <div class="model-option-dot" style="background:${color};box-shadow:0 0 5px ${color}80"></div>
+        <div><div class="model-option-name">${m.name}</div>
+             <div class="model-option-desc">${key}</div></div>
+        ${m.id===currentModelId?`<span style="color:${color}">✓</span>`:''}`;
+      opt.onclick = () => selectModel(m.id, m.name, key, opt);
+      dropdown.appendChild(opt);
+    });
+  });
+  const w = document.createElement('div');
+  w.style = 'padding:8px 14px;';
+  w.innerHTML = `<button onclick="loadOllamaModels()" style="
+    width:100%;background:rgba(245,158,11,.12);border:1px solid #f59e0b;
+    border-radius:8px;padding:8px;color:#f59e0b;font-size:12px;
+    cursor:pointer;font-weight:600;">🔄 Загрузить Ollama модели</button>`;
+  dropdown.appendChild(w);
+}
+
+async function loadOllamaModels() {
+  try {
+    const r = await fetch('/api/ollama/models');
+    const d = await r.json();
+    if (d.success && d.models.length) {
+      showNotification('✅ Загружено '+d.models.length+' Ollama моделей','success');
+      loadModelsFromServer();
+    } else {
+      showNotification('⚠️ Ollama: '+(d.error||'нет моделей'),'warning');
+    }
+  } catch(e) { showNotification('❌ Ollama недоступна','error'); }
+}
+
+async function selectModel(modelId, modelName, providerKey, el) {
+  try {
+    const r = await fetch('/switch_model?model_id='+encodeURIComponent(modelId)+'&provider_id='+encodeURIComponent(providerKey));
+    const d = await r.json();
+    if (d.success) {
+      document.querySelectorAll('.model-option').forEach(o=>o.classList.remove('selected'));
+      if (el) el.classList.add('selected');
+      document.getElementById('currentModel').textContent = modelName;
+      selectedModelName = modelName;
+      modelDropdown.classList.remove('open');
+      showNotification('✅ Модель: '+modelName,'success');
+    } else { showNotification('❌ '+(d.error||'Ошибка'),'error'); }
+  } catch(e) { showNotification('❌ Ошибка сети','error'); }
+}
+
+document.addEventListener('click', e => {
+  if (!e.target.closest('#modelDropdown') && !e.target.closest('#modelSelectorBtn'))
+    modelDropdown.classList.remove('open');
 });
+
+(async function initBadge(){
+  try {
+    const r = await fetch('/models_list');
+    const d = await r.json();
+    if (d.current) {
+      let name = d.current;
+      for (const p of d.models||[])
+        for (const m of p.list||[])
+          if (m.id===d.current) { name=m.name; break; }
+      document.getElementById('currentModel').textContent = name;
+      selectedModelName = name;
+    }
+  } catch(e){}
+})();
+
 
 // ========== ЧАТ ==========
 function newChat() {
