@@ -453,7 +453,10 @@ app = Flask(__name__)
 app.secret_key = ADMIN_SESSION_KEY
 app.config['PERMANENT_SESSION_LIFETIME'] = __import__('datetime').timedelta(days=30)
 
-APILAYER_KEY = os.getenv("APILAYER_KEY", "")
+APILAYER_KEY      = os.getenv("APILAYER_KEY", "")
+BRAVE_SEARCH_KEY  = os.getenv("BRAVE_SEARCH_KEY", "")
+SERPER_KEY        = os.getenv("SERPER_KEY", "")
+NEWS_API_KEY      = os.getenv("NEWS_API_KEY", "")
 MAILBOXLAYER_KEY = os.getenv("MAILBOXLAYER_KEY", APILAYER_KEY)
 WEATHERSTACK_KEY = os.getenv("WEATHERSTACK_KEY", APILAYER_KEY)
 FIXER_KEY = os.getenv("FIXER_KEY", APILAYER_KEY)
@@ -554,109 +557,158 @@ def auth_login_user(email, password):
 # ============================================================
 
 def get_weather(city):
-    """Получить погоду через Weatherstack"""
+    """Погода через wttr.in — полностью БЕСПЛАТНО, без ключа"""
+    try:
+        r = requests.get(
+            f"https://wttr.in/{requests.utils.quote(city)}",
+            params={"format": "j1"},
+            timeout=8, headers={"User-Agent": "NovaMind/2.0"})
+        r.raise_for_status()
+        d = r.json()
+        cur = d["current_condition"][0]
+        loc = d.get("nearest_area", [{}])[0]
+        city_name = loc.get("areaName", [{}])[0].get("value", city)
+        country   = loc.get("country",  [{}])[0].get("value", "")
+        desc_list = cur.get("weatherDesc", [{}])
+        desc      = desc_list[0].get("value", "") if desc_list else ""
+        return {
+            "city": city_name, "country": country,
+            "temp": int(cur.get("temp_C", 0)),
+            "feels_like": int(cur.get("FeelsLikeC", 0)),
+            "description": desc,
+            "humidity": int(cur.get("humidity", 0)),
+            "wind_speed": int(cur.get("windspeedKmph", 0))
+        }
+    except Exception:
+        pass
+    # Запасной: Weatherstack (если ключ есть)
     if not WEATHERSTACK_KEY:
         return None
     try:
-        url = "http://api.weatherstack.com/current"
-        params = {"access_key": WEATHERSTACK_KEY, "query": city, "units": "m"}
-        resp = requests.get(url, params=params, timeout=10)
-        if resp.status_code == 200:
-            data = resp.json()
-            if "error" in data:
-                return None
-            current = data.get("current", {})
-            location = data.get("location", {})
-            return {
-                "city": location.get("name", city),
-                "country": location.get("country", ""),
-                "temp": current.get("temperature"),
-                "feels_like": current.get("feelslike"),
-                "description": (current.get("weather_descriptions") or [""])[0],
-                "humidity": current.get("humidity"),
-                "wind_speed": current.get("wind_speed")
-            }
+        r = requests.get("http://api.weatherstack.com/current",
+                         params={"access_key": WEATHERSTACK_KEY, "query": city, "units": "m"},
+                         timeout=10)
+        d = r.json()
+        if "error" in d: return None
+        cur = d.get("current", {}); loc = d.get("location", {})
+        return {
+            "city": loc.get("name", city), "country": loc.get("country", ""),
+            "temp": cur.get("temperature"),
+            "feels_like": cur.get("feelslike"),
+            "description": (cur.get("weather_descriptions") or [""])[0],
+            "humidity": cur.get("humidity"),
+            "wind_speed": cur.get("wind_speed")
+        }
     except Exception as e:
-        print(f"[Weather] Ошибка: {e}")
+        print(f"[Weather] {e}")
     return None
+
 
 def get_exchange_rate(from_currency, to_currency, amount=1):
-    """Конвертация валют через Fixer"""
-    if not FIXER_KEY:
-        return None
+    """Конвертация валют через exchangerate-api.com — 1500 бесплатных запросов/мес"""
+    # Попытка 1: exchangerate-api (бесплатно, без ключа — базовый endpoint)
     try:
-        url = "http://data.fixer.io/api/latest"
-        params = {"access_key": FIXER_KEY, "base": from_currency, "symbols": to_currency}
-        resp = requests.get(url, params=params, timeout=10)
-        if resp.status_code == 200:
-            data = resp.json()
-            if data.get("success"):
-                rate = data["rates"].get(to_currency, 0)
-                return {
-                    "from": from_currency, "to": to_currency,
-                    "rate": rate, "result": round(amount * rate, 4),
-                    "date": data.get("date")
-                }
+        r = requests.get(
+            f"https://api.exchangerate-api.com/v4/latest/{from_currency}",
+            timeout=8)
+        r.raise_for_status()
+        d = r.json()
+        rate = d.get("rates", {}).get(to_currency)
+        if rate:
+            return {
+                "from": from_currency, "to": to_currency,
+                "rate": rate, "result": round(amount * rate, 4),
+                "date": d.get("date", "")
+            }
     except Exception as e:
-        print(f"[Fixer] Ошибка: {e}")
+        print(f"[ExchangeRate-API] {e}")
+
+    # Попытка 2: open.er-api.com (бесплатно, без ключа)
+    try:
+        r = requests.get(
+            f"https://open.er-api.com/v6/latest/{from_currency}",
+            timeout=8)
+        r.raise_for_status()
+        d = r.json()
+        rate = d.get("rates", {}).get(to_currency)
+        if rate:
+            return {
+                "from": from_currency, "to": to_currency,
+                "rate": rate, "result": round(amount * rate, 4),
+                "date": d.get("time_last_update_utc", "")
+            }
+    except Exception as e:
+        print(f"[open.er-api] {e}")
+
+    # Попытка 3: Fixer (если ключ есть)
+    if FIXER_KEY:
+        try:
+            r = requests.get(
+                "http://data.fixer.io/api/latest",
+                params={"access_key": FIXER_KEY, "base": from_currency, "symbols": to_currency},
+                timeout=8)
+            d = r.json()
+            if d.get("success"):
+                rate = d["rates"].get(to_currency)
+                if rate:
+                    return {"from": from_currency, "to": to_currency,
+                            "rate": rate, "result": round(amount * rate, 4),
+                            "date": d.get("date")}
+        except Exception as e:
+            print(f"[Fixer] {e}")
     return None
 
+
 def get_news(query, language="ru", limit=5):
-    """Получить новости через Mediastack"""
-    if not MEDIASTACK_KEY:
-        return []
-    try:
-        url = "http://api.mediastack.com/v1/news"
-        params = {
-            "access_key": MEDIASTACK_KEY,
-            "keywords": query,
-            "languages": language,
-            "limit": limit,
-            "sort": "published_desc"
-        }
-        resp = requests.get(url, params=params, timeout=15)
-        if resp.status_code == 200:
-            data = resp.json()
-            return [
-                {
-                    "title": a.get("title"),
-                    "description": a.get("description"),
-                    "url": a.get("url"),
-                    "source": a.get("source"),
-                    "published": a.get("published_at")
-                }
-                for a in data.get("data", [])
-            ]
-    except Exception as e:
-        print(f"[Mediastack] Ошибка: {e}")
+    """Новости через NewsAPI (бесплатно: 100 запросов/день, регистрация на newsapi.org)"""
+    news_key = os.getenv("NEWS_API_KEY", "")
+    if news_key:
+        try:
+            r = requests.get(
+                "https://newsapi.org/v2/everything",
+                params={"q": query, "language": language, "pageSize": limit,
+                        "sortBy": "publishedAt", "apiKey": news_key},
+                timeout=10)
+            r.raise_for_status()
+            articles = r.json().get("articles", [])
+            if articles:
+                return [{
+                    "title":       a.get("title",""),
+                    "description": a.get("description",""),
+                    "url":         a.get("url",""),
+                    "source":      a.get("source",{}).get("name",""),
+                    "publishedAt": a.get("publishedAt","")
+                } for a in articles[:limit]]
+        except Exception as e:
+            print(f"[NewsAPI] {e}")
+
+    # Запасной: Mediastack (если ключ есть)
+    if MEDIASTACK_KEY:
+        try:
+            r = requests.get(
+                "http://api.mediastack.com/v1/news",
+                params={"access_key": MEDIASTACK_KEY, "keywords": query,
+                        "languages": language, "limit": limit, "sort": "published_desc"},
+                timeout=10)
+            r.raise_for_status()
+            articles = r.json().get("data", [])
+            return [{
+                "title":       a.get("title",""),
+                "description": a.get("description",""),
+                "url":         a.get("url",""),
+                "source":      a.get("source",""),
+                "publishedAt": a.get("published_at","")
+            } for a in articles[:limit]]
+        except Exception as e:
+            print(f"[Mediastack] {e}")
+
+    # Запасной: ищем новости через поиск
+    search_result = search_web(f"{query} новости {datetime.now().year}")
+    if search_result:
+        return [{"title": "Результат поиска", "description": search_result,
+                 "url": "", "source": "Web Search", "publishedAt": ""}]
     return []
 
-def search_web(query):
-    try:
-        url = "https://api.apilayer.com/google_search"
-        headers = {"apikey": APILAYER_KEY}
-        params = {"q": query, "hl": "ru", "gl": "ru", "num": 5}
-        resp = requests.get(url, headers=headers, params=params, timeout=15)
-        resp.raise_for_status()
-        data = resp.json()
-        parts = []
-        for item in data.get("organic_results", [])[:5]:
-            title = item.get("title", "")
-            snippet = item.get("snippet", "")
-            link = item.get("link", "")
-            if snippet:
-                parts.append(f"**{title}**\n{snippet}\n{link}")
-        answer = data.get("answer_box", {})
-        if answer:
-            answer_text = answer.get("answer") or answer.get("snippet") or ""
-            if answer_text:
-                parts.insert(0, f"**Быстрый ответ:** {answer_text}")
-        if parts:
-            return "Результаты поиска Google:\n\n" + "\n\n".join(parts)
-        return None
-    except Exception as e:
-        print(f"search_web error: {e}")
-        return None
 
 
 @app.route('/api/auth/email', methods=['POST'])
