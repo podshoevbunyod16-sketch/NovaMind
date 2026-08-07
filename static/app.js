@@ -777,7 +777,7 @@ function renderModelDropdown(providersList, currentModelId) {
     cerebras:    {color:'#8b5cf6', label:'🧠 Cerebras'},
     openrouter:  {color:'#06b6d4', label:'🌐 OpenRouter'},
     ollama:      {color:'#f59e0b', label:'💻 Ollama (локальный)'},
-    llama_local: {color:'#10b981', label:'💻 Llama.cpp'},
+    llama_local: {color:'#10b981', label:'💻 Llama.cpp (локальный)'},
   };
   providersList.forEach(({provider: key, list: models=[]}) => {
     if (!models.length) return;
@@ -803,8 +803,13 @@ function renderModelDropdown(providersList, currentModelId) {
   w.style = 'padding:8px 14px;';
   w.innerHTML = `<button onclick="loadOllamaModels()" style="
     width:100%;background:rgba(245,158,11,.12);border:1px solid #f59e0b;
-    border-radius:8px;padding:8px;color:#f59e0b;font-size:12px;
-    cursor:pointer;font-weight:600;">🔄 Загрузить Ollama модели</button>`;
+    border-radius:8px;padding:7px;color:#f59e0b;font-size:12px;
+    cursor:pointer;font-weight:600;">🦙 Загрузить Ollama модели</button>
+    <button onclick="showLlamaCppPanel()" style="
+      width:100%;background:rgba(16,185,129,.12);border:1px solid #10b981;
+      border-radius:8px;padding:7px;color:#10b981;font-size:12px;
+      cursor:pointer;font-weight:600;margin-top:6px;">⚙️ Настроить llama.cpp</button>
+  `;
   dropdown.appendChild(w);
 }
 
@@ -819,6 +824,197 @@ async function loadOllamaModels() {
       showNotification('⚠️ Ollama: '+(d.error||'нет моделей'),'warning');
     }
   } catch(e) { showNotification('❌ Ollama недоступна','error'); }
+}
+
+// ══════════════════════════════════════════
+//  llama.cpp — функции
+// ══════════════════════════════════════════
+
+async function loadLlamaCppModels() {
+  try {
+    const r = await fetch('/api/llama/models');
+    const d = await r.json();
+    if (d.models && d.models.length) {
+      const count = d.models.length;
+      showNotification(`✅ llama.cpp: найдено ${count} моделей`, 'success');
+      loadModelsFromServer();
+    } else {
+      showNotification('⚠️ llama.cpp: ' + (d.error || 'нет моделей'), 'warning');
+    }
+  } catch(e) {
+    showNotification('❌ llama.cpp недоступна — запусти сервер!', 'error');
+  }
+}
+
+async function checkLlamaCppStatus() {
+  try {
+    const r = await fetch('/api/llama/status');
+    const d = await r.json();
+    return d.success;
+  } catch(e) { return false; }
+}
+
+function showLlamaCppPanel() {
+  // Закрываем dropdown
+  document.getElementById('modelDropdown').classList.remove('open');
+
+  // Убираем старую панель если есть
+  document.getElementById('llamaPanel')?.remove();
+
+  const panel = document.createElement('div');
+  panel.id = 'llamaPanel';
+  panel.style.cssText = `
+    position:fixed; inset:0; background:rgba(0,0,0,.7);
+    display:flex; align-items:center; justify-content:center;
+    z-index:500; backdrop-filter:blur(4px);
+  `;
+
+  panel.innerHTML = `
+    <div style="
+      background:#1a1a2e; border:1px solid #10b981;
+      border-radius:16px; padding:24px; width:90%; max-width:420px;
+      box-shadow:0 0 40px rgba(16,185,129,.25);
+    ">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:18px;">
+        <div style="font-size:16px;font-weight:700;color:#e0e0f0;">
+          ⚙️ Настройки llama.cpp
+        </div>
+        <button onclick="document.getElementById('llamaPanel').remove()" style="
+          background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.15);
+          border-radius:8px;padding:4px 10px;color:#888;cursor:pointer;font-size:14px;">✕</button>
+      </div>
+
+      <label style="font-size:11px;font-weight:700;text-transform:uppercase;
+        letter-spacing:1px;color:#6b7280;display:block;margin-bottom:6px;">
+        URL сервера llama.cpp
+      </label>
+      <input id="llamaUrlInput" value="http://127.0.0.1:8080" placeholder="http://127.0.0.1:8080"
+        style="width:100%;background:#0d0d1a;border:1px solid #2a2a4a;border-radius:8px;
+          padding:10px 13px;color:#e0e0f0;font-size:14px;outline:none;font-family:monospace;
+          box-sizing:border-box;margin-bottom:10px;">
+
+      <label style="font-size:11px;font-weight:700;text-transform:uppercase;
+        letter-spacing:1px;color:#6b7280;display:block;margin-bottom:6px;">
+        Имя модели (необязательно — если пусто, берётся из /v1/models)
+      </label>
+      <input id="llamaModelInput" placeholder="например: qwen2.5-7b-instruct"
+        style="width:100%;background:#0d0d1a;border:1px solid #2a2a4a;border-radius:8px;
+          padding:10px 13px;color:#e0e0f0;font-size:14px;outline:none;font-family:monospace;
+          box-sizing:border-box;margin-bottom:14px;">
+
+      <div id="llamaStatusBox" style="
+        background:rgba(16,185,129,.08);border:1px solid rgba(16,185,129,.2);
+        border-radius:8px;padding:10px 13px;font-size:12px;color:#6b7280;
+        margin-bottom:14px;display:flex;align-items:center;gap:8px;">
+        <span id="llamaStatusDot" style="width:8px;height:8px;border-radius:50%;
+          background:#6b7280;flex-shrink:0;display:inline-block;"></span>
+        <span id="llamaStatusText">Нажми «Проверить» для проверки соединения</span>
+      </div>
+
+      <div style="display:flex;gap:8px;flex-direction:column;">
+        <button onclick="testLlamaCpp()" style="
+          width:100%;background:rgba(16,185,129,.15);border:1px solid #10b981;
+          border-radius:8px;padding:10px;color:#10b981;font-size:13px;
+          cursor:pointer;font-weight:600;">🔍 Проверить соединение</button>
+        <button onclick="applyLlamaCpp()" style="
+          width:100%;background:linear-gradient(135deg,#10b981,#059669);
+          border:none;border-radius:8px;padding:11px;color:#fff;font-size:13px;
+          cursor:pointer;font-weight:700;">✅ Применить и загрузить модели</button>
+      </div>
+
+      <div style="margin-top:14px;padding:10px;background:rgba(0,0,0,.3);
+        border-radius:8px;font-size:11px;color:#6b7280;line-height:1.6;">
+        <strong style="color:#10b981;">💡 Как запустить llama.cpp:</strong><br>
+        <code style="color:#a78bfa;">./llama-server -m model.gguf --port 8080 --host 0.0.0.0</code><br>
+        Или через Python: <code style="color:#a78bfa;">pip install llama-cpp-python[server]</code>
+      </div>
+    </div>
+  `;
+
+  document.body.appendChild(panel);
+  panel.addEventListener('click', e => { if(e.target===panel) panel.remove(); });
+}
+
+async function testLlamaCpp() {
+  const url = document.getElementById('llamaUrlInput').value.trim().replace(/\/+$/, '');
+  const dot  = document.getElementById('llamaStatusDot');
+  const text = document.getElementById('llamaStatusText');
+  dot.style.background  = '#f59e0b';
+  text.textContent = '⏳ Проверяю соединение...';
+
+  try {
+    // Сначала /health, потом /v1/models
+    let ok = false;
+    try {
+      const r = await fetch('/api/llama/status');
+      const d = await r.json();
+      ok = d.success;
+    } catch(e) {}
+
+    // Через прокси — сохраняем URL сначала
+    await fetch('/api/llama/set_url', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({url})
+    });
+
+    const r2 = await fetch('/api/llama/status');
+    const d2 = await r2.json();
+
+    if (d2.success) {
+      dot.style.background  = '#10b981';
+      dot.style.boxShadow   = '0 0 6px #10b981';
+      text.textContent = '✅ Соединение установлено! llama.cpp работает.';
+      text.style.color = '#10b981';
+    } else {
+      throw new Error(d2.error || 'Нет ответа');
+    }
+  } catch(e) {
+    dot.style.background = '#ef4444';
+    text.textContent     = '❌ Ошибка: ' + e.message;
+    text.style.color     = '#ef4444';
+  }
+}
+
+async function applyLlamaCpp() {
+  const url       = document.getElementById('llamaUrlInput').value.trim().replace(/\/+$/, '');
+  const modelName = document.getElementById('llamaModelInput').value.trim();
+
+  // Сохраняем URL
+  await fetch('/api/llama/set_url', {
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({url})
+  });
+
+  // Загружаем модели
+  const r = await fetch('/api/llama/models');
+  const d = await r.json();
+
+  let modelId = 'local-model';
+  let modelLabel = 'Llama.cpp';
+
+  if (modelName) {
+    modelId    = modelName;
+    modelLabel = modelName;
+  } else if (d.models && d.models.length) {
+    modelId    = d.models[0].id;
+    modelLabel = d.models[0].name;
+  }
+
+  // Переключаем провайдера
+  const sw = await fetch('/switch_model?model_id='+encodeURIComponent(modelId)+'&provider_id=llama_local');
+  const sd = await sw.json();
+
+  if (sd.success) {
+    document.getElementById('currentModel').textContent = modelLabel;
+    selectedModelName = modelLabel;
+    document.getElementById('llamaPanel').remove();
+    showNotification('✅ llama.cpp подключён: ' + modelLabel, 'success');
+    loadModelsFromServer();
+  } else {
+    showNotification('❌ Ошибка переключения: ' + (sd.error||''), 'error');
+  }
 }
 
 async function selectModel(modelId, modelName, providerKey, el) {
