@@ -5,7 +5,6 @@ import requests
 import subprocess
 import time
 from datetime import datetime
-from urllib.parse import quote_plus
 import hashlib
 from flask import Flask, request, jsonify, render_template, send_file, session, send_from_directory, redirect, url_for
 
@@ -732,286 +731,6 @@ def call_ai_vision(image_b64, mime_type, prompt, *, timeout=60):
     return _vision_fallback(data_url, prompt, timeout)
 
 
-# ════════════════════════════════════════════════════════════
-#  ПОИСК — полностью бесплатно, без ключей
-#  Каскад: DDG HTML → DDG API → Wikipedia → wttr (для погоды)
-# ════════════════════════════════════════════════════════════
-
-import html as html_mod
-from urllib.parse import quote_plus
-
-_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Linux; Android 11; Pixel 5) "
-                  "AppleWebKit/537.36 (KHTML, like Gecko) "
-                  "Chrome/120.0.0.0 Mobile Safari/537.36",
-    "Accept-Language": "ru-RU,ru;q=0.9,en;q=0.8",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-}
-
-
-def _ddg_html(query, max_results=5):
-    """
-    DuckDuckGo — скрапинг HTML (без ключа, без API).
-    Работает всегда, даже когда DDG API возвращает пустоту.
-    """
-    try:
-        url = f"https://html.duckduckgo.com/html/?q={quote_plus(query)}&kl=ru-ru"
-        r = requests.get(url, headers=_HEADERS, timeout=10)
-        r.raise_for_status()
-        # Парсим вручную без BeautifulSoup
-        text = r.text
-        results = []
-        # Ищем блоки результатов по паттерну DDG HTML
-        snippets = re.findall(
-            r'class="result__snippet"[^>]*>(.*?)</a>',
-            text, re.DOTALL)
-        titles = re.findall(
-            r'class="result__a"[^>]*>(.*?)</a>',
-            text, re.DOTALL)
-        urls = re.findall(
-            r'class="result__url"[^>]*>(.*?)</span>',
-            text, re.DOTALL)
-        for i in range(min(max_results, len(snippets))):
-            title   = html_mod.unescape(re.sub(r'<[^>]+>','', titles[i] if i < len(titles) else '')).strip()
-            snippet = html_mod.unescape(re.sub(r'<[^>]+>','', snippets[i])).strip()
-            link    = html_mod.unescape(re.sub(r'<[^>]+>','', urls[i] if i < len(urls) else '')).strip()
-            if snippet:
-                results.append(f"**{title or 'Результат'}**\n{snippet}\n{link}")
-        if results:
-            return "🔍 **Поиск (DDG):**\n\n" + "\n\n".join(results)
-    except Exception as e:
-        print(f"[DDG HTML] {e}")
-    return None
-
-
-def _ddg_api(query):
-    """DuckDuckGo Instant Answer API — быстрые прямые ответы."""
-    try:
-        r = requests.get(
-            "https://api.duckduckgo.com/",
-            params={"q": query, "format": "json",
-                    "no_redirect": 1, "no_html": 1, "skip_disambig": 1},
-            headers={"User-Agent": "NovaMind/2.0"},
-            timeout=8)
-        d = r.json()
-        parts = []
-        if d.get("AbstractText"):
-            src = d.get("AbstractSource", "")
-            parts.append(f"**{src or 'Ответ'}:** {d['AbstractText']}")
-        if d.get("Answer"):
-            parts.append(f"**Быстрый ответ:** {d['Answer']}")
-        for t in d.get("RelatedTopics", [])[:3]:
-            if isinstance(t, dict) and t.get("Text"):
-                parts.append(f"• {t['Text']}")
-        if parts:
-            return "🔍 **DuckDuckGo:**\n\n" + "\n\n".join(parts)
-    except Exception as e:
-        print(f"[DDG API] {e}")
-    return None
-
-
-def _wikipedia(query, lang="ru"):
-    """
-    Wikipedia Search API — бесплатно, без ключа.
-    Сначала ищем на русском, потом на английском.
-    """
-    for lg in [lang, "en"] if lang != "en" else ["en"]:
-        try:
-            # Поиск страниц
-            sr = requests.get(
-                f"https://{lg}.wikipedia.org/w/api.php",
-                params={"action": "query", "list": "search",
-                        "srsearch": query, "srlimit": 3,
-                        "format": "json", "utf8": 1},
-                headers={"User-Agent": "NovaMind/2.0"},
-                timeout=8)
-            sr.raise_for_status()
-            pages = sr.json().get("query", {}).get("search", [])
-            if not pages:
-                continue
-            # Берём первую страницу — получаем extract
-            title = pages[0]["title"]
-            er = requests.get(
-                f"https://{lg}.wikipedia.org/w/api.php",
-                params={"action": "query", "titles": title,
-                        "prop": "extracts", "exintro": 1,
-                        "explaintext": 1, "exsectionformat": "plain",
-                        "exlimit": 1, "format": "json", "utf8": 1},
-                headers={"User-Agent": "NovaMind/2.0"},
-                timeout=8)
-            er.raise_for_status()
-            pages_data = er.json().get("query", {}).get("pages", {})
-            for pid, pdata in pages_data.items():
-                extract = pdata.get("extract", "")
-                if extract and len(extract) > 100:
-                    # Первые 800 символов
-                    short = extract[:800].rsplit(".", 1)[0] + "."
-                    lang_label = "Wikipedia RU" if lg == "ru" else "Wikipedia EN"
-                    return (f"📖 **{lang_label} — {title}:**\n\n{short}\n\n"
-                            f"🔗 https://{lg}.wikipedia.org/wiki/{quote_plus(title)}")
-        except Exception as e:
-            print(f"[Wikipedia {lg}] {e}")
-    return None
-
-
-def _searxng_public(query, max_results=5):
-    """
-    SearXNG публичные инстансы — агрегирует Google+Bing+DDG, без ключа.
-    Перебирает несколько публичных серверов пока один не ответит.
-    """
-    instances = [
-        "https://searx.be",
-        "https://search.sapti.me",
-        "https://searxng.site",
-        "https://priv.au",
-        "https://search.privacyredirect.com",
-    ]
-    for base in instances:
-        try:
-            r = requests.get(
-                f"{base}/search",
-                params={"q": query, "format": "json",
-                        "language": "ru", "categories": "general"},
-                headers={"User-Agent": "NovaMind/2.0",
-                         "Accept": "application/json"},
-                timeout=8)
-            if r.status_code != 200:
-                continue
-            data = r.json()
-            results_list = data.get("results", [])
-            if not results_list:
-                continue
-            parts = []
-            for item in results_list[:max_results]:
-                title   = item.get("title","")
-                content = item.get("content","")
-                url     = item.get("url","")
-                if content:
-                    parts.append(f"**{title}**\n{content}\n{url}")
-            if parts:
-                return "🔍 **Поиск (SearXNG):**\n\n" + "\n\n".join(parts)
-        except Exception as e:
-            print(f"[SearXNG {base}] {e}")
-            continue
-    return None
-
-
-def _news_rss(query):
-    """
-    Google News RSS — новости без ключа.
-    Простой RSS парсинг через regex.
-    """
-    try:
-        url = (f"https://news.google.com/rss/search"
-               f"?q={quote_plus(query)}&hl=ru&gl=RU&ceid=RU:ru")
-        r = requests.get(url, headers=_HEADERS, timeout=8)
-        r.raise_for_status()
-        items = re.findall(r'<item>(.*?)</item>', r.text, re.DOTALL)
-        parts = []
-        for item in items[:5]:
-            title = re.search(r'<title>(.*?)</title>', item, re.DOTALL)
-            desc  = re.search(r'<description>(.*?)</description>', item, re.DOTALL)
-            link  = re.search(r'<link>(.*?)</link>', item, re.DOTALL)
-            t = html_mod.unescape(re.sub(r'<[^>]+>','', title.group(1) if title else '')).strip()
-            d = html_mod.unescape(re.sub(r'<[^>]+>','', desc.group(1)  if desc  else '')).strip()
-            l = (link.group(1) if link else '').strip()
-            if t:
-                parts.append(f"📰 **{t}**\n{d[:200] if d else ''}\n{l}")
-        if parts:
-            return "📰 **Новости (Google RSS):**\n\n" + "\n\n".join(parts)
-    except Exception as e:
-        print(f"[News RSS] {e}")
-    return None
-
-
-def search_web(query, mode="auto"):
-    """
-    Умный каскадный поиск — полностью бесплатно, без ключей.
-
-    mode="auto"  → определяет тип запроса и выбирает движок
-    mode="news"  → только новости (Google RSS)
-    mode="wiki"  → только Wikipedia
-    mode="fast"  → только DDG API (быстро, для калькулятора/переводов)
-
-    Каскад: SearXNG → DDG HTML → DDG API → Wikipedia
-    """
-    query = query.strip()
-    if not query:
-        return None
-
-    # Определяем тип запроса
-    q_low = query.lower()
-    is_news = any(w in q_low for w in [
-        "новости","новость","news","сегодня","вчера","события",
-        "произошло","случилось","последние","актуально"])
-    is_calc = re.match(r'^[\d\s\+\-\*\/\(\)\.]+$', query)
-    is_wiki = any(w in q_low for w in [
-        "что такое","кто такой","кто такая","биография",
-        "история","wikipedia","вики","объясни","расскажи о"])
-
-    if mode == "news" or is_news:
-        result = _news_rss(query)
-        if result: return result
-
-    if mode == "fast" or is_calc:
-        result = _ddg_api(query)
-        if result: return result
-
-    if mode == "wiki" or is_wiki:
-        result = _wikipedia(query)
-        if result: return result
-
-    # Полный каскад
-    engines = [
-        ("SearXNG",  lambda: _searxng_public(query)),
-        ("DDG HTML", lambda: _ddg_html(query)),
-        ("DDG API",  lambda: _ddg_api(query)),
-        ("Wikipedia",lambda: _wikipedia(query)),
-        ("News RSS", lambda: _news_rss(query)),
-    ]
-    for name, fn in engines:
-        try:
-            res = fn()
-            if res:
-                print(f"[search_web] ✅ {name}: {query[:50]}")
-                return res
-        except Exception as e:
-            print(f"[search_web] {name} error: {e}")
-
-    return None
-
-
-def get_news(query, language="ru", limit=5):
-    """Новости — Google RSS (бесплатно) + NewsAPI если есть ключ."""
-    # Сначала пробуем Google RSS (всегда бесплатно)
-    rss = _news_rss(query)
-    if rss:
-        return [{"title": "Новости", "description": rss,
-                 "url": "", "source": "Google News RSS", "publishedAt": ""}]
-    # Если есть NewsAPI ключ
-    news_key = os.getenv("NEWS_API_KEY", "")
-    if news_key:
-        try:
-            r = requests.get(
-                "https://newsapi.org/v2/everything",
-                params={"q": query, "language": language,
-                        "pageSize": limit, "sortBy": "publishedAt",
-                        "apiKey": news_key},
-                timeout=10)
-            r.raise_for_status()
-            articles = r.json().get("articles", [])
-            if articles:
-                return [{"title": a.get("title",""),
-                         "description": a.get("description",""),
-                         "url": a.get("url",""),
-                         "source": a.get("source",{}).get("name",""),
-                         "publishedAt": a.get("publishedAt","")}
-                        for a in articles[:limit]]
-        except Exception as e:
-            print(f"[NewsAPI] {e}")
-    return []
-
-
 def get_weather(city):
     """Погода через wttr.in — полностью БЕСПЛАТНО, без ключа"""
     try:
@@ -1390,6 +1109,220 @@ def admin_check():
     if session.get('admin_logged_in'):
         return jsonify({'logged_in': True, 'username': session.get('admin_username', 'admin')})
     return jsonify({'logged_in': False})
+
+@app.route('/stream', methods=['POST'])
+def stream():
+    """
+    SSE стриминг — отдаёт токены по одному через Server-Sent Events.
+    Поддерживает: Groq, Cerebras, OpenRouter, Ollama, llama.cpp
+    """
+    from flask import Response, stream_with_context
+    import json as _json
+
+    data      = request.get_json() or {}
+    message   = data.get('message', '').strip()
+    reasoning = data.get('reasoning', False)
+
+    if not message:
+        return jsonify({'error': 'Пустое сообщение'}), 400
+
+    append_to_history("user", message)
+    contents = get_current_contents()
+
+    if reasoning:
+        pkey  = "cerebras"
+        mdl   = "zai-glm-4.7"
+    else:
+        pkey  = current_provider
+        mdl   = current_model
+
+    msgs = [{"role": "system", "content": system_prompt}] + contents
+
+    def generate():
+        full_reply = []
+
+        # ── SSE helper ──────────────────────────────────────
+        def sse(event, data_dict):
+            return f"event: {event}\ndata: {_json.dumps(data_dict, ensure_ascii=False)}\n\n"
+
+        try:
+            # ── Ollama stream ────────────────────────────────
+            if pkey == "ollama":
+                url = os.getenv("OLLAMA_URL", "http://localhost:11434")
+                resp = requests.post(
+                    f"{url}/api/chat",
+                    json={"model": mdl, "messages": msgs,
+                          "stream": True, "options": {"temperature": 0.7}},
+                    headers={"Content-Type": "application/json"},
+                    stream=True, timeout=120)
+                resp.raise_for_status()
+                for line in resp.iter_lines():
+                    if not line: continue
+                    try:
+                        chunk = _json.loads(line)
+                        token = chunk.get("message", {}).get("content", "")
+                        if token:
+                            full_reply.append(token)
+                            yield sse("token", {"t": token})
+                        if chunk.get("done"):
+                            break
+                    except: continue
+
+            # ── llama.cpp stream ─────────────────────────────
+            elif pkey == "llama_local":
+                url = os.getenv("LLAMA_CPP_URL", "http://127.0.0.1:8080")
+                resp = requests.post(
+                    f"{url}/v1/chat/completions",
+                    json={"model": mdl, "messages": msgs,
+                          "temperature": 0.7, "max_tokens": 4000, "stream": True},
+                    headers={"Content-Type": "application/json"},
+                    stream=True, timeout=300)
+                resp.raise_for_status()
+                for line in resp.iter_lines():
+                    if not line: continue
+                    line_s = line.decode('utf-8') if isinstance(line, bytes) else line
+                    if line_s.startswith("data: "):
+                        chunk_s = line_s[6:].strip()
+                        if chunk_s == "[DONE]": break
+                        try:
+                            chunk = _json.loads(chunk_s)
+                            token = chunk["choices"][0].get("delta", {}).get("content", "")
+                            if token:
+                                full_reply.append(token)
+                                yield sse("token", {"t": token})
+                        except: continue
+
+            # ── Cerebras stream ──────────────────────────────
+            elif pkey == "cerebras":
+                key = os.getenv("CEREBRAS_API_KEY", "")
+                if not key:
+                    yield sse("error", {"msg": "CEREBRAS_API_KEY не задан"})
+                    return
+                resp = requests.post(
+                    "https://api.cerebras.ai/v1/chat/completions",
+                    json={"model": mdl, "messages": msgs,
+                          "temperature": 0.7, "max_tokens": 4000, "stream": True},
+                    headers={"Authorization": f"Bearer {key}",
+                             "Content-Type": "application/json"},
+                    stream=True, timeout=90)
+                resp.raise_for_status()
+                for line in resp.iter_lines():
+                    if not line: continue
+                    line_s = line.decode('utf-8') if isinstance(line, bytes) else line
+                    if line_s.startswith("data: "):
+                        chunk_s = line_s[6:].strip()
+                        if chunk_s == "[DONE]": break
+                        try:
+                            chunk = _json.loads(chunk_s)
+                            token = chunk["choices"][0].get("delta", {}).get("content", "")
+                            if token:
+                                full_reply.append(token)
+                                yield sse("token", {"t": token})
+                        except: continue
+
+            # ── OpenRouter stream ────────────────────────────
+            elif pkey == "openrouter":
+                key = os.getenv("OPENROUTER_API_KEY", "")
+                if not key:
+                    yield sse("error", {"msg": "OPENROUTER_API_KEY не задан"})
+                    return
+                resp = requests.post(
+                    "https://openrouter.ai/api/v1/chat/completions",
+                    json={"model": mdl, "messages": msgs,
+                          "temperature": 0.7, "max_tokens": 4000, "stream": True},
+                    headers={"Authorization": f"Bearer {key}",
+                             "Content-Type": "application/json",
+                             "HTTP-Referer": "http://localhost:5000",
+                             "X-Title": "NovaMind AI"},
+                    stream=True, timeout=90)
+                resp.raise_for_status()
+                for line in resp.iter_lines():
+                    if not line: continue
+                    line_s = line.decode('utf-8') if isinstance(line, bytes) else line
+                    if line_s.startswith("data: "):
+                        chunk_s = line_s[6:].strip()
+                        if chunk_s == "[DONE]": break
+                        try:
+                            chunk = _json.loads(chunk_s)
+                            token = chunk["choices"][0].get("delta", {}).get("content", "")
+                            if token:
+                                full_reply.append(token)
+                                yield sse("token", {"t": token})
+                        except: continue
+
+            # ── Groq stream (default) ────────────────────────
+            else:
+                groq_key = get_groq_key()
+                if not groq_key:
+                    yield sse("error", {"msg": "GROQ_API_KEY не задан"})
+                    return
+                provider = PROVIDERS.get(pkey, PROVIDERS["groq"])
+                resp = requests.post(
+                    provider["url"],
+                    json={"model": mdl, "messages": msgs,
+                          "temperature": 0.7, "max_tokens": 4000, "stream": True},
+                    headers={**provider["headers"].copy(),
+                             "Authorization": f"Bearer {groq_key}"},
+                    stream=True, timeout=90)
+                resp.raise_for_status()
+                for line in resp.iter_lines():
+                    if not line: continue
+                    line_s = line.decode('utf-8') if isinstance(line, bytes) else line
+                    if line_s.startswith("data: "):
+                        chunk_s = line_s[6:].strip()
+                        if chunk_s == "[DONE]": break
+                        try:
+                            chunk = _json.loads(chunk_s)
+                            token = chunk["choices"][0].get("delta", {}).get("content", "")
+                            if token:
+                                full_reply.append(token)
+                                yield sse("token", {"t": token})
+                        except: continue
+
+        except Exception as e:
+            yield sse("error", {"msg": str(e)})
+            return
+
+        # Сохраняем полный ответ в историю
+        full_text = "".join(full_reply)
+        if full_text:
+            append_to_history("assistant", full_text)
+            # Синхронизируем с Supabase если нужно
+            try:
+                save_server_history_internal()
+            except: pass
+        yield sse("done", {"full": full_text})
+
+    return Response(
+        stream_with_context(generate()),
+        mimetype="text/event-stream",
+        headers={
+            "Cache-Control":               "no-cache",
+            "X-Accel-Buffering":           "no",   # для Nginx/Render
+            "Access-Control-Allow-Origin": "*",
+        }
+    )
+
+
+def save_server_history_internal():
+    """Внутренняя синхронизация истории (вызывается после стриминга)"""
+    try:
+        supabase_url = os.getenv("SUPABASE_URL","")
+        supabase_key = os.getenv("SUPABASE_KEY","")
+        if not supabase_url or not supabase_key:
+            return
+        # Простое сохранение через REST API Supabase
+        requests.post(
+            f"{supabase_url}/rest/v1/histories",
+            headers={"apikey": supabase_key,
+                     "Authorization": f"Bearer {supabase_key}",
+                     "Content-Type": "application/json",
+                     "Prefer": "return=minimal"},
+            json={"messages": get_current_contents()},
+            timeout=5
+        )
+    except: pass
+
 
 @app.route('/send', methods=['POST'])
 def send():
