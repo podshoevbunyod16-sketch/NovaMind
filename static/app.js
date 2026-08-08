@@ -3,8 +3,6 @@
 ══════════════════════════════════════════ */
 
 // ========== СОСТОЯНИЕ ==========
-let isRecording    = false;
-let recognition    = null;
 let isTyping       = false;
 let webSearchOn    = false;
 let reasoningOn    = false;
@@ -235,8 +233,6 @@ setTimeout(() => {
 // ========== DOM-ЭЛЕМЕНТЫ ==========
 const input         = document.getElementById('chat-input');
 const sendBtn       = document.getElementById('sendBtn');
-const voiceBtn      = document.getElementById('voiceBtn');
-const voiceTooltip  = document.getElementById('voiceTooltip');
 const chatContainer = document.getElementById('chatContainer');
 const welcomeScreen = document.getElementById('welcomeScreen');
 const modelDropdown = document.getElementById('modelDropdown');
@@ -706,40 +702,335 @@ function removeTyping() {
 }
 
 // ========== ГОЛОС ==========
-function toggleVoice() {
-  if (!('webkitSpeechRecognition' in window) && !('SpeechRecognition' in window)) {
-    showNotification('Браузер не поддерживает голосовой ввод', 'warn');
-    return;
+// ═══════════════════════════════════════════════════════════
+//  ГОЛОСОВОЙ ВВОД + WAKE WORD "Khirad" / "Хирад"
+// ═══════════════════════════════════════════════════════════
+
+const WAKE_WORDS = ['khirad','хирад','кхирад','кирад','hirad'];
+
+// Состояние голосовой системы
+let recognition      = null;   // основной STT для ввода
+let wakeRecognition  = null;   // фоновый слушатель wake word
+let isRecording      = false;  // идёт ли основная запись
+let wakeListening    = false;  // слушаем ли wake word
+let interimText      = '';     // промежуточный текст (interim)
+let finalText        = '';     // финальный накопленный текст
+
+// ── Поддержка SpeechRecognition ──────────────────────────────
+const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+const hasSR = !!SR;
+
+// ── UI элементы ───────────────────────────────────────────────
+// ── Анимация кнопки ──────────────────────────────────────────
+function setVoiceState(state) {
+  // state: 'idle' | 'wake' | 'recording' | 'processing'
+  if (!voiceBtn) return;
+  voiceBtn.classList.remove('recording','wake-active','processing');
+  if (state === 'recording') {
+    voiceBtn.classList.add('recording');
+    voiceTooltip.textContent = '● Говорите... (остановится автоматически)';
+  } else if (state === 'wake') {
+    voiceBtn.classList.add('wake-active');
+    voiceTooltip.textContent = '👂 Слушаю "Khirad"...';
+  } else if (state === 'processing') {
+    voiceBtn.classList.add('processing');
+    voiceTooltip.textContent = '⏳ Обрабатываю...';
+  } else {
+    voiceTooltip.textContent = wakeListening
+      ? '👂 Слушаю "Khirad"...'
+      : 'Нажмите для записи';
   }
-  isRecording ? stopRecording() : startRecording();
 }
 
-function startRecording() {
-  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-  recognition = new SR();
-  recognition.lang = 'ru-RU';
-  recognition.continuous = false;
-  recognition.interimResults = true;
+// ══════════════════════════════════════════════════════════════
+//  ОСНОВНАЯ ЗАПИСЬ (кнопка или после wake word)
+// ══════════════════════════════════════════════════════════════
+function toggleVoice() {
+  if (!hasSR) {
+    showNotification('❌ Браузер не поддерживает голосовой ввод. Используй Chrome.', 'error');
+    return;
+  }
+  if (isRecording) {
+    stopRecording(true); // остановить и отправить
+  } else {
+    startRecording();
+  }
+}
+
+function startRecording(fromWake = false) {
+  if (isRecording) return;
+  if (!hasSR) return;
+
+  // Останавливаем wake listener пока пишем основное
+  if (wakeRecognition) { try { wakeRecognition.stop(); } catch(e){} }
+
+  finalText    = '';
+  interimText  = '';
+  isRecording  = true;
+  setVoiceState('recording');
+
+  if (fromWake) {
+    showNotification('🎤 Слушаю вас, ' + (window.KHIRAD_NAME || 'Khirad') + ' готов!', 'success');
+  }
+
+  recognition             = new SR();
+  recognition.lang        = detectLang();
+  recognition.continuous  = true;      // продолжает пока не скажем стоп
+  recognition.interimResults = true;   // показываем текст в реальном времени
+
   recognition.onstart = () => {
-    isRecording = true;
-    voiceBtn.classList.add('recording');
-    voiceTooltip.textContent = '● Запись...';
+    setVoiceState('recording');
   };
+
   recognition.onresult = (e) => {
-    input.value = Array.from(e.results).map(r => r[0].transcript).join('');
-    sendBtn.disabled = !input.value.trim();
+    let interim = '';
+    let final   = '';
+    for (let i = e.resultIndex; i < e.results.length; i++) {
+      const t = e.results[i][0].transcript;
+      if (e.results[i].isFinal) {
+        final += t + ' ';
+      } else {
+        interim += t;
+      }
+    }
+    if (final) finalText += final;
+    interimText = interim;
+
+    // Пишем в поле ввода в реальном времени (final + interim)
+    const combined = (finalText + interimText).trim();
+    if (input) {
+      input.value = combined;
+      input.dispatchEvent(new Event('input'));
+      // Авто-ресайз
+      input.style.height = 'auto';
+      input.style.height = Math.min(input.scrollHeight, 120) + 'px';
+    }
+
+    // Проверяем слово-стоп: если пользователь сказал "отправить" / "готово"
+    const low = combined.toLowerCase();
+    if (/\b(отправить|готово|send|submit|ок хирад|ok khirad)\b/.test(low)) {
+      // Убираем стоп-слово из текста
+      const clean = combined
+        .replace(/\b(отправить|готово|send|submit|ок хирад|ok khirad)\b/gi,'')
+        .trim();
+      if (input) input.value = clean;
+      stopRecording(true);
+      return;
+    }
+
+    // Авто-стоп через 3 сек тишины (если есть финальный текст)
+    clearTimeout(window._voiceSilenceTimer);
+    if (finalText.trim()) {
+      window._voiceSilenceTimer = setTimeout(() => {
+        if (isRecording) stopRecording(false); // просто стоп, не отправляем
+      }, 3000);
+    }
   };
-  recognition.onend = () => stopRecording();
-  recognition.onerror = () => stopRecording();
+
+  recognition.onerror = (e) => {
+    if (e.error === 'no-speech') {
+      // Тишина — просто останавливаемся
+      stopRecording(false);
+    } else if (e.error !== 'aborted') {
+      showNotification('Ошибка микрофона: ' + e.error, 'error');
+      stopRecording(false);
+    }
+  };
+
+  recognition.onend = () => {
+    // SpeechRecognition остановился сам (браузерный лимит ~1 мин)
+    // Если есть текст — оставляем в поле, пользователь сам нажмёт отправить
+    isRecording = false;
+    setVoiceState('idle');
+    // Возобновляем wake listener
+    if (wakeListening) setTimeout(startWakeListener, 500);
+  };
+
   recognition.start();
 }
 
-function stopRecording() {
+function stopRecording(sendNow = false) {
+  clearTimeout(window._voiceSilenceTimer);
   isRecording = false;
-  voiceBtn.classList.remove('recording');
-  voiceTooltip.textContent = 'Нажмите для записи';
-  if (recognition) { recognition.stop(); recognition = null; }
+  interimText = '';
+
+  if (recognition) {
+    try { recognition.stop(); } catch(e) {}
+    recognition = null;
+  }
+
+  setVoiceState('processing');
+
+  const text = (input ? input.value : finalText).trim();
+  finalText = '';
+
+  if (sendNow && text) {
+    setTimeout(() => {
+      setVoiceState('idle');
+      sendMessage(); // отправляем
+    }, 300);
+  } else {
+    setTimeout(() => {
+      setVoiceState('idle');
+      if (wakeListening) startWakeListener(); // возобновляем wake
+    }, 300);
+  }
 }
+
+// ══════════════════════════════════════════════════════════════
+//  WAKE WORD LISTENER — фоновый, всегда слушает "Khirad"
+// ══════════════════════════════════════════════════════════════
+function detectLang() {
+  // Определяем язык из настроек браузера
+  const lang = navigator.language || 'ru-RU';
+  if (lang.startsWith('ru')) return 'ru-RU';
+  if (lang.startsWith('en')) return 'en-US';
+  if (lang.startsWith('tg')) return 'tg-TJ';
+  return 'ru-RU';
+}
+
+function startWakeListener() {
+  if (!hasSR || isRecording || wakeRecognition) return;
+
+  wakeRecognition               = new SR();
+  wakeRecognition.lang          = detectLang();
+  wakeRecognition.continuous    = true;
+  wakeRecognition.interimResults= true;
+  wakeListening                 = true;
+  setVoiceState('wake');
+
+  wakeRecognition.onresult = (e) => {
+    for (let i = e.resultIndex; i < e.results.length; i++) {
+      const transcript = e.results[i][0].transcript.toLowerCase().trim();
+      // Проверяем wake word
+      const detected = WAKE_WORDS.some(w => transcript.includes(w));
+      if (detected) {
+        // Останавливаем wake listener
+        try { wakeRecognition.stop(); } catch(ex) {}
+        wakeRecognition = null;
+        wakeListening   = false;
+        // Показываем анимацию активации
+        showWakeActivation();
+        // Через 600мс начинаем основную запись
+        setTimeout(() => startRecording(true), 600);
+        return;
+      }
+    }
+  };
+
+  wakeRecognition.onerror = (e) => {
+    if (e.error === 'aborted') return;
+    wakeRecognition = null;
+    // Перезапускаем через 2 сек
+    if (wakeListening && !isRecording) {
+      setTimeout(startWakeListener, 2000);
+    }
+  };
+
+  wakeRecognition.onend = () => {
+    wakeRecognition = null;
+    // Перезапускаем автоматически (браузер ограничивает сессию)
+    if (wakeListening && !isRecording) {
+      setTimeout(startWakeListener, 500);
+    }
+  };
+
+  try {
+    wakeRecognition.start();
+  } catch(e) {
+    wakeRecognition = null;
+    setTimeout(startWakeListener, 2000);
+  }
+}
+
+function stopWakeListener() {
+  wakeListening = false;
+  if (wakeRecognition) {
+    try { wakeRecognition.stop(); } catch(e) {}
+    wakeRecognition = null;
+  }
+  setVoiceState('idle');
+}
+
+function toggleWakeWord() {
+  if (wakeListening) {
+    stopWakeListener();
+    showNotification('🔇 Распознавание "Khirad" отключено', 'info');
+    if (wakeToggleBtn) {
+      wakeToggleBtn.classList.remove('active');
+      wakeToggleBtn.title = 'Включить "Khirad" wake word';
+    }
+    localStorage.setItem('khirad_wake', '0');
+  } else {
+    startWakeListener();
+    showNotification('👂 Скажи "Khirad" чтобы активировать!', 'success');
+    if (wakeToggleBtn) {
+      wakeToggleBtn.classList.add('active');
+      wakeToggleBtn.title = 'Отключить "Khirad" wake word';
+    }
+    localStorage.setItem('khirad_wake', '1');
+  }
+}
+
+// ── Анимация активации wake word ────────────────────────────
+function showWakeActivation() {
+  // Пульсирующий оверлей на 600мс
+  const el = document.createElement('div');
+  el.id = 'wakeFlash';
+  el.style.cssText = `
+    position:fixed; inset:0; z-index:9999; pointer-events:none;
+    background:radial-gradient(circle at 50% 50%,
+      rgba(124,58,237,0.25) 0%, transparent 70%);
+    animation: wakeFlash 0.6s ease-out forwards;
+  `;
+  document.body.appendChild(el);
+  // Вибрация на телефоне
+  if (navigator.vibrate) navigator.vibrate([50, 30, 80]);
+  // Звуковой сигнал
+  playWakeSound();
+  setTimeout(() => el.remove(), 650);
+}
+
+function playWakeSound() {
+  try {
+    const ctx  = new (window.AudioContext || window.webkitAudioContext)();
+    const osc  = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.type            = 'sine';
+    osc.frequency.setValueAtTime(880, ctx.currentTime);
+    osc.frequency.exponentialRampToValueAtTime(440, ctx.currentTime + 0.15);
+    gain.gain.setValueAtTime(0.3, ctx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.3);
+    osc.start(ctx.currentTime);
+    osc.stop(ctx.currentTime + 0.3);
+  } catch(e) {}
+}
+
+// ── Инициализация при загрузке страницы ─────────────────────
+const wakeToggleBtn = document.getElementById('wakeToggleBtn');
+
+(function initVoice() {
+  if (!hasSR) {
+    if (voiceBtn) {
+      voiceBtn.style.opacity = '0.4';
+      voiceBtn.title = 'Голосовой ввод не поддерживается. Используй Chrome.';
+    }
+    if (wakeToggleBtn) wakeToggleBtn.style.display = 'none';
+    return;
+  }
+  // Восстанавливаем состояние wake word из localStorage
+  const savedWake = localStorage.getItem('khirad_wake');
+  if (savedWake === '1') {
+    setTimeout(() => {
+      startWakeListener();
+      if (wakeToggleBtn) wakeToggleBtn.classList.add('active');
+    }, 1000);
+  }
+})();
+
+
 
 // ========== САЙДБАР ==========
 function toggleSidebar() {
