@@ -556,6 +556,181 @@ def auth_login_user(email, password):
 # ========== НОВЫЕ API ФУНКЦИИ ================================
 # ============================================================
 
+# ═══════════════════════════════════════════════════════
+# УНИВЕРСАЛЬНЫЙ AI ВЫЗОВ
+# ═══════════════════════════════════════════════════════
+VISION_CAPABLE = {
+    "groq":       ["meta-llama/llama-4-scout-17b-16e-instruct",
+                   "meta-llama/llama-4-maverick-17b-16e-instruct"],
+    "openrouter": ["google/gemini-2.0-flash-001","google/gemini-flash-1.5",
+                   "openai/gpt-4o","openai/gpt-4o-mini",
+                   "anthropic/claude-opus-4","anthropic/claude-sonnet-4-5"],
+    "cerebras":[], "ollama":[], "llama_local":[]
+}
+
+def call_ai(messages, *, system=None, model=None, provider=None,
+            temperature=0.7, max_tokens=4000, timeout=120):
+    pkey = provider or current_provider
+    mdl  = model    or current_model
+    if pkey not in PROVIDERS: pkey = "groq"
+    prov = PROVIDERS[pkey]
+    msgs = []
+    if system: msgs.append({"role":"system","content":system})
+    msgs.extend(messages)
+    headers = {"Content-Type":"application/json"}
+
+    if pkey == "ollama":
+        url = os.getenv("OLLAMA_URL","http://localhost:11434")
+        try:
+            r = requests.post(f"{url}/api/chat",
+                json={"model":mdl,"messages":msgs,"stream":False,
+                      "options":{"temperature":temperature}},
+                headers=headers, timeout=timeout)
+            r.raise_for_status()
+            return r.json()["message"]["content"], None
+        except Exception as e: return None, f"Ollama: {e}"
+
+    if pkey == "llama_local":
+        url = os.getenv("LLAMA_CPP_URL","http://127.0.0.1:8080")
+        try:
+            r = requests.post(f"{url}/v1/chat/completions",
+                json={"model":mdl,"messages":msgs,"temperature":temperature,
+                      "max_tokens":max_tokens,"stream":False},
+                headers=headers, timeout=timeout)
+            r.raise_for_status()
+            return r.json()["choices"][0]["message"]["content"], None
+        except Exception as e: return None, f"llama.cpp: {e}"
+
+    if pkey == "cerebras":
+        key = os.getenv("CEREBRAS_API_KEY","")
+        if not key: return None,"CEREBRAS_API_KEY не задан"
+        try:
+            r = requests.post("https://api.cerebras.ai/v1/chat/completions",
+                json={"model":mdl,"messages":msgs,
+                      "temperature":temperature,"max_tokens":max_tokens},
+                headers={**headers,"Authorization":f"Bearer {key}"},
+                timeout=timeout)
+            r.raise_for_status()
+            return r.json()["choices"][0]["message"]["content"], None
+        except Exception as e: return None, f"Cerebras: {e}"
+
+    if pkey == "openrouter":
+        key = os.getenv("OPENROUTER_API_KEY","")
+        if not key: return None,"OPENROUTER_API_KEY не задан"
+        try:
+            r = requests.post("https://openrouter.ai/api/v1/chat/completions",
+                json={"model":mdl,"messages":msgs,
+                      "temperature":temperature,"max_tokens":max_tokens},
+                headers={**headers,"Authorization":f"Bearer {key}",
+                         "HTTP-Referer":"http://localhost:5000","X-Title":"NovaMind AI"},
+                timeout=timeout)
+            r.raise_for_status()
+            return r.json()["choices"][0]["message"]["content"], None
+        except Exception as e: return None, f"OpenRouter: {e}"
+
+    # Groq (default)
+    payload = {"model":mdl,"messages":msgs,
+               "temperature":temperature,"max_tokens":max_tokens}
+    d, err = groq_request_with_rotation(
+        prov["url"], payload, prov["headers"].copy(), timeout=timeout)
+    if err: return None, f"Groq: {err}"
+    return d["choices"][0]["message"]["content"], None
+
+
+def _vision_fallback(data_url, prompt, timeout):
+    key = get_groq_key()
+    if key:
+        try:
+            r = requests.post("https://api.groq.com/openai/v1/chat/completions",
+                headers={"Authorization":f"Bearer {key}","Content-Type":"application/json"},
+                json={"model":"meta-llama/llama-4-scout-17b-16e-instruct",
+                      "messages":[{"role":"user","content":[
+                          {"type":"text","text":prompt},
+                          {"type":"image_url","image_url":{"url":data_url}}]}],
+                      "max_tokens":1500}, timeout=timeout)
+            r.raise_for_status()
+            return r.json()["choices"][0]["message"]["content"],None,"Groq Vision (fallback)"
+        except: pass
+    key2 = os.getenv("OPENROUTER_API_KEY","")
+    if key2:
+        try:
+            r = requests.post("https://openrouter.ai/api/v1/chat/completions",
+                headers={"Authorization":f"Bearer {key2}","Content-Type":"application/json"},
+                json={"model":"google/gemini-2.0-flash-001",
+                      "messages":[{"role":"user","content":[
+                          {"type":"text","text":prompt},
+                          {"type":"image_url","image_url":{"url":data_url}}]}],
+                      "max_tokens":1500}, timeout=timeout)
+            r.raise_for_status()
+            return r.json()["choices"][0]["message"]["content"],None,"OpenRouter Vision (fallback)"
+        except: pass
+    return None,"Vision не поддерживается текущей моделью. Переключись на Groq или OpenRouter.","none"
+
+
+def call_ai_vision(image_b64, mime_type, prompt, *, timeout=60):
+    pkey = current_provider
+    mdl  = current_model
+    data_url = f"data:{mime_type};base64,{image_b64}"
+
+    if pkey == "groq":
+        vm = mdl if mdl in VISION_CAPABLE["groq"] else "meta-llama/llama-4-scout-17b-16e-instruct"
+        key = get_groq_key()
+        if not key: return _vision_fallback(data_url, prompt, timeout)
+        try:
+            r = requests.post("https://api.groq.com/openai/v1/chat/completions",
+                headers={"Authorization":f"Bearer {key}","Content-Type":"application/json"},
+                json={"model":vm,"messages":[{"role":"user","content":[
+                    {"type":"text","text":prompt},
+                    {"type":"image_url","image_url":{"url":data_url}}]}],
+                    "max_tokens":1500}, timeout=timeout)
+            r.raise_for_status()
+            return r.json()["choices"][0]["message"]["content"],None,f"Groq ({vm})"
+        except Exception as e: return _vision_fallback(data_url, prompt, timeout)
+
+    if pkey == "openrouter":
+        key = os.getenv("OPENROUTER_API_KEY","")
+        vm  = mdl if mdl in VISION_CAPABLE["openrouter"] else "google/gemini-2.0-flash-001"
+        if not key: return _vision_fallback(data_url, prompt, timeout)
+        try:
+            r = requests.post("https://openrouter.ai/api/v1/chat/completions",
+                headers={"Authorization":f"Bearer {key}","Content-Type":"application/json",
+                         "HTTP-Referer":"http://localhost:5000"},
+                json={"model":vm,"messages":[{"role":"user","content":[
+                    {"type":"text","text":prompt},
+                    {"type":"image_url","image_url":{"url":data_url}}]}],
+                    "max_tokens":1500}, timeout=timeout)
+            r.raise_for_status()
+            return r.json()["choices"][0]["message"]["content"],None,f"OpenRouter ({vm})"
+        except Exception as e: return _vision_fallback(data_url, prompt, timeout)
+
+    if pkey == "llama_local":
+        url = os.getenv("LLAMA_CPP_URL","http://127.0.0.1:8080")
+        try:
+            r = requests.post(f"{url}/v1/chat/completions",
+                headers={"Content-Type":"application/json"},
+                json={"model":mdl,"messages":[{"role":"user","content":[
+                    {"type":"text","text":prompt},
+                    {"type":"image_url","image_url":{"url":data_url}}]}],
+                    "max_tokens":1500,"stream":False}, timeout=timeout)
+            r.raise_for_status()
+            return r.json()["choices"][0]["message"]["content"],None,f"llama.cpp ({mdl})"
+        except: return _vision_fallback(data_url, prompt, timeout)
+
+    if pkey == "ollama":
+        url = os.getenv("OLLAMA_URL","http://localhost:11434")
+        try:
+            r = requests.post(f"{url}/api/chat",
+                headers={"Content-Type":"application/json"},
+                json={"model":mdl,"messages":[
+                    {"role":"user","content":prompt,"images":[image_b64]}],
+                    "stream":False}, timeout=timeout)
+            r.raise_for_status()
+            return r.json()["message"]["content"],None,f"Ollama ({mdl})"
+        except: return _vision_fallback(data_url, prompt, timeout)
+
+    return _vision_fallback(data_url, prompt, timeout)
+
+
 def get_weather(city):
     """Погода через wttr.in — полностью БЕСПЛАТНО, без ключа"""
     try:
@@ -796,152 +971,52 @@ def news_route():
 @app.route('/api/auto_search', methods=['POST'])
 def auto_search():
     data = request.get_json() or {}
-    user_message = data.get('message', '').strip()
+    user_message = data.get('message','').strip()
     if not user_message:
-        return jsonify({'error': 'Пустое сообщение'})
-    provider = PROVIDERS["groq"]
-    decision_prompt = f"""Ты - интеллектуальный фильтр для AI-ассистента.
-
-Пользователь написал: "{user_message}"
-
-Твоя задача: определить, нужны ли актуальные данные из интернета для ответа на этот запрос.
-
-Запросы, требующие поиска (новости, актуальные данные, события, цены, погода, спорт, технологии, политика, наука, кино, и т.д.):
-- "Какая сегодня погода?"
-- "Последние новости про ..."
-- "Курс доллара"
-- "Кто выиграл матч вчера?"
-- "Новейшие технологии ..."
-- "Какие фильмы вышли в 2026?"
-
-Запросы, НЕ требующие поиска (теория, логика, код, общие знания):
-- "Объясни рекурсию"
-- "Напиши код на Python"
-- "Как работает нейросеть"
-- "Переведи текст"
-- "Реши уравнение"
-
-Ответь ТОЛЬКО одним словом: SEARCH или DIRECT."""
-    decision_payload = {
-        "model": "llama-3.1-8b-instant",
-        "messages": [{"role": "user", "content": decision_prompt}],
-        "temperature": 0.1,
-        "max_tokens": 10,
-    }
-    data_decision, error = groq_request_with_rotation(
-        provider["url"], decision_payload, provider["headers"].copy(), timeout=15
-    )
-    if error:
-        print(f"Auto search decision error: {error}")
-        decision = "DIRECT"
-    else:
-        decision = data_decision["choices"][0]["message"]["content"].strip().upper()
-    if "SEARCH" not in decision:
-        return jsonify({'needs_search': False, 'reply': None})
-    search_query_prompt = f"""Пользователь написал: "{user_message}"
-
-Сформулируй краткий поисковый запрос для Google (1-5 слов), который поможет найти актуальную информацию.
-
-Ответь ТОЛЬКО поисковым запросом, без кавычек и пояснений."""
-    query_payload = {
-        "model": "llama-3.1-8b-instant",
-        "messages": [{"role": "user", "content": search_query_prompt}],
-        "temperature": 0.1,
-        "max_tokens": 50,
-    }
-    data_query, error = groq_request_with_rotation(
-        provider["url"], query_payload, provider["headers"].copy(), timeout=15
-    )
-    if error:
-        print(f"Auto search query generation error: {error}")
-        search_query = user_message
-    else:
-        search_query = data_query["choices"][0]["message"]["content"].strip()
-        search_query = search_query.strip('"').strip("'")
-    search_result = search_web(search_query)
-    if not search_result:
-        search_result = "Поиск не дал результатов."
-    final_prompt = f"""Пользователь спросил: "{user_message}"
-
-Вот актуальная информация из интернета (Google Search):
-{search_result}
-
-Твоя задача:
-- Дай подробный, полезный ответ на вопрос пользователя
-- Используй информацию из поиска
-- Добавь свое объяснение и понимание
-- Отвечай на русском языке
-- Используй Markdown: заголовки, списки, таблицы если нужно
-- В конце напиши: "Ответ на основе поиска Google" """
-    final_payload = {
-        "model": current_model,
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": final_prompt}
-        ],
-        "temperature": 0.5,
-        "max_tokens": 3000,
-    }
-    data_final, error = groq_request_with_rotation(
-        provider["url"], final_payload, provider["headers"].copy(), timeout=90
-    )
-    if error:
-        return jsonify({
-            'needs_search': True,
-            'search_query': search_query,
-            'reply': f'Результаты по Google "{search_query}":\n\n{search_result}\n\n(Groq недоступен: {error})'
-        })
-    reply = data_final["choices"][0]["message"]["content"]
+        return jsonify({'error':'Пустое сообщение'})
+    # Решаем нужен ли поиск (всегда через Groq — это быстрая задача)
+    dec, _ = call_ai(
+        [{"role":"user","content":f'Нужны ли актуальные данные из интернета для: "{user_message}"? Ответь ТОЛЬКО: SEARCH или DIRECT.'}],
+        provider="groq", model="llama-3.1-8b-instant",
+        temperature=0.1, max_tokens=10, timeout=15)
+    if not dec or "SEARCH" not in dec.upper():
+        return jsonify({'needs_search':False,'reply':None})
+    # Формируем запрос
+    qr, _ = call_ai(
+        [{"role":"user","content":f'Краткий поисковый запрос (1-5 слов) для: "{user_message}". Только запрос.'}],
+        provider="groq", model="llama-3.1-8b-instant",
+        temperature=0.1, max_tokens=30, timeout=10)
+    query = (qr or user_message).strip().strip('"').strip("'")
+    search_result = search_web(query) or "Поиск не дал результатов."
+    # Финальный ответ через ТЕКУЩИЙ провайдер
+    reply, err = call_ai(
+        [{"role":"user","content":f'Вопрос: "{user_message}"\n\nДанные из интернета:\n{search_result}\n\nДай подробный ответ на русском (Markdown). В конце: «Ответ на основе поиска»'}],
+        system=system_prompt, temperature=0.5, max_tokens=3000, timeout=90)
+    if err:
+        reply = f"**Результаты поиска «{query}»:**\n\n{search_result}\n\n⚠️ {err}"
     append_to_history("user", f"[Авто поиск] {user_message}")
     append_to_history("assistant", reply)
-    return jsonify({
-        'needs_search': True,
-        'search_query': search_query,
-        'reply': reply
-    })
+    return jsonify({'needs_search':True,'search_query':query,'reply':reply})
+
+
 
 @app.route('/api/web_search_groq', methods=['POST'])
 def web_search_groq():
     data = request.get_json() or {}
-    query = data.get('query', '').strip()
+    query = data.get('query','').strip()
     if not query:
-        return jsonify({'error': 'Пустой запрос'})
-    search_result = search_web(query)
-    if not search_result:
-        search_result = "Поиск не дал результатов. Отвечай на основе своих знаний."
-    provider = PROVIDERS["groq"]
-    groq_prompt = f"""Пользователь спросил: "{query}"
-
-Вот результаты из Google:
-{search_result}
-
-Твоя задача:
-- Дай подробный, полезный ответ на вопрос пользователя
-- Используй информацию из поиска
-- Добавь свое объяснение и понимание
-- Отвечай на русском языке
-- Используй Markdown: заголовки, списки, таблицы если нужно
-- В конце напиши: "*Ответ на основе поиска Google*" """
-    payload = {
-        "model": "openai/gpt-oss-120b",
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": groq_prompt}
-        ],
-        "temperature": 0.5,
-        "max_tokens": 3000,
-    }
-    data_resp, error = groq_request_with_rotation(
-        provider["url"], payload, provider["headers"].copy(), timeout=90
-    )
-    if error:
-        return jsonify({
-            'reply': f'**Результаты Google по запросу "{query}":**\n\n{search_result}\n\n*Groq недоступен: {error}*'
-        })
-    reply = data_resp["choices"][0]["message"]["content"]
-    append_to_history("user", f"[Поиск Google] {query}")
+        return jsonify({'error':'Пустой запрос'})
+    search_result = search_web(query) or "Поиск не дал результатов."
+    reply, err = call_ai(
+        [{"role":"user","content":f'Вопрос: "{query}"\n\nРезультаты поиска:\n{search_result}\n\nДай подробный ответ на русском (Markdown). В конце: «Ответ на основе поиска»'}],
+        system=system_prompt, temperature=0.5, max_tokens=3000, timeout=90)
+    if err:
+        reply = f"**Результаты поиска «{query}»:**\n\n{search_result}\n\n⚠️ {err}"
+    append_to_history("user", f"[Поиск] {query}")
     append_to_history("assistant", reply)
-    return jsonify({'reply': reply})
+    return jsonify({'reply':reply})
+
+
 
 @app.route('/')
 def index():
@@ -1213,23 +1288,13 @@ def handle_command():
     if cmd == "code":
         query = " ".join(args)
         if not query:
-            return jsonify({'error': 'Укажите, какой код создать'})
-        provider = PROVIDERS[current_provider]
-        payload = {
-            "model": current_model,
-            "messages": [
-                {"role": "system", "content": "Ты программист. Пиши чистый код с комментариями."},
-                {"role": "user", "content": f"Напиши код: {query}"}
-            ],
-            "temperature": 0.3,
-            "max_tokens": 3000,
-        }
-        data_resp, error = groq_request_with_rotation(
-            provider["url"], payload, provider["headers"].copy(), timeout=60
-        )
-        if error:
-            return jsonify({'error': error})
-        reply = data_resp["choices"][0]["message"]["content"]
+            return jsonify({'error': 'Укажите что написать. Пример: /code сортировка пузырьком на Python'})
+        reply, err = call_ai(
+            [{"role":"user","content":f"Напиши код: {query}"}],
+            system="Ты опытный программист. Пиши чистый рабочий код с комментариями на русском языке.",
+            temperature=0.3, max_tokens=4000, timeout=90)
+        if err:
+            return jsonify({'error': err})
         return jsonify({'result': reply})
     if cmd == "alias":
         if not args:
@@ -1272,56 +1337,14 @@ def handle_command():
         search_result = search_web(query)
         if not search_result:
             search_result = "Информация не найдена в интернете."
-        provider = PROVIDERS["groq"]
-        analysis_prompt = f"""Проанализируй следующую информацию и выдели 3-5 ключевых фактов по вопросу: "{query}"
-
-Информация из интернета:
-{search_result}
-
-Выдели только ключевые факты, коротко."""
-        analysis_payload = {
-            "model": "openai/gpt-oss-120b",
-            "messages": [{"role": "user", "content": analysis_prompt}],
-            "temperature": 0.3,
-            "max_tokens": 1000,
-        }
-        data_analysis, error = groq_request_with_rotation(
-            provider["url"], analysis_payload, provider["headers"].copy(), timeout=60
-        )
-        if error:
-            analysis = f"Анализ не удался: {error}.\n\nИспользую сырой поиск:\n{search_result[:1000]}"
-        else:
-            analysis = data_analysis["choices"][0]["message"]["content"]
-        final_prompt = f"""На основе анализа напиши подробный, структурированный ответ на вопрос: "{query}"
-
-Анализ:
-{analysis}
-
-Требования к ответу:
-- Подробный (3-5 абзацев)
-- Если есть сравнения, характеристики, данные, списки - ОБЯЗАТЕЛЬНО используй Markdown-таблицы
-- Структурированный (с маркированными списками где уместно)
-- На русском языке
-- Укажи источники, если они есть в анализе
-
-Пример таблицы:
-| Характеристика | Значение |
-|---------------|----------|
-| Скорость | 100 км/ч |
-| Вес | 10 кг |"""
-        final_payload = {
-            "model": "openai/gpt-oss-120b",
-            "messages": [{"role": "user", "content": final_prompt}],
-            "temperature": 0.5,
-            "max_tokens": 4000,
-        }
-        data_final, error = groq_request_with_rotation(
-            provider["url"], final_payload, provider["headers"].copy(), timeout=90
-        )
-        if error:
-            final_answer = f"**Результаты поиска:**\n\n{search_result}\n\n**Анализ:**\n\n{analysis}\n\n(Финальный ответ не удалось сгенерировать: {error})"
-        else:
-            final_answer = data_final["choices"][0]["message"]["content"]
+        analysis, err1 = call_ai(
+            [{"role":"user","content":f'''Выдели 3-5 ключевых фактов по вопросу: "{query}"\n\nИнформация:\n{search_result}\n\nКоротко.'''}],
+            temperature=0.3, max_tokens=1000, timeout=60)
+        if err1: analysis = f"Ошибка анализа: {err1}\n{search_result[:600]}"
+        final_answer, err2 = call_ai(
+            [{"role":"user","content":f'''Напиши подробный ответ на вопрос: "{query}"\n\nАнализ:\n{analysis}\n\nТребования: 3-5 абзацев, русский язык, Markdown таблицы где уместно.'''}],
+            temperature=0.5, max_tokens=4000, timeout=90)
+        if err2: final_answer = f"**Поиск «{query}»:**\n\n{search_result}\n\n**Анализ:**\n\n{analysis}\n\n⚠️ {err2}"
         return jsonify({'result': final_answer})
     return jsonify({'error': f'Неизвестная команда: /{cmd}'})
 
@@ -1340,181 +1363,90 @@ def generated_image():
 @app.route('/upload_image', methods=['POST'])
 def upload_image():
     if 'image' not in request.files:
-        return jsonify({'error': 'Нет файла'}), 400
+        return jsonify({'error':'Нет файла'}), 400
     file = request.files['image']
-    if file.filename == '':
-        return jsonify({'error': 'Файл не выбран'}), 400
-    user_desc = request.form.get('description', '').strip()
-    if not user_desc:
-        user_desc = 'Подробно опиши что изображено на картинке. Опиши объекты, цвета, текст если есть, настроение и все детали.'
-    upload_dir = os.path.join(os.path.dirname(__file__), "uploads")
+    if not file.filename:
+        return jsonify({'error':'Файл не выбран'}), 400
+    user_desc = request.form.get('description','').strip() or         'Подробно опиши изображение: объекты, цвета, текст, настроение.'
+    upload_dir = os.path.join(os.path.dirname(__file__),"uploads")
     os.makedirs(upload_dir, exist_ok=True)
-    import base64 as b64
-    filename = file.filename
-    filepath = os.path.join(upload_dir, filename)
+    filename  = file.filename
+    filepath  = os.path.join(upload_dir, filename)
     file.save(filepath)
     try:
-        with open(filepath, "rb") as f:
-            image_data = b64.b64encode(f.read()).decode('utf-8')
-        mime_type = "image/jpeg"
-        if filename.lower().endswith(".png"):
-            mime_type = "image/png"
-        elif filename.lower().endswith(".webp"):
-            mime_type = "image/webp"
-        elif filename.lower().endswith(".gif"):
-            mime_type = "image/gif"
-        data_url = f"data:{mime_type};base64,{image_data}"
-        groq_key = os.getenv("GROQ_API_KEY", "")
-        if not groq_key:
-            return jsonify({'error': 'GROQ_API_KEY не задан в .env'})
-        headers = {
-            "Authorization": f"Bearer {groq_key}",
-            "Content-Type": "application/json"
-        }
-        payload = {
-            "model": "meta-llama/llama-4-scout-17b-16e-instruct",
-            "messages": [
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": user_desc},
-                        {"type": "image_url", "image_url": {"url": data_url}}
-                    ]
-                }
-            ],
-            "max_tokens": 1500
-        }
-        resp = requests.post(
-            "https://api.groq.com/openai/v1/chat/completions",
-            headers=headers,
-            json=payload,
-            timeout=30
-        )
-        resp.raise_for_status()
-        description = resp.json()["choices"][0]["message"]["content"]
-        append_to_history("user", f"[Изображение: {filename}] {user_desc}")
-        append_to_history("assistant", description)
-        return jsonify({
-            'result': f'**Анализ изображения {filename} (Groq Vision):**\n\n{description}'
-        })
+        import base64 as b64mod
+        with open(filepath,"rb") as f:
+            img_b64 = b64mod.b64encode(f.read()).decode('utf-8')
+        ext = filename.lower()
+        mime = ("image/png"  if ext.endswith(".png")  else
+                "image/webp" if ext.endswith(".webp") else
+                "image/gif"  if ext.endswith(".gif")  else "image/jpeg")
+        reply, err, prov_used = call_ai_vision(img_b64, mime, user_desc)
+        if err:
+            return jsonify({'error':f'Vision недоступен: {err}. Переключись на Groq или OpenRouter.'})
+        append_to_history("user",      f"[Изображение: {filename}] {user_desc}")
+        append_to_history("assistant", reply)
+        return jsonify({'result':f'**🖼️ {filename} [{prov_used}]:**\n\n{reply}'})
     except Exception as e:
-        print(f"upload_image error: {e}")
-        return jsonify({'error': f'Ошибка анализа изображения: {str(e)}'})
+        return jsonify({'error':f'Ошибка: {e}'})
+
+
 
 @app.route('/upload_file', methods=['POST'])
 def upload_file():
     if 'file' not in request.files:
-        return jsonify({'error': 'Нет файла'}), 400
+        return jsonify({'error':'Нет файла'}), 400
     file = request.files['file']
-    if file.filename == '':
-        return jsonify({'error': 'Файл не выбран'}), 400
-    user_desc = request.form.get('description', '').strip()
-    upload_dir = os.path.join(os.path.dirname(__file__), "uploads")
+    if not file.filename:
+        return jsonify({'error':'Файл не выбран'}), 400
+    user_desc = request.form.get('description','').strip()
+    upload_dir = os.path.join(os.path.dirname(__file__),"uploads")
     os.makedirs(upload_dir, exist_ok=True)
     filename = file.filename
     filepath = os.path.join(upload_dir, filename)
     file.save(filepath)
-    text_extensions = ['.txt', '.json', '.csv', '.py', '.js', '.html', '.css', '.md', '.xml', '.yaml', '.yml', '.log', '.ini', '.cfg']
+    text_exts = ['.txt','.json','.csv','.py','.js','.html','.css',
+                 '.md','.xml','.yaml','.yml','.log','.ini','.cfg']
     ext = os.path.splitext(filename)[1].lower()
-    if ext not in text_extensions:
-        return jsonify({
-            'result': f'Формат {ext} не поддерживается.\n\nПоддерживаются: txt, json, csv, py, js, html, css, md, xml, yaml, log'
-        })
+    if ext not in text_exts:
+        return jsonify({'result':f'Формат {ext} не поддерживается. Поддерживаются: {", ".join(text_exts)}'})
     try:
-        with open(filepath, "r", encoding="utf-8", errors="ignore") as f:
-            file_content = f.read()[:5000]
+        with open(filepath,"r",encoding="utf-8",errors="ignore") as f:
+            content = f.read()[:6000]
     except Exception as e:
-        return jsonify({'error': f'Ошибка чтения файла: {str(e)}'})
-    if not file_content.strip():
-        return jsonify({'result': f'Файл {filename} пустой.'})
+        return jsonify({'error':f'Ошибка чтения: {e}'})
+    if not content.strip():
+        return jsonify({'result':f'Файл {filename} пустой.'})
     if not user_desc:
-        if ext == '.py':
-            user_desc = 'Проанализируй этот Python код: объясни что он делает, найди ошибки и предложи улучшения.'
-        elif ext in ['.js', '.ts']:
-            user_desc = 'Проанализируй этот JavaScript код: объясни структуру, найди проблемы.'
-        elif ext == '.html':
-            user_desc = 'Проанализируй эту HTML страницу: опиши структуру и найди проблемы.'
-        elif ext == '.css':
-            user_desc = 'Проанализируй этот CSS файл: опиши стили и найди проблемы.'
-        elif ext == '.json':
-            user_desc = 'Опиши структуру этого JSON и объясни что в нем хранится.'
-        elif ext == '.csv':
-            user_desc = 'Проанализируй эти CSV данные: опиши колонки и содержимое.'
-        elif ext == '.md':
-            user_desc = 'Сделай резюме этого Markdown документа и выдели главное.'
-        else:
-            user_desc = 'Подробно проанализируй содержимое этого файла и объясни что в нем.'
-    analysis_prompt = f"""Пользователь загрузил файл: {filename}
+        auto = {'.py':'Проанализируй Python: что делает, ошибки, улучшения.',
+                '.js':'Проанализируй JavaScript: структура, проблемы.',
+                '.html':'Проанализируй HTML: структура, проблемы.',
+                '.json':'Опиши структуру JSON.',
+                '.csv':'Проанализируй CSV: колонки и данные.',
+                '.md':'Резюме Markdown документа.'}
+        user_desc = auto.get(ext,'Подробно проанализируй содержимое файла.')
+    reply, err = call_ai(
+        [{"role":"user","content":f"Файл: {filename}\nЗадача: {user_desc}\n\nСодержимое:\n{content}\n\nОтвечай на русском, используй Markdown."}],
+        system=system_prompt, temperature=0.3, max_tokens=4000, timeout=120)
+    if err:
+        return jsonify({'result':f'⚠️ {err}\n\n**{filename}:**\n```\n{content[:2000]}\n```'})
+    append_to_history("user", f"[Файл: {filename}] {user_desc}")
+    append_to_history("assistant", reply)
+    return jsonify({'result':f'**📄 {filename} [{current_provider}/{current_model}]:**\n\n{reply}'})
 
-Задача: {user_desc}
 
-Содержимое файла:
-{file_content}
 
-Отвечай на русском языке. Используй Markdown форматирование."""
-    groq_error = None
-    try:
-        provider = PROVIDERS["groq"]
-        payload = {
-            "model": "llama-3.3-70b-versatile",
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": analysis_prompt}
-            ],
-            "temperature": 0.3,
-            "max_tokens": 3000,
-        }
-        resp = requests.post(
-            provider["url"],
-            json=payload,
-            headers=provider["headers"],
-            timeout=60
-        )
-        resp.raise_for_status()
-        reply = resp.json()["choices"][0]["message"]["content"]
-        append_to_history("user", f"[Файл: {filename}] {user_desc}")
-        append_to_history("assistant", reply)
-        return jsonify({
-            'result': f'**Анализ файла {filename} (Groq):**\n\n{reply}'
-        })
-    except Exception as e1:
-        groq_error = str(e1)
-        print(f"Groq upload_file error: {e1}")
-    try:
-        cerebras_key = os.getenv("CEREBRAS_API_KEY", "")
-        if not cerebras_key:
-            raise Exception("CEREBRAS_API_KEY не задан")
-        cerebras_headers = {
-            "Authorization": f"Bearer {cerebras_key}",
-            "Content-Type": "application/json"
-        }
-        payload = {
-            "model": "qwen-3-235b-a22b-instruct-2507",
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": analysis_prompt}
-            ],
-            "temperature": 0.3,
-            "max_tokens": 3000,
-        }
-        resp = requests.post(
-            "https://api.cerebras.ai/v1/chat/completions",
-            json=payload,
-            headers=cerebras_headers,
-            timeout=60
-        )
-        resp.raise_for_status()
-        reply = resp.json()["choices"][0]["message"]["content"]
-        append_to_history("user", f"[Файл: {filename}] {user_desc}")
-        append_to_history("assistant", reply)
-        return jsonify({
-            'result': f'**Анализ файла {filename} (Cerebras):**\n\n{reply}'
-        })
-    except Exception as e2:
-        print(f"Cerebras upload_file error: {e2}")
-        return jsonify({
-            'result': f'AI недоступен (Groq: {groq_error}, Cerebras: {str(e2)})\n\n**Содержимое файла {filename}:**\n\n```\n{file_content[:2000]}\n```'
-        })
+@app.route('/api/current_provider')
+def current_provider_info():
+    vm = VISION_CAPABLE.get(current_provider, [])
+    supports_vision = (current_model in vm or
+                       current_provider in ("openrouter","ollama","llama_local"))
+    return jsonify({
+        "provider": current_provider, "model": current_model,
+        "supports_vision": supports_vision,
+        "supports_search": True, "supports_files": True,
+        "label": f"{current_provider} / {current_model}"
+    })
 
 @app.route('/models_list')
 def models_list():
