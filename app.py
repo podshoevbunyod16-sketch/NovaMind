@@ -1110,6 +1110,249 @@ def admin_check():
         return jsonify({'logged_in': True, 'username': session.get('admin_username', 'admin')})
     return jsonify({'logged_in': False})
 
+# ════════════════════════════════════════════════════════════
+#  WEB FETCH — чтение содержимого сайтов (без браузера)
+#  Каскад: прямой запрос → Jina.ai Reader → Google Cache
+# ════════════════════════════════════════════════════════════
+
+import html as _html_mod
+
+_FETCH_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Linux; Android 13; Pixel 7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/120.0.6099.144 Mobile Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,*/*;q=0.9",
+    "Accept-Language": "ru-RU,ru;q=0.9,en;q=0.8",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Connection": "keep-alive",
+    "Upgrade-Insecure-Requests": "1",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+}
+
+
+def _html_to_text(html_str, max_chars=8000):
+    """Извлекает чистый текст из HTML без внешних библиотек."""
+    # Удаляем скрипты, стили, svg
+    for tag in ['script','style','svg','noscript','nav','footer','header','aside']:
+        html_str = re.sub(
+            rf'<{tag}[^>]*>.*?</{tag}>', ' ', html_str,
+            flags=re.DOTALL | re.IGNORECASE)
+    # Заменяем теги переносами
+    html_str = re.sub(r'<br\s*/?>', '\n', html_str, flags=re.IGNORECASE)
+    html_str = re.sub(r'</p>|</div>|</li>|</h[1-6]>', '\n', html_str, flags=re.IGNORECASE)
+    # Убираем все оставшиеся теги
+    text = re.sub(r'<[^>]+>', ' ', html_str)
+    # Декодируем HTML entities
+    text = _html_mod.unescape(text)
+    # Чистим пробелы
+    text = re.sub(r'[ \t]+', ' ', text)
+    text = re.sub(r'\n{3,}', '\n\n', text)
+    text = text.strip()
+    return text[:max_chars]
+
+
+def _fetch_direct(url, timeout=10):
+    """Прямой HTTP запрос с заголовками браузера."""
+    try:
+        r = requests.get(
+            url,
+            headers=_FETCH_HEADERS,
+            timeout=timeout,
+            allow_redirects=True,
+            verify=False  # некоторые сайты имеют проблемы с SSL
+        )
+        ct = r.headers.get('Content-Type','')
+        if 'html' not in ct and 'text' not in ct and 'json' not in ct:
+            return None, f"Не текстовый контент: {ct}"
+        if 'json' in ct:
+            try:
+                return str(r.json())[:6000], None
+            except:
+                pass
+        text = _html_to_text(r.text)
+        if len(text) < 100:
+            return None, "Слишком мало текста (возможно JavaScript-блокировка)"
+        return text, None
+    except requests.exceptions.SSLError:
+        # Пробуем без проверки SSL
+        try:
+            r = requests.get(url, headers=_FETCH_HEADERS,
+                             timeout=timeout, verify=False)
+            return _html_to_text(r.text), None
+        except Exception as e:
+            return None, f"SSL ошибка: {e}"
+    except Exception as e:
+        return None, str(e)
+
+
+def _fetch_jina(url, timeout=15):
+    """
+    Jina.ai Reader — бесплатный сервис, возвращает Markdown из любого сайта.
+    Обходит большинство блокировок. Лимит: 200 req/day бесплатно.
+    """
+    try:
+        jina_url = f"https://r.jina.ai/{url}"
+        r = requests.get(
+            jina_url,
+            headers={
+                "User-Agent": "NovaMind/2.0",
+                "Accept": "text/plain, text/markdown",
+                "X-Return-Format": "markdown",
+                "X-Timeout": "10",
+            },
+            timeout=timeout
+        )
+        if r.status_code == 200 and len(r.text) > 100:
+            # Убираем заголовок Jina
+            text = r.text
+            if text.startswith('Title:'):
+                lines = text.split('\n')
+                text = '\n'.join(lines[3:]) if len(lines) > 3 else text
+            return text[:8000], None
+        return None, f"Jina статус: {r.status_code}"
+    except Exception as e:
+        return None, f"Jina: {e}"
+
+
+def _fetch_google_cache(url, timeout=10):
+    """Google Cache — кэшированная версия страницы."""
+    try:
+        cache_url = f"https://webcache.googleusercontent.com/search?q=cache:{url}"
+        r = requests.get(cache_url, headers=_FETCH_HEADERS, timeout=timeout)
+        if r.status_code == 200:
+            text = _html_to_text(r.text)
+            if len(text) > 100:
+                return text[:6000], None
+        return None, f"Google Cache: {r.status_code}"
+    except Exception as e:
+        return None, f"Google Cache: {e}"
+
+
+def _fetch_archive(url, timeout=12):
+    """Wayback Machine (archive.org) — архив страниц."""
+    try:
+        # Получаем ближайший снапшот
+        api = requests.get(
+            "http://archive.org/wayback/available",
+            params={"url": url},
+            timeout=8
+        )
+        snap = api.json().get("archived_snapshots", {}).get("closest", {})
+        archive_url = snap.get("url", "")
+        if not archive_url:
+            return None, "Архив не найден"
+        r = requests.get(archive_url, headers=_FETCH_HEADERS, timeout=timeout)
+        text = _html_to_text(r.text)
+        if len(text) > 100:
+            return text[:6000] + "\n\n*(Источник: Wayback Machine)*", None
+        return None, "Мало текста в архиве"
+    except Exception as e:
+        return None, f"Archive.org: {e}"
+
+
+def fetch_url(url, user_prompt=""):
+    """
+    Умный web fetch — читает содержимое любого сайта.
+    Каскад: прямой запрос → Jina Reader → Google Cache → Archive.org
+
+    Возвращает: (text, source_label, error)
+    """
+    if not url.startswith(('http://','https://')):
+        url = 'https://' + url
+
+    attempts = [
+        ("прямой запрос",     lambda: _fetch_direct(url)),
+        ("Jina.ai Reader",    lambda: _fetch_jina(url)),
+        ("Google Cache",      lambda: _fetch_google_cache(url)),
+        ("Archive.org",       lambda: _fetch_archive(url)),
+    ]
+
+    last_error = "Все методы не сработали"
+    for label, fn in attempts:
+        try:
+            text, err = fn()
+            if text and len(text.strip()) > 80:
+                print(f"[fetch_url] ✅ {label}: {url[:60]}")
+                return text, label, None
+            last_error = err or "Пустой ответ"
+            print(f"[fetch_url] {label}: {last_error}")
+        except Exception as e:
+            last_error = str(e)
+            print(f"[fetch_url] {label} исключение: {e}")
+
+    return None, None, last_error
+
+
+@app.route('/api/fetch_url', methods=['POST'])
+def api_fetch_url():
+    """
+    Роут для чтения содержимого сайта.
+    Вызывается из чата когда пользователь отправляет URL
+    или пишет /fetch <url> или /browse <url>.
+    """
+    data        = request.get_json() or {}
+    url         = data.get('url', '').strip()
+    user_prompt = data.get('prompt', '').strip()
+
+    if not url:
+        return jsonify({'error': 'URL не указан'}), 400
+
+    # Читаем сайт
+    page_text, source, fetch_err = fetch_url(url)
+
+    if fetch_err or not page_text:
+        return jsonify({
+            'error': f'Не удалось прочитать сайт: {fetch_err}',
+            'url': url
+        })
+
+    # Если есть промпт от пользователя — анализируем через ИИ
+    if user_prompt:
+        ai_prompt = f"""Пользователь попросил: {user_prompt}
+
+Содержимое сайта {url} (через {source}):
+{page_text}
+
+Ответь на запрос пользователя, используя информацию с сайта.
+Отвечай на русском языке. Используй Markdown."""
+    else:
+        ai_prompt = f"""Кратко опиши содержимое этого сайта:
+
+URL: {url}
+Источник: {source}
+
+Содержимое:
+{page_text}
+
+Дай краткое резюме (3-5 пунктов) что находится на этой странице.
+Отвечай на русском языке."""
+
+    reply, err = call_ai(
+        [{"role": "user", "content": ai_prompt}],
+        temperature=0.3, max_tokens=3000, timeout=90
+    )
+
+    if err:
+        # Возвращаем сырой текст если ИИ недоступен
+        return jsonify({
+            'reply':  f"**📄 Содержимое {url}** (через {source}):\n\n{page_text[:3000]}",
+            'source': source,
+            'raw':    page_text[:2000]
+        })
+
+    append_to_history("user",      f"[Сайт: {url}] {user_prompt or 'Опиши содержимое'}")
+    append_to_history("assistant", reply)
+
+    return jsonify({
+        'reply':  f"**🌐 {url}** (через {source}):\n\n{reply}",
+        'source': source,
+        'raw':    page_text[:500]
+    })
+
+
 @app.route('/stream', methods=['POST'])
 def stream():
     """
