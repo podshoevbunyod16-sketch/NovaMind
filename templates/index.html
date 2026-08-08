@@ -4,7 +4,43 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
   <title>AI Ассистент Khirad</title>
+  <script>window.KHIRAD_NAME = "Khirad";</script>
   <link rel="stylesheet" href="/static/style.css">
+
+  <style>
+    /* ── Wake Word + Voice кнопки ── */
+    .wake-toggle-btn {
+      display:flex; align-items:center; gap:5px;
+      background:var(--bg-panel,#1e2330);
+      border:1.5px solid var(--border,#2a3045);
+      border-radius:20px; padding:6px 11px;
+      cursor:pointer; font-size:12px; font-weight:600;
+      color:var(--text-muted,#6b7280);
+      transition:all 0.2s; white-space:nowrap; flex-shrink:0;
+    }
+    .wake-toggle-btn:hover { border-color:#7c3aed; color:#a78bfa; }
+    .wake-toggle-btn.active {
+      border-color:#7c3aed;
+      background:rgba(124,58,237,0.15);
+      color:#a78bfa;
+      animation:wakePulse 2s ease-in-out infinite;
+    }
+    .wake-icon { font-size:14px; }
+    .wake-label { font-size:11px; }
+    .voice-btn.wake-active {
+      border-color:#7c3aed !important;
+      box-shadow:0 0 0 3px rgba(124,58,237,0.2) !important;
+    }
+    .voice-btn.processing { opacity:.7; cursor:wait; }
+    @keyframes wakePulse {
+      0%,100% { box-shadow:0 0 8px rgba(124,58,237,.3); }
+      50%      { box-shadow:0 0 18px rgba(124,58,237,.6); }
+    }
+    @keyframes wakeFlash {
+      0%   { opacity:1; }
+      100% { opacity:0; }
+    }
+  </style>
 </head>
 <body>
 
@@ -211,6 +247,13 @@
         <textarea id="chat-input" placeholder="Напишите сообщение..." rows="1" onkeydown="handleKey(event)" oninput="autoResize(this)"></textarea>
 
         <div class="input-actions">
+          <!-- Wake Word кнопка -->
+          <button class="wake-toggle-btn" id="wakeToggleBtn"
+                  onclick="toggleWakeWord()"
+                  title="Включить &quot;Khirad&quot; wake word">
+            <span class="wake-icon">👂</span>
+            <span class="wake-label">Khirad</span>
+          </button>
           <button class="voice-btn" id="voiceBtn" onclick="toggleVoice()" title="Голосовой ввод">
             <svg id="voiceIcon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
