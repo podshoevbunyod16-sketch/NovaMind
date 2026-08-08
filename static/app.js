@@ -548,28 +548,132 @@ async function sendMessage(text) {
     return;
   }
 
-  // Обычный запрос к ИИ
+  // ── Потоковый запрос к ИИ (SSE) ──
+  await sendStream(finalMsg, reasoningOn);
+}
+
+async function sendStream(message, reasoning) {
+  // Создаём пустой AI пузырь сразу
+  removeTyping();
+  const msgEl = createStreamBubble();
+  let fullText = '';
+  let hasError = false;
+
   try {
-    const resp = await fetch('/send', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ 
-        message: finalMsg, 
-        reasoning: reasoningOn
-      })
+    const resp = await fetch('/stream', {
+      method:  'POST',
+      headers: {'Content-Type': 'application/json'},
+      body:    JSON.stringify({message, reasoning: !!reasoning})
     });
-    const data = await resp.json();
-    removeTyping();
-    if (data.error) {
-      appendMessage('ai', 'Ошибка: ' + data.error);
-    } else {
-      appendMessage('ai', data.reply);
-      saveServerHistory(); // Сохраняем историю на сервере
+
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      updateStreamBubble(msgEl, '❌ Ошибка: ' + (err.error || resp.statusText), true);
+      return;
     }
-  } catch (e) {
-    removeTyping();
-    appendMessage('ai', 'Ошибка соединения');
+
+    const reader  = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let   buffer  = '';
+
+    while (true) {
+      const {value, done} = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, {stream: true});
+      const lines = buffer.split('\n');
+      buffer = lines.pop(); // последняя неполная строка остаётся
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+
+        // SSE формат: "event: token\ndata: {...}"
+        if (trimmed.startsWith('event: ')) continue; // пропускаем event строку
+        if (!trimmed.startsWith('data: ')) continue;
+
+        const jsonStr = trimmed.slice(6);
+        try {
+          const obj = JSON.parse(jsonStr);
+
+          if (obj.t !== undefined) {
+            // Новый токен
+            fullText += obj.t;
+            updateStreamBubble(msgEl, fullText, false);
+          } else if (obj.msg) {
+            // Ошибка
+            updateStreamBubble(msgEl, '❌ ' + obj.msg, true);
+            hasError = true;
+          } else if (obj.full !== undefined) {
+            // done событие — финальный текст
+            if (obj.full) {
+              updateStreamBubble(msgEl, obj.full, false);
+              fullText = obj.full;
+            }
+          }
+        } catch(e) { /* JSON parse error — игнорируем */ }
+      }
+    }
+
+  } catch(e) {
+    if (fullText) {
+      // Уже что-то получили — показываем что есть
+      updateStreamBubble(msgEl, fullText + '\n\n⚠️ Соединение прервано', false);
+    } else {
+      updateStreamBubble(msgEl, '❌ Ошибка соединения: ' + e.message, true);
+    }
   }
+
+  // Финальный рендер с полным Markdown форматированием
+  if (!hasError && fullText) {
+    finalizeStreamBubble(msgEl, fullText);
+  }
+
+  saveServerHistory();
+}
+
+function createStreamBubble() {
+  const wrap = document.createElement('div');
+  wrap.className = 'message ai streaming';
+  wrap.innerHTML = `
+    <div class="msg-avatar">✦</div>
+    <div class="msg-body">
+      <div class="msg-name">NovaMind</div>
+      <div class="msg-bubble stream-bubble">
+        <span class="stream-cursor">▋</span>
+      </div>
+    </div>`;
+  chatContainer.appendChild(wrap);
+  scrollToBottom();
+  return wrap;
+}
+
+function updateStreamBubble(wrap, text, isError) {
+  const bubble = wrap.querySelector('.msg-bubble');
+  if (!bubble) return;
+
+  if (isError) {
+    bubble.innerHTML = `<span style="color:#f87171">${escapeHtml(text)}</span>`;
+    wrap.classList.remove('streaming');
+    return;
+  }
+
+  // Быстрый рендер во время стриминга: только переносы строк + курсор
+  // Полный Markdown применяется в finalizeStreamBubble()
+  const escaped = escapeHtml(text).replace(/\n/g, '<br>');
+  bubble.innerHTML = escaped + '<span class="stream-cursor">▋</span>';
+  scrollToBottom();
+}
+
+function finalizeStreamBubble(wrap, fullText) {
+  const bubble = wrap.querySelector('.msg-bubble');
+  if (!bubble) return;
+  wrap.classList.remove('streaming');
+  // Применяем полное Markdown форматирование
+  bubble.innerHTML = formatContent(fullText);
+  // Подсветка кода если есть
+  if (window.Prism) Prism.highlightAllUnder(bubble);
+  scrollToBottom();
 }
 
 function sendSuggestion(text) { sendMessage(text); }
