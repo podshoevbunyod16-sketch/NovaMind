@@ -461,8 +461,94 @@ async function sendMessage(text) {
 
   const isCommand = finalMsg.startsWith('/');
 
-  // Если команда — отправляем на /command
+  // ── Авто-определение URL в сообщении ─────────────────────
+  const urlMatch = finalMsg.match(
+    /(?:^|\s)(https?:\/\/[^\s]+|www\.[^\s]+\.[a-z]{2,}[^\s]*)/i
+  );
+  const isUrlOnly = /^(https?:\/\/|www\.)[^\s]+$/i.test(finalMsg.trim());
+  const hasFetchCmd = /^\/(?:fetch|browse|url|сайт|открой|прочитай)\s+/i.test(finalMsg);
+
+  // ── URL запрос (сайт + опциональный вопрос) ───────────────
+  if (hasFetchCmd || isUrlOnly || (urlMatch && finalMsg.length < 300)) {
+    let url = '';
+    let userPrompt = '';
+
+    if (hasFetchCmd) {
+      // /fetch https://... что тут написано?
+      const parts = finalMsg.replace(/^\/\S+\s+/, '').split(' ');
+      url = parts[0];
+      userPrompt = parts.slice(1).join(' ');
+    } else if (urlMatch) {
+      url = urlMatch[1];
+      userPrompt = finalMsg.replace(url, '').trim();
+    } else {
+      url = finalMsg.trim();
+    }
+
+    // Обновляем индикатор
+    showTyping();
+    const typEl = document.getElementById('typingIndicator');
+    if (typEl) {
+      typEl.querySelector('.msg-bubble').innerHTML =
+        '<span style="color:#06b6d4;font-size:13px">🌐 Читаю сайт...</span>';
+    }
+
+    try {
+      const resp = await fetch('/api/fetch_url', {
+        method: 'POST',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({url, prompt: userPrompt})
+      });
+      const data = await resp.json();
+      removeTyping();
+      if (data.error) {
+        appendMessage('ai',
+          `❌ Не удалось открыть сайт\n\n**${url}**\n\n${data.error}\n\n` +
+          `💡 **Попробуй так:**\n` +
+          `• Проверь правильность URL\n` +
+          `• Напиши \`/search ${userPrompt || url}\` для поиска\n` +
+          `• Некоторые сайты блокируют автоматические запросы`
+        );
+      } else {
+        appendMessage('ai', data.reply || data.raw || 'Готово');
+        saveServerHistory();
+      }
+    } catch(e) {
+      removeTyping();
+      appendMessage('ai', '❌ Ошибка соединения при чтении сайта: ' + e.message);
+    }
+    return;
+  }
+
+  // ── Если команда — отправляем на /command ─────────────────
   if (isCommand) {
+    // Разбираем команду /search, /wiki, /news отдельно
+    const cmdLow = finalMsg.toLowerCase();
+
+    if (cmdLow.startsWith('/search ') || cmdLow.startsWith('/поиск ')) {
+      const query = finalMsg.replace(/^\/\S+\s+/,'').trim();
+      showTyping();
+      const typEl = document.getElementById('typingIndicator');
+      if (typEl) typEl.querySelector('.msg-bubble').innerHTML =
+        `<span style="color:#10b981;font-size:13px">🔍 Ищу: "${escapeHtml(query)}"...</span>`;
+      try {
+        const resp = await fetch('/api/web_search_groq', {
+          method:'POST',
+          headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({query})
+        });
+        const data = await resp.json();
+        removeTyping();
+        appendMessage('ai', data.reply || data.error || 'Нет результатов');
+        if (!data.error) saveServerHistory();
+      } catch(e) {
+        removeTyping();
+        appendMessage('ai','❌ Ошибка поиска: '+e.message);
+      }
+      return;
+    }
+
+    // Все остальные команды → /command
     try {
       const resp = await fetch('/command', {
         method: 'POST',
@@ -472,14 +558,14 @@ async function sendMessage(text) {
       const data = await resp.json();
       removeTyping();
       if (data.error) {
-        appendMessage('ai', 'Ошибка: ' + data.error);
+        appendMessage('ai', '❌ ' + data.error);
       } else {
         appendMessage('ai', data.result || data.reply || 'Готово');
-        saveServerHistory(); // Сохраняем историю на сервере
+        saveServerHistory();
       }
     } catch (e) {
       removeTyping();
-      appendMessage('ai', 'Ошибка соединения');
+      appendMessage('ai', '❌ Ошибка соединения');
     }
     return;
   }
@@ -1134,6 +1220,18 @@ const wakeToggleBtn = document.getElementById('wakeToggleBtn');
   }
 })();
 
+
+// ── Обновляем placeholder с подсказкой про URL ──
+(function updatePlaceholder(){
+  const inp = document.getElementById('messageInput') ||
+              document.querySelector('.message-input') ||
+              document.querySelector('textarea');
+  if (inp && !inp.dataset.placeholderSet) {
+    inp.placeholder =
+      'Сообщение, URL сайта, или /fetch https://... | /search запрос';
+    inp.dataset.placeholderSet = '1';
+  }
+})();
 
 
 // ========== САЙДБАР ==========
