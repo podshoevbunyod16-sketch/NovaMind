@@ -731,6 +731,166 @@ def call_ai_vision(image_b64, mime_type, prompt, *, timeout=60):
     return _vision_fallback(data_url, prompt, timeout)
 
 
+
+# ════════════════════════════════════════════════════════════
+#  ПОИСК — каскад бесплатных движков без ключей
+# ════════════════════════════════════════════════════════════
+
+def _ddg_html(query, max_results=5):
+    try:
+        import urllib.parse as _up
+        url = f"https://html.duckduckgo.com/html/?q={_up.quote_plus(query)}&kl=ru-ru"
+        r = requests.get(url, headers=_FETCH_HEADERS, timeout=10)
+        r.raise_for_status()
+        import html as _h
+        snippets = re.findall(r'class="result__snippet"[^>]*>(.*?)</a>', r.text, re.DOTALL)
+        titles   = re.findall(r'class="result__a"[^>]*>(.*?)</a>',       r.text, re.DOTALL)
+        parts = []
+        for i in range(min(max_results, len(snippets))):
+            t = _h.unescape(re.sub(r'<[^>]+>','', titles[i] if i < len(titles) else '')).strip()
+            s = _h.unescape(re.sub(r'<[^>]+>','', snippets[i])).strip()
+            if s:
+                parts.append(f"**{t or 'Результат'}**\n{s}")
+        return ("🔍 **DuckDuckGo:**\n\n" + "\n\n".join(parts)) if parts else None
+    except Exception as e:
+        print(f"[DDG HTML] {e}")
+    return None
+
+
+def _ddg_api(query):
+    try:
+        r = requests.get(
+            "https://api.duckduckgo.com/",
+            params={"q": query, "format": "json",
+                    "no_redirect": 1, "no_html": 1, "skip_disambig": 1},
+            headers={"User-Agent": "NovaMind/2.0"}, timeout=8)
+        d = r.json()
+        parts = []
+        if d.get("AbstractText"):
+            parts.append(f"**{d.get('AbstractSource','Ответ')}:** {d['AbstractText']}")
+        if d.get("Answer"):
+            parts.append(f"**Быстрый ответ:** {d['Answer']}")
+        for t in d.get("RelatedTopics", [])[:3]:
+            if isinstance(t, dict) and t.get("Text"):
+                parts.append(f"• {t['Text']}")
+        return ("🔍 **DuckDuckGo:**\n\n" + "\n\n".join(parts)) if parts else None
+    except Exception as e:
+        print(f"[DDG API] {e}")
+    return None
+
+
+def _searxng_public(query, max_results=5):
+    instances = [
+        "https://searx.be",
+        "https://search.sapti.me",
+        "https://searxng.site",
+        "https://priv.au",
+    ]
+    for base in instances:
+        try:
+            r = requests.get(
+                f"{base}/search",
+                params={"q": query, "format": "json",
+                        "language": "ru", "categories": "general"},
+                headers={"User-Agent": "NovaMind/2.0",
+                         "Accept": "application/json"},
+                timeout=8)
+            if r.status_code != 200:
+                continue
+            results_list = r.json().get("results", [])
+            if not results_list:
+                continue
+            parts = []
+            for item in results_list[:max_results]:
+                t = item.get("title","")
+                c = item.get("content","")
+                u = item.get("url","")
+                if c:
+                    parts.append(f"**{t}**\n{c}\n{u}")
+            if parts:
+                return "🔍 **SearXNG:**\n\n" + "\n\n".join(parts)
+        except Exception as e:
+            print(f"[SearXNG {base}] {e}")
+    return None
+
+
+def _wikipedia(query, lang="ru"):
+    for lg in ([lang, "en"] if lang != "en" else ["en"]):
+        try:
+            import urllib.parse as _up
+            sr = requests.get(
+                f"https://{lg}.wikipedia.org/w/api.php",
+                params={"action":"query","list":"search","srsearch":query,
+                        "srlimit":3,"format":"json","utf8":1},
+                headers={"User-Agent":"NovaMind/2.0"}, timeout=8)
+            pages = sr.json().get("query",{}).get("search",[])
+            if not pages:
+                continue
+            title = pages[0]["title"]
+            er = requests.get(
+                f"https://{lg}.wikipedia.org/w/api.php",
+                params={"action":"query","titles":title,"prop":"extracts",
+                        "exintro":1,"explaintext":1,"exlimit":1,"format":"json","utf8":1},
+                headers={"User-Agent":"NovaMind/2.0"}, timeout=8)
+            for pid, pdata in er.json().get("query",{}).get("pages",{}).items():
+                extract = pdata.get("extract","")
+                if extract and len(extract) > 100:
+                    short = extract[:800].rsplit(".",1)[0] + "."
+                    return f"📖 **Wikipedia — {title}:**\n\n{short}"
+        except Exception as e:
+            print(f"[Wikipedia {lg}] {e}")
+    return None
+
+
+def _news_rss(query):
+    try:
+        import urllib.parse as _up
+        url = f"https://news.google.com/rss/search?q={_up.quote_plus(query)}&hl=ru&gl=RU&ceid=RU:ru"
+        r = requests.get(url, headers=_FETCH_HEADERS, timeout=8)
+        r.raise_for_status()
+        import html as _h
+        items = re.findall(r'<item>(.*?)</item>', r.text, re.DOTALL)
+        parts = []
+        for item in items[:5]:
+            t = re.search(r'<title>(.*?)</title>', item, re.DOTALL)
+            d = re.search(r'<description>(.*?)</description>', item, re.DOTALL)
+            title   = _h.unescape(re.sub(r'<[^>]+>','', t.group(1) if t else '')).strip()
+            desc    = _h.unescape(re.sub(r'<[^>]+>','', d.group(1) if d else '')).strip()
+            if title:
+                parts.append(f"📰 **{title}**\n{desc[:150] if desc else ''}")
+        return ("📰 **Новости:**\n\n" + "\n\n".join(parts)) if parts else None
+    except Exception as e:
+        print(f"[News RSS] {e}")
+    return None
+
+
+def search_web(query, mode="auto"):
+    """Каскадный поиск без ключей: SearXNG → DDG HTML → DDG API → Wikipedia."""
+    query = query.strip()
+    if not query:
+        return None
+    q_low = query.lower()
+    is_news = any(w in q_low for w in ["новости","news","сегодня","события","последние"])
+    if mode == "news" or is_news:
+        r = _news_rss(query)
+        if r: return r
+    for name, fn in [
+        ("SearXNG",   lambda: _searxng_public(query)),
+        ("DDG HTML",  lambda: _ddg_html(query)),
+        ("DDG API",   lambda: _ddg_api(query)),
+        ("Wikipedia", lambda: _wikipedia(query)),
+        ("News RSS",  lambda: _news_rss(query)),
+    ]:
+        try:
+            res = fn()
+            if res:
+                print(f"[search_web] ✅ {name}")
+                return res
+        except Exception as e:
+            print(f"[search_web] {name}: {e}")
+    return None
+
+
 def get_weather(city):
     """Погода через wttr.in — полностью БЕСПЛАТНО, без ключа"""
     try:
@@ -2420,23 +2580,19 @@ def mcp_execute():
                 r = requests.get("https://api.github.com/user/repos?sort=updated&per_page=10",
                                  headers=gh_headers, timeout=10)
                 result = r.json()
-                text = "
-".join([f"• [{repo['name']}]({repo['html_url']}) — {repo.get('description','')}"
-                                  for repo in result[:10]])
-                return jsonify({"result": f"**📦 Твои репозитории GitHub:**
-
-{text}"})
+                text = "\n".join(
+                    f"• [{repo['name']}]({repo['html_url']}) — {repo.get('description','')}"
+                    for repo in result[:10])
+                return jsonify({"result": "**📦 Твои репозитории GitHub:**\n\n" + text})
 
             elif action == "list_issues":
                 repo = params.get("repo", "")
                 r = requests.get(f"https://api.github.com/repos/{repo}/issues?state=open&per_page=10",
                                  headers=gh_headers, timeout=10)
                 result = r.json()
-                text = "
-".join([f"• #{i['number']} {i['title']}" for i in result[:10]])
-                return jsonify({"result": f"**🐛 Issues {repo}:**
-
-{text}"})
+                text = "\n".join(
+                    f"• #{item['number']} {item['title']}" for item in result[:10])
+                return jsonify({"result": f"**🐛 Issues {repo}:**\n\n" + text})
 
             elif action == "create_issue":
                 repo  = params.get("repo","")
@@ -2490,10 +2646,7 @@ def mcp_execute():
             if resp.ok:
                 result = resp.json()
                 text = json.dumps(result.get("data",""), ensure_ascii=False, indent=2)[:2000]
-                return jsonify({"result": f"**✅ {toolkit_name} → {action}:**
-```json
-{text}
-```"})
+                return jsonify({"result": f"**✅ {toolkit_name} → {action}:**\n```json\n{text}\n```"})
             return jsonify({"error": resp.text[:300]}), 500
 
         except Exception as e:
@@ -2529,14 +2682,6 @@ def mcp_page():
 
 
 @app.route("/api/mcp/status")
-def mcp_status():
-    """Статус MCP клиента и всех серверов"""
-    if not MCP_INTEGRATION:
-        return jsonify({"available": False, "error": "mcp_client не загружен"}), 503
-    client = get_mcp_client()
-    return jsonify(client.get_status())
-
-
 @app.route("/api/mcp/servers", methods=["GET"])
 def mcp_list_servers():
     """Список серверов из конфига"""
@@ -2601,42 +2746,7 @@ def mcp_delete_server(name):
 
 
 @app.route("/api/mcp/connect", methods=["POST"])
-def mcp_connect():
-    """Подключиться ко всем enabled серверам (или к одному)"""
-    if not MCP_INTEGRATION:
-        return jsonify({"error": "MCP не доступен"}), 503
-    data = request.get_json() or {}
-    name = data.get("name")
-    client = get_mcp_client()
-    try:
-        if name:
-            ok = client._runner.run(client.connect_server(name), timeout=60)
-            return jsonify({"success": ok, "server": name, "status": client.get_status()})
-        else:
-            client._runner.run(client.connect_all(), timeout=180)
-            return jsonify({"success": True, "status": client.get_status()})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
 @app.route("/api/mcp/disconnect", methods=["POST"])
-def mcp_disconnect():
-    """Отключиться от сервера или от всех"""
-    if not MCP_INTEGRATION:
-        return jsonify({"error": "MCP не доступен"}), 503
-    data = request.get_json() or {}
-    name = data.get("name")
-    client = get_mcp_client()
-    try:
-        if name:
-            client._runner.run(client.disconnect_server(name), timeout=30)
-        else:
-            client._runner.run(client.disconnect_all(), timeout=60)
-        return jsonify({"success": True, "status": client.get_status()})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
 @app.route("/api/mcp/tools")
 def mcp_list_tools():
     """Список всех tools со всех подключённых серверов"""
