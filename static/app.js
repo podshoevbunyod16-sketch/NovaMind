@@ -461,8 +461,94 @@ async function sendMessage(text) {
 
   const isCommand = finalMsg.startsWith('/');
 
-  // Если команда — отправляем на /command
+  // ── Авто-определение URL в сообщении ─────────────────────
+  const urlMatch = finalMsg.match(
+    /(?:^|\s)(https?:\/\/[^\s]+|www\.[^\s]+\.[a-z]{2,}[^\s]*)/i
+  );
+  const isUrlOnly = /^(https?:\/\/|www\.)[^\s]+$/i.test(finalMsg.trim());
+  const hasFetchCmd = /^\/(?:fetch|browse|url|сайт|открой|прочитай)\s+/i.test(finalMsg);
+
+  // ── URL запрос (сайт + опциональный вопрос) ───────────────
+  if (hasFetchCmd || isUrlOnly || (urlMatch && finalMsg.length < 300)) {
+    let url = '';
+    let userPrompt = '';
+
+    if (hasFetchCmd) {
+      // /fetch https://... что тут написано?
+      const parts = finalMsg.replace(/^\/\S+\s+/, '').split(' ');
+      url = parts[0];
+      userPrompt = parts.slice(1).join(' ');
+    } else if (urlMatch) {
+      url = urlMatch[1];
+      userPrompt = finalMsg.replace(url, '').trim();
+    } else {
+      url = finalMsg.trim();
+    }
+
+    // Обновляем индикатор
+    showTyping();
+    const typEl = document.getElementById('typingIndicator');
+    if (typEl) {
+      typEl.querySelector('.msg-bubble').innerHTML =
+        '<span style="color:#06b6d4;font-size:13px">🌐 Читаю сайт...</span>';
+    }
+
+    try {
+      const resp = await fetch('/api/fetch_url', {
+        method: 'POST',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({url, prompt: userPrompt})
+      });
+      const data = await resp.json();
+      removeTyping();
+      if (data.error) {
+        appendMessage('ai',
+          `❌ Не удалось открыть сайт\n\n**${url}**\n\n${data.error}\n\n` +
+          `💡 **Попробуй так:**\n` +
+          `• Проверь правильность URL\n` +
+          `• Напиши \`/search ${userPrompt || url}\` для поиска\n` +
+          `• Некоторые сайты блокируют автоматические запросы`
+        );
+      } else {
+        appendMessage('ai', data.reply || data.raw || 'Готово');
+        saveServerHistory();
+      }
+    } catch(e) {
+      removeTyping();
+      appendMessage('ai', '❌ Ошибка соединения при чтении сайта: ' + e.message);
+    }
+    return;
+  }
+
+  // ── Если команда — отправляем на /command ─────────────────
   if (isCommand) {
+    // Разбираем команду /search, /wiki, /news отдельно
+    const cmdLow = finalMsg.toLowerCase();
+
+    if (cmdLow.startsWith('/search ') || cmdLow.startsWith('/поиск ')) {
+      const query = finalMsg.replace(/^\/\S+\s+/,'').trim();
+      showTyping();
+      const typEl = document.getElementById('typingIndicator');
+      if (typEl) typEl.querySelector('.msg-bubble').innerHTML =
+        `<span style="color:#10b981;font-size:13px">🔍 Ищу: "${escapeHtml(query)}"...</span>`;
+      try {
+        const resp = await fetch('/api/web_search_groq', {
+          method:'POST',
+          headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({query})
+        });
+        const data = await resp.json();
+        removeTyping();
+        appendMessage('ai', data.reply || data.error || 'Нет результатов');
+        if (!data.error) saveServerHistory();
+      } catch(e) {
+        removeTyping();
+        appendMessage('ai','❌ Ошибка поиска: '+e.message);
+      }
+      return;
+    }
+
+    // Все остальные команды → /command
     try {
       const resp = await fetch('/command', {
         method: 'POST',
@@ -472,14 +558,14 @@ async function sendMessage(text) {
       const data = await resp.json();
       removeTyping();
       if (data.error) {
-        appendMessage('ai', 'Ошибка: ' + data.error);
+        appendMessage('ai', '❌ ' + data.error);
       } else {
         appendMessage('ai', data.result || data.reply || 'Готово');
-        saveServerHistory(); // Сохраняем историю на сервере
+        saveServerHistory();
       }
     } catch (e) {
       removeTyping();
-      appendMessage('ai', 'Ошибка соединения');
+      appendMessage('ai', '❌ Ошибка соединения');
     }
     return;
   }
@@ -1135,6 +1221,18 @@ const wakeToggleBtn = document.getElementById('wakeToggleBtn');
 })();
 
 
+// ── Обновляем placeholder с подсказкой про URL ──
+(function updatePlaceholder(){
+  const inp = document.getElementById('messageInput') ||
+              document.querySelector('.message-input') ||
+              document.querySelector('textarea');
+  if (inp && !inp.dataset.placeholderSet) {
+    inp.placeholder =
+      'Сообщение, URL сайта, или /fetch https://... | /search запрос';
+    inp.dataset.placeholderSet = '1';
+  }
+})();
+
 
 // ========== САЙДБАР ==========
 function toggleSidebar() {
@@ -1609,3 +1707,279 @@ function composioAuthFromChat(toolkit) {
 
 // ========== ИНИЦИАЛИЗАЦИЯ ==========
 input.focus();
+
+
+
+// ════════════════════════════════════════════════════════════
+//  MCP СЕРВЕРЫ — панель подключения и использование в чате
+// ════════════════════════════════════════════════════════════
+
+let mcpAllTools  = [];   // Все инструменты из каталога
+let mcpPendingId = null; // Ожидающий подключения toolkit_id
+
+// ── Открытие/закрытие панели ─────────────────────────────────
+function openMcpPanel() {
+  const drawer = document.getElementById('mcpDrawer');
+  drawer.style.display = 'flex';
+  loadMcpCatalog();
+  // Слушаем сообщения от OAuth popup
+  window.addEventListener('message', onMcpOAuthMessage);
+}
+
+function closeMcpPanel() {
+  document.getElementById('mcpDrawer').style.display = 'none';
+  window.removeEventListener('message', onMcpOAuthMessage);
+}
+
+// Закрытие по клику на фон
+document.getElementById('mcpDrawer')?.addEventListener('click', e => {
+  if (e.target.id === 'mcpDrawer') closeMcpPanel();
+});
+
+// ── Загрузка каталога с сервера ──────────────────────────────
+async function loadMcpCatalog() {
+  try {
+    const r    = await fetch('/api/mcp/catalog');
+    const data = await r.json();
+    mcpAllTools = data.tools || [];
+    renderMcpTools(mcpAllTools);
+    updateMcpBadge();
+  } catch(e) {
+    document.getElementById('mcpToolList').innerHTML =
+      '<div style="grid-column:1/-1;text-align:center;padding:30px;color:#f87171;">❌ Ошибка загрузки</div>';
+  }
+}
+
+// ── Рендер карточек ──────────────────────────────────────────
+function renderMcpTools(tools) {
+  const list = document.getElementById('mcpToolList');
+  if (!tools.length) {
+    list.innerHTML = '<div style="grid-column:1/-1;text-align:center;padding:30px;color:#6b7280;">Ничего не найдено</div>';
+    return;
+  }
+
+  list.innerHTML = tools.map(t => `
+    <div class="mcp-card ${t.connected ? 'connected' : ''}"
+         onclick="${t.connected ? `mcpDisconnect('${t.id}','${t.name}')` : `mcpConnect('${t.id}')`}">
+      <div style="position:absolute;top:8px;right:8px;">
+        <span class="mcp-card-badge ${t.connected ? 'badge-on' : 'badge-off'}">
+          ${t.connected ? '✓ Вкл' : 'Подключить'}
+        </span>
+      </div>
+      <div class="mcp-card-icon">${t.icon}</div>
+      <div class="mcp-card-name">${t.name}</div>
+      <div class="mcp-card-desc">${t.desc}</div>
+      ${t.connected && t.user ? `<div class="mcp-card-user">@${t.user}</div>` : ''}
+    </div>
+  `).join('');
+
+  // Обновляем счётчик подключённых
+  const connCount = tools.filter(t => t.connected).length;
+  const countEl = document.getElementById('mcpConnCount');
+  if (countEl) {
+    countEl.textContent = connCount > 0
+      ? `✅ ${connCount} подключено — используй в чате!`
+      : 'Подключи инструменты — используй в чате';
+  }
+}
+
+// ── Поиск по инструментам ────────────────────────────────────
+function filterMcpTools(query) {
+  const q = query.toLowerCase();
+  const filtered = q
+    ? mcpAllTools.filter(t =>
+        t.name.toLowerCase().includes(q) ||
+        t.desc.toLowerCase().includes(q))
+    : mcpAllTools;
+  renderMcpTools(filtered);
+}
+
+// ── Подключение инструмента ──────────────────────────────────
+async function mcpConnect(toolkitId) {
+  mcpPendingId = toolkitId;
+  const tool = mcpAllTools.find(t => t.id === toolkitId);
+  if (!tool) return;
+
+  // Показываем индикатор загрузки на карточке
+  showNotification(`⏳ Подключаю ${tool.name}...`, 'info');
+
+  try {
+    const r = await fetch(`/api/mcp/connect/${toolkitId}`, {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({})
+    });
+    const data = await r.json();
+
+    if (data.oauth_url) {
+      // Открываем OAuth popup
+      const popup = window.open(
+        data.oauth_url,
+        `mcp_oauth_${toolkitId}`,
+        'width=520,height=680,scrollbars=yes,resizable=yes'
+      );
+      if (!popup) {
+        // Popup заблокирован — перенаправляем напрямую
+        showNotification('💡 Popup заблокирован. Открываю в новой вкладке...', 'info');
+        window.open(data.oauth_url, '_blank');
+      }
+    } else if (data.needs_apikey) {
+      // Показываем диалог ввода API ключа
+      showMcpApiKeyDialog(toolkitId, tool.name);
+    } else if (data.needs_composio) {
+      showNotification('💡 ' + data.message, 'info');
+      setTimeout(() => {
+        if (confirm('Перейти на composio.dev для получения бесплатного ключа?')) {
+          window.open('https://composio.dev', '_blank');
+        }
+      }, 500);
+    } else if (data.success) {
+      showNotification(`✅ ${tool.name} подключён!`, 'success');
+      loadMcpCatalog();
+    } else if (data.error) {
+      showNotification(`❌ ${data.error}`, 'error');
+    }
+  } catch(e) {
+    showNotification(`❌ Ошибка: ${e.message}`, 'error');
+  }
+}
+
+// ── OAuth success callback (из popup) ────────────────────────
+function onMcpOAuthMessage(e) {
+  if (e.data?.type === 'mcp_connected') {
+    showNotification(`✅ ${e.data.tool_name} подключён!`, 'success');
+    if (navigator.vibrate) navigator.vibrate([50, 30, 80]);
+    loadMcpCatalog(); // Обновляем список
+  }
+}
+
+// ── API Key диалог ───────────────────────────────────────────
+function showMcpApiKeyDialog(toolkitId, toolName) {
+  mcpPendingId = toolkitId;
+  document.getElementById('mcpApiKeyTitle').textContent = `🔑 API ключ для ${toolName}`;
+  document.getElementById('mcpApiKeyInput').value = '';
+  document.getElementById('mcpApiKeyDialog').style.display = 'flex';
+}
+
+async function submitMcpApiKey() {
+  const key = document.getElementById('mcpApiKeyInput').value.trim();
+  if (!key || !mcpPendingId) return;
+
+  const btn = document.getElementById('mcpApiKeySubmit');
+  btn.textContent = '⏳ Подключаю...';
+  btn.disabled = true;
+
+  try {
+    const r = await fetch(`/api/mcp/connect/${mcpPendingId}`, {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({api_key: key})
+    });
+    const data = await r.json();
+    document.getElementById('mcpApiKeyDialog').style.display = 'none';
+    btn.textContent = 'Подключить';
+    btn.disabled = false;
+
+    if (data.success) {
+      showNotification(`✅ ${data.tool} подключён!`, 'success');
+      loadMcpCatalog();
+    } else {
+      showNotification(`❌ ${data.error || 'Ошибка'}`, 'error');
+    }
+  } catch(e) {
+    btn.textContent = 'Подключить';
+    btn.disabled = false;
+    showNotification(`❌ ${e.message}`, 'error');
+  }
+}
+
+// ── Отключение ───────────────────────────────────────────────
+async function mcpDisconnect(toolkitId, toolName) {
+  if (!confirm(`Отключить ${toolName}?`)) return;
+  await fetch(`/api/mcp/disconnect/${toolkitId}`, {method:'POST'});
+  showNotification(`🔌 ${toolName} отключён`, 'info');
+  loadMcpCatalog();
+}
+
+// ── Бейдж в сайдбаре ─────────────────────────────────────────
+async function updateMcpBadge() {
+  try {
+    const r    = await fetch('/api/mcp/status');
+    const data = await r.json();
+    const badge = document.getElementById('mcpBadge');
+    if (badge) {
+      if (data.count > 0) {
+        badge.textContent  = data.count;
+        badge.style.display = 'inline';
+      } else {
+        badge.style.display = 'none';
+      }
+    }
+  } catch(e) {}
+}
+
+// ── Использование MCP в главном чате ─────────────────────────
+// Перехватываем sendMessage и проверяем — нужен ли MCP инструмент
+const _origSendStream = window.sendStream;
+
+async function mcpCheckAndExecute(message) {
+  // Определяем упоминание инструмента
+  const mcpKeywords = {
+    github:    /github|гитхаб|репозитор|issue|pull request|коммит/i,
+    notion:    /notion|нотион|страниц|баз данных/i,
+    gmail:     /gmail|почт|письм|email/i,
+    google_drive: /google drive|диск|файл|документ/i,
+    slack:     /slack|слак|канал|сообщени/i,
+    linear:    /linear|задач|sprint|спринт/i,
+    jira:      /jira|issue|задач|баг трек/i,
+    trello:    /trello|доск|карточк/i,
+    spotify:   /spotify|музык|треk|плейлист/i,
+    youtube:   /youtube|видео|канал/i,
+  };
+
+  for (const [tid, rx] of Object.entries(mcpKeywords)) {
+    if (rx.test(message)) {
+      // Проверяем подключён ли
+      const r    = await fetch('/api/mcp/status');
+      const data = await r.json();
+      if (data.connected[tid]) {
+        // Выполняем через MCP
+        showTyping();
+        const typEl = document.getElementById('typingIndicator');
+        const tool = data.connected[tid];
+        if (typEl) typEl.querySelector('.msg-bubble').innerHTML =
+          `<span style="color:#a78bfa;font-size:13px">🔌 ${tid} работает...</span>`;
+        try {
+          const execR = await fetch('/api/mcp/execute', {
+            method: 'POST',
+            headers: {'Content-Type':'application/json'},
+            body: JSON.stringify({toolkit: tid, user_message: message})
+          });
+          const execData = await execR.json();
+          removeTyping();
+          if (execData.result) {
+            appendMessage('ai', execData.result);
+            saveServerHistory();
+            return true; // Обработано MCP
+          }
+        } catch(e) { removeTyping(); }
+      } else {
+        // Инструмент упомянут но не подключён
+        appendMessage('ai',
+          `🔌 **${tid.charAt(0).toUpperCase()+tid.slice(1)} не подключён**\n\n` +
+          `Нажми **боковое меню → MCP Серверы** и подключи ${tid}.\n` +
+          `После подключения я смогу выполнять действия напрямую!`
+        );
+        return true; // Обработано (с подсказкой)
+      }
+    }
+  }
+  return false; // Не MCP запрос
+}
+
+// ── Инициализация ─────────────────────────────────────────────
+(async function initMcp() {
+  await updateMcpBadge();
+  // Обновляем бейдж каждые 30 сек
+  setInterval(updateMcpBadge, 30000);
+})();

@@ -1110,6 +1110,249 @@ def admin_check():
         return jsonify({'logged_in': True, 'username': session.get('admin_username', 'admin')})
     return jsonify({'logged_in': False})
 
+# ════════════════════════════════════════════════════════════
+#  WEB FETCH — чтение содержимого сайтов (без браузера)
+#  Каскад: прямой запрос → Jina.ai Reader → Google Cache
+# ════════════════════════════════════════════════════════════
+
+import html as _html_mod
+
+_FETCH_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Linux; Android 13; Pixel 7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/120.0.6099.144 Mobile Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,*/*;q=0.9",
+    "Accept-Language": "ru-RU,ru;q=0.9,en;q=0.8",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Connection": "keep-alive",
+    "Upgrade-Insecure-Requests": "1",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+}
+
+
+def _html_to_text(html_str, max_chars=8000):
+    """Извлекает чистый текст из HTML без внешних библиотек."""
+    # Удаляем скрипты, стили, svg
+    for tag in ['script','style','svg','noscript','nav','footer','header','aside']:
+        html_str = re.sub(
+            rf'<{tag}[^>]*>.*?</{tag}>', ' ', html_str,
+            flags=re.DOTALL | re.IGNORECASE)
+    # Заменяем теги переносами
+    html_str = re.sub(r'<br\s*/?>', '\n', html_str, flags=re.IGNORECASE)
+    html_str = re.sub(r'</p>|</div>|</li>|</h[1-6]>', '\n', html_str, flags=re.IGNORECASE)
+    # Убираем все оставшиеся теги
+    text = re.sub(r'<[^>]+>', ' ', html_str)
+    # Декодируем HTML entities
+    text = _html_mod.unescape(text)
+    # Чистим пробелы
+    text = re.sub(r'[ \t]+', ' ', text)
+    text = re.sub(r'\n{3,}', '\n\n', text)
+    text = text.strip()
+    return text[:max_chars]
+
+
+def _fetch_direct(url, timeout=10):
+    """Прямой HTTP запрос с заголовками браузера."""
+    try:
+        r = requests.get(
+            url,
+            headers=_FETCH_HEADERS,
+            timeout=timeout,
+            allow_redirects=True,
+            verify=False  # некоторые сайты имеют проблемы с SSL
+        )
+        ct = r.headers.get('Content-Type','')
+        if 'html' not in ct and 'text' not in ct and 'json' not in ct:
+            return None, f"Не текстовый контент: {ct}"
+        if 'json' in ct:
+            try:
+                return str(r.json())[:6000], None
+            except:
+                pass
+        text = _html_to_text(r.text)
+        if len(text) < 100:
+            return None, "Слишком мало текста (возможно JavaScript-блокировка)"
+        return text, None
+    except requests.exceptions.SSLError:
+        # Пробуем без проверки SSL
+        try:
+            r = requests.get(url, headers=_FETCH_HEADERS,
+                             timeout=timeout, verify=False)
+            return _html_to_text(r.text), None
+        except Exception as e:
+            return None, f"SSL ошибка: {e}"
+    except Exception as e:
+        return None, str(e)
+
+
+def _fetch_jina(url, timeout=15):
+    """
+    Jina.ai Reader — бесплатный сервис, возвращает Markdown из любого сайта.
+    Обходит большинство блокировок. Лимит: 200 req/day бесплатно.
+    """
+    try:
+        jina_url = f"https://r.jina.ai/{url}"
+        r = requests.get(
+            jina_url,
+            headers={
+                "User-Agent": "NovaMind/2.0",
+                "Accept": "text/plain, text/markdown",
+                "X-Return-Format": "markdown",
+                "X-Timeout": "10",
+            },
+            timeout=timeout
+        )
+        if r.status_code == 200 and len(r.text) > 100:
+            # Убираем заголовок Jina
+            text = r.text
+            if text.startswith('Title:'):
+                lines = text.split('\n')
+                text = '\n'.join(lines[3:]) if len(lines) > 3 else text
+            return text[:8000], None
+        return None, f"Jina статус: {r.status_code}"
+    except Exception as e:
+        return None, f"Jina: {e}"
+
+
+def _fetch_google_cache(url, timeout=10):
+    """Google Cache — кэшированная версия страницы."""
+    try:
+        cache_url = f"https://webcache.googleusercontent.com/search?q=cache:{url}"
+        r = requests.get(cache_url, headers=_FETCH_HEADERS, timeout=timeout)
+        if r.status_code == 200:
+            text = _html_to_text(r.text)
+            if len(text) > 100:
+                return text[:6000], None
+        return None, f"Google Cache: {r.status_code}"
+    except Exception as e:
+        return None, f"Google Cache: {e}"
+
+
+def _fetch_archive(url, timeout=12):
+    """Wayback Machine (archive.org) — архив страниц."""
+    try:
+        # Получаем ближайший снапшот
+        api = requests.get(
+            "http://archive.org/wayback/available",
+            params={"url": url},
+            timeout=8
+        )
+        snap = api.json().get("archived_snapshots", {}).get("closest", {})
+        archive_url = snap.get("url", "")
+        if not archive_url:
+            return None, "Архив не найден"
+        r = requests.get(archive_url, headers=_FETCH_HEADERS, timeout=timeout)
+        text = _html_to_text(r.text)
+        if len(text) > 100:
+            return text[:6000] + "\n\n*(Источник: Wayback Machine)*", None
+        return None, "Мало текста в архиве"
+    except Exception as e:
+        return None, f"Archive.org: {e}"
+
+
+def fetch_url(url, user_prompt=""):
+    """
+    Умный web fetch — читает содержимое любого сайта.
+    Каскад: прямой запрос → Jina Reader → Google Cache → Archive.org
+
+    Возвращает: (text, source_label, error)
+    """
+    if not url.startswith(('http://','https://')):
+        url = 'https://' + url
+
+    attempts = [
+        ("прямой запрос",     lambda: _fetch_direct(url)),
+        ("Jina.ai Reader",    lambda: _fetch_jina(url)),
+        ("Google Cache",      lambda: _fetch_google_cache(url)),
+        ("Archive.org",       lambda: _fetch_archive(url)),
+    ]
+
+    last_error = "Все методы не сработали"
+    for label, fn in attempts:
+        try:
+            text, err = fn()
+            if text and len(text.strip()) > 80:
+                print(f"[fetch_url] ✅ {label}: {url[:60]}")
+                return text, label, None
+            last_error = err or "Пустой ответ"
+            print(f"[fetch_url] {label}: {last_error}")
+        except Exception as e:
+            last_error = str(e)
+            print(f"[fetch_url] {label} исключение: {e}")
+
+    return None, None, last_error
+
+
+@app.route('/api/fetch_url', methods=['POST'])
+def api_fetch_url():
+    """
+    Роут для чтения содержимого сайта.
+    Вызывается из чата когда пользователь отправляет URL
+    или пишет /fetch <url> или /browse <url>.
+    """
+    data        = request.get_json() or {}
+    url         = data.get('url', '').strip()
+    user_prompt = data.get('prompt', '').strip()
+
+    if not url:
+        return jsonify({'error': 'URL не указан'}), 400
+
+    # Читаем сайт
+    page_text, source, fetch_err = fetch_url(url)
+
+    if fetch_err or not page_text:
+        return jsonify({
+            'error': f'Не удалось прочитать сайт: {fetch_err}',
+            'url': url
+        })
+
+    # Если есть промпт от пользователя — анализируем через ИИ
+    if user_prompt:
+        ai_prompt = f"""Пользователь попросил: {user_prompt}
+
+Содержимое сайта {url} (через {source}):
+{page_text}
+
+Ответь на запрос пользователя, используя информацию с сайта.
+Отвечай на русском языке. Используй Markdown."""
+    else:
+        ai_prompt = f"""Кратко опиши содержимое этого сайта:
+
+URL: {url}
+Источник: {source}
+
+Содержимое:
+{page_text}
+
+Дай краткое резюме (3-5 пунктов) что находится на этой странице.
+Отвечай на русском языке."""
+
+    reply, err = call_ai(
+        [{"role": "user", "content": ai_prompt}],
+        temperature=0.3, max_tokens=3000, timeout=90
+    )
+
+    if err:
+        # Возвращаем сырой текст если ИИ недоступен
+        return jsonify({
+            'reply':  f"**📄 Содержимое {url}** (через {source}):\n\n{page_text[:3000]}",
+            'source': source,
+            'raw':    page_text[:2000]
+        })
+
+    append_to_history("user",      f"[Сайт: {url}] {user_prompt or 'Опиши содержимое'}")
+    append_to_history("assistant", reply)
+
+    return jsonify({
+        'reply':  f"**🌐 {url}** (через {source}):\n\n{reply}",
+        'source': source,
+        'raw':    page_text[:500]
+    })
+
+
 @app.route('/stream', methods=['POST'])
 def stream():
     """
@@ -1872,132 +2115,411 @@ def static_files(filename):
 def composio_page():
     return render_template('composio.html')
 
-@app.route('/api/composio/connect', methods=['POST'])
-def composio_connect():
+
+# ════════════════════════════════════════════════════════════
+#  MCP / COMPOSIO — OAuth подключение + выполнение инструментов
+# ════════════════════════════════════════════════════════════
+
+# Каталог доступных MCP инструментов (без ключей — через OAuth)
+MCP_CATALOG = [
+    {"id":"github",    "name":"GitHub",       "icon":"🐙", "color":"#6e40c9",
+     "desc":"Репозитории, issues, PR, коммиты",
+     "auth":"oauth", "toolkit":"github"},
+    {"id":"notion",    "name":"Notion",        "icon":"📝", "color":"#ffffff",
+     "desc":"Страницы, базы данных, блоки",
+     "auth":"oauth", "toolkit":"notion"},
+    {"id":"google_drive","name":"Google Drive","icon":"🟡", "color":"#fbbc04",
+     "desc":"Файлы, папки, документы",
+     "auth":"oauth", "toolkit":"googledrive"},
+    {"id":"gmail",     "name":"Gmail",         "icon":"📧", "color":"#ea4335",
+     "desc":"Письма, отправка, поиск",
+     "auth":"oauth", "toolkit":"gmail"},
+    {"id":"google_calendar","name":"Calendar", "icon":"📅", "color":"#4285f4",
+     "desc":"События, встречи, расписание",
+     "auth":"oauth", "toolkit":"googlecalendar"},
+    {"id":"slack",     "name":"Slack",         "icon":"💬", "color":"#4a154b",
+     "desc":"Каналы, сообщения, файлы",
+     "auth":"oauth", "toolkit":"slack"},
+    {"id":"linear",    "name":"Linear",        "icon":"📐", "color":"#5e6ad2",
+     "desc":"Задачи, проекты, спринты",
+     "auth":"oauth", "toolkit":"linear"},
+    {"id":"jira",      "name":"Jira",          "icon":"🔷", "color":"#0052cc",
+     "desc":"Issues, проекты, спринты",
+     "auth":"oauth", "toolkit":"jira"},
+    {"id":"trello",    "name":"Trello",        "icon":"🟦", "color":"#0052cc",
+     "desc":"Доски, карточки, списки",
+     "auth":"oauth", "toolkit":"trello"},
+    {"id":"figma",     "name":"Figma",         "icon":"🎨", "color":"#f24e1e",
+     "desc":"Дизайны, компоненты, комментарии",
+     "auth":"oauth", "toolkit":"figma"},
+    {"id":"discord",   "name":"Discord",       "icon":"🎮", "color":"#5865f2",
+     "desc":"Серверы, каналы, сообщения",
+     "auth":"oauth", "toolkit":"discord"},
+    {"id":"telegram",  "name":"Telegram",      "icon":"✈️", "color":"#229ed9",
+     "desc":"Боты, сообщения, каналы",
+     "auth":"apikey", "toolkit":"telegram"},
+    {"id":"youtube",   "name":"YouTube",       "icon":"▶️", "color":"#ff0000",
+     "desc":"Видео, каналы, комментарии",
+     "auth":"oauth", "toolkit":"youtube"},
+    {"id":"twitter",   "name":"Twitter/X",     "icon":"🐦", "color":"#1da1f2",
+     "desc":"Твиты, лента, поиск",
+     "auth":"oauth", "toolkit":"twitter"},
+    {"id":"spotify",   "name":"Spotify",       "icon":"🎵", "color":"#1db954",
+     "desc":"Треки, плейлисты, рекомендации",
+     "auth":"oauth", "toolkit":"spotify"},
+]
+
+# In-memory хранилище подключений (session-based)
+mcp_connections = {}   # {toolkit_id: {status, token, user_info, ...}}
+mcp_pending_oauth = {} # {state_token: toolkit_id}
+
+
+@app.route('/api/mcp/catalog')
+def mcp_catalog():
+    """Список всех доступных MCP инструментов с их статусом подключения."""
+    result = []
+    for tool in MCP_CATALOG:
+        tid = tool["id"]
+        conn = mcp_connections.get(tid, {})
+        result.append({
+            **tool,
+            "connected": conn.get("connected", False),
+            "user": conn.get("user_info", {}).get("login") or conn.get("user_info", {}).get("email", ""),
+        })
+    return jsonify({"tools": result})
+
+
+@app.route('/api/mcp/connect/<toolkit_id>', methods=['POST'])
+def mcp_connect(toolkit_id):
+    """
+    Инициирует подключение к MCP инструменту.
+    Для OAuth — возвращает redirect URL.
+    Для API key — сохраняет ключ.
+    """
+    tool = next((t for t in MCP_CATALOG if t["id"] == toolkit_id), None)
+    if not tool:
+        return jsonify({"error": "Инструмент не найден"}), 404
+
     data = request.get_json() or {}
-    api_key = data.get('api_key', '')
-    if not api_key:
-        return jsonify({'error': 'API ключ не указан'}), 400
+
+    # ── API Key auth ──────────────────────────────────────────
+    if tool["auth"] == "apikey":
+        api_key = data.get("api_key", "").strip()
+        if not api_key:
+            return jsonify({"needs_apikey": True, "tool": tool})
+        mcp_connections[toolkit_id] = {
+            "connected": True,
+            "auth_type": "apikey",
+            "api_key": api_key,
+            "user_info": {"login": f"{tool['name']} (API key)"}
+        }
+        return jsonify({"success": True, "tool": tool["name"]})
+
+    # ── OAuth через Composio ──────────────────────────────────
+    composio_key = os.getenv("COMPOSIO_API_KEY", "")
+    if not composio_key:
+        # Без Composio — используем прямой OAuth (только GitHub поддерживаем напрямую)
+        if toolkit_id == "github":
+            client_id = os.getenv("GITHUB_CLIENT_ID", "")
+            if client_id:
+                import secrets
+                state = secrets.token_urlsafe(16)
+                mcp_pending_oauth[state] = toolkit_id
+                oauth_url = (
+                    f"https://github.com/login/oauth/authorize"
+                    f"?client_id={client_id}"
+                    f"&scope=repo,user,gist"
+                    f"&state={state}"
+                    f"&redirect_uri={request.host_url}api/mcp/oauth/callback"
+                )
+                return jsonify({"oauth_url": oauth_url, "tool": tool["name"]})
+        return jsonify({
+            "needs_composio": True,
+            "message": "Для OAuth подключения нужен COMPOSIO_API_KEY (бесплатно на composio.dev)"
+        })
+
+    # ── OAuth через Composio API ──────────────────────────────
     try:
-        headers = {'x-api-key': api_key, 'Content-Type': 'application/json'}
-        resp = requests.get('https://backend.composio.dev/api/v3.1/toolkits?limit=5', headers=headers, timeout=10)
-        if resp.status_code == 401:
-            return jsonify({'error': 'Неверный API ключ'}), 401
-        resp.raise_for_status()
-        os.environ['COMPOSIO_API_KEY'] = api_key
-        return jsonify({'success': True, 'message': 'Подключено к Composio'})
+        import secrets
+        state = secrets.token_urlsafe(16)
+        mcp_pending_oauth[state] = toolkit_id
+
+        headers = {"x-api-key": composio_key, "Content-Type": "application/json"}
+
+        # Создаём сессию подключения в Composio
+        resp = requests.post(
+            "https://backend.composio.dev/api/v1/connectedAccounts",
+            headers=headers,
+            json={
+                "appName": tool["toolkit"],
+                "redirectUri": f"{request.host_url}api/mcp/oauth/callback?state={state}",
+                "authScheme": "OAUTH2",
+                "userUuid": "novamind-user",
+            },
+            timeout=15
+        )
+
+        if resp.status_code in (200, 201):
+            d = resp.json()
+            redirect_url = d.get("redirectUrl") or d.get("connectionRequest", {}).get("redirectUrl", "")
+            conn_id      = d.get("connectedAccountId") or d.get("id", "")
+
+            mcp_pending_oauth[state] = {
+                "toolkit_id": toolkit_id,
+                "conn_id":    conn_id
+            }
+
+            if redirect_url:
+                return jsonify({
+                    "oauth_url": redirect_url,
+                    "state":     state,
+                    "tool":      tool["name"]
+                })
+
+        return jsonify({"error": f"Composio: {resp.text[:200]}"}), 500
+
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/api/composio/integrations', methods=['GET'])
-def composio_integrations():
-    api_key = os.getenv('COMPOSIO_API_KEY', '')
-    if not api_key:
-        return jsonify({'error': 'Composio не подключен'}), 400
-    try:
-        headers = {'x-api-key': api_key, 'Content-Type': 'application/json'}
-        resp = requests.get('https://backend.composio.dev/api/v3.1/toolkits?limit=50', headers=headers, timeout=10)
-        resp.raise_for_status()
-        return jsonify({'integrations': resp.json()})
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/api/composio/connected_accounts', methods=['GET'])
-def composio_connected_accounts():
-    api_key = os.getenv('COMPOSIO_API_KEY', '')
-    if not api_key:
-        return jsonify({'error': 'Composio не подключен'}), 400
-    try:
-        headers = {'x-api-key': api_key, 'Content-Type': 'application/json'}
-        resp = requests.get('https://backend.composio.dev/api/v3.1/connected_accounts', headers=headers, timeout=10)
-        resp.raise_for_status()
-        return jsonify(resp.json())
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/api/composio/connect_account', methods=['POST'])
-def composio_connect_account():
-    api_key = os.getenv('COMPOSIO_API_KEY', '')
-    if not api_key:
-        return jsonify({'error': 'Composio не подключен'}), 400
-    data = request.get_json() or {}
-    toolkit = data.get('toolkit', '')
-    if not toolkit:
-        return jsonify({'error': 'Укажи toolkit'}), 400
-    try:
-        headers = {'x-api-key': api_key, 'Content-Type': 'application/json'}
-        session_resp = requests.post('https://backend.composio.dev/api/v3.1/tool_router/session', headers=headers, json={"user_id": "novauser"}, timeout=10)
-        session_resp.raise_for_status()
-        session_data = session_resp.json()
-        session_id = session_data.get('session_id', '')
-        if not session_id:
-            return jsonify({'error': 'Не удалось создать сессию'}), 500
-        link_resp = requests.post(f'https://backend.composio.dev/api/v3/tool_router/session/{session_id}/link', headers=headers, json={"toolkit": toolkit}, timeout=10)
-        link_resp.raise_for_status()
-        link_data = link_resp.json()
-        redirect_url = link_data.get('redirect_url', '')
-        return jsonify({'success': True, 'redirect_url': redirect_url, 'connected_account_id': link_data.get('connected_account_id', '')})
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/api/composio/execute', methods=['POST'])
-def composio_execute():
-    api_key = os.getenv('COMPOSIO_API_KEY', '')
-    if not api_key:
-        return jsonify({'error': 'Composio не подключен'}), 400
-    data = request.get_json() or {}
-    action_name = data.get('action', '')
-    params = data.get('params', {})
-    connected_account_id = data.get('connected_account_id', '')
-    if not action_name:
-        return jsonify({'error': 'Укажи действие'}), 400
-    try:
-        headers = {'x-api-key': api_key, 'Content-Type': 'application/json'}
-        payload = {"input": params, "allow_tracing": True}
-        if connected_account_id:
-            payload["connected_account_id"] = connected_account_id
-        resp = requests.post(f'https://backend.composio.dev/api/v2/actions/{action_name}/execute', json=payload, headers=headers, timeout=30)
-        resp.raise_for_status()
-        return jsonify({'result': resp.json()})
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/api/composio/actions', methods=['GET'])
-def composio_actions():
-    api_key = os.getenv('COMPOSIO_API_KEY', '')
-    if not api_key:
-        return jsonify({'error': 'Composio не подключен'}), 400
-    toolkit = request.args.get('toolkit', '')
-    try:
-        headers = {'x-api-key': api_key, 'Content-Type': 'application/json'}
-        url = 'https://backend.composio.dev/api/v2/actions?limit=20'
-        if toolkit:
-            url += f'&apps={toolkit}'
-        resp = requests.get(url, headers=headers, timeout=10)
-        resp.raise_for_status()
-        return jsonify(resp.json())
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return jsonify({"error": str(e)}), 500
 
 
+@app.route('/api/mcp/oauth/callback')
+def mcp_oauth_callback():
+    """OAuth callback — сохраняет токен и показывает страницу успеха."""
+    state      = request.args.get("state", "")
+    code       = request.args.get("code", "")
+    toolkit_id = None
 
-# ============================================================
-# ========== MCP (Model Context Protocol) ===================
-# ============================================================
+    pending = mcp_pending_oauth.get(state, {})
+    if isinstance(pending, dict):
+        toolkit_id = pending.get("toolkit_id", "")
+        conn_id    = pending.get("conn_id", "")
+    else:
+        toolkit_id = pending
 
-# Lazy import — mcp_client может быть не установлен
-try:
-    from mcp_client import (
-        get_client as get_mcp_client,
-        sync_call_tool,
-        sync_connect_all as mcp_sync_connect_all,
-        sync_disconnect_all as mcp_sync_disconnect_all,
-        MCPClient,
-    )
-    MCP_INTEGRATION = True
-except Exception as e:
-    print(f"[MCP] Не удалось импортировать mcp_client: {e}")
-    MCP_INTEGRATION = False
+    tool = next((t for t in MCP_CATALOG if t["id"] == toolkit_id), None)
+    tool_name = tool["name"] if tool else toolkit_id
+
+    if toolkit_id and code:
+        # GitHub прямой OAuth
+        if toolkit_id == "github" and not os.getenv("COMPOSIO_API_KEY"):
+            try:
+                resp = requests.post(
+                    "https://github.com/login/oauth/access_token",
+                    headers={"Accept": "application/json"},
+                    json={
+                        "client_id":     os.getenv("GITHUB_CLIENT_ID", ""),
+                        "client_secret": os.getenv("GITHUB_CLIENT_SECRET", ""),
+                        "code":          code
+                    },
+                    timeout=10
+                )
+                token_data = resp.json()
+                access_token = token_data.get("access_token", "")
+                if access_token:
+                    user_resp = requests.get(
+                        "https://api.github.com/user",
+                        headers={"Authorization": f"Bearer {access_token}"},
+                        timeout=5
+                    )
+                    user_info = user_resp.json() if user_resp.ok else {}
+                    mcp_connections["github"] = {
+                        "connected":   True,
+                        "auth_type":   "oauth",
+                        "access_token": access_token,
+                        "user_info":   user_info
+                    }
+            except Exception as e:
+                pass
+        else:
+            # Composio подтверждает подключение
+            mcp_connections[toolkit_id] = {
+                "connected":  True,
+                "auth_type":  "composio",
+                "conn_id":    conn_id if "conn_id" in dir() else "",
+                "user_info":  {"login": f"{tool_name} (подключён)"}
+            }
+
+    # Возвращаем HTML страницу — закрывает popup и сообщает родительскому окну
+    return f"""<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <title>Подключение — {tool_name}</title>
+  <style>
+    body {{
+      font-family: system-ui, sans-serif;
+      background: #0d0f14; color: #e0e0f0;
+      display:flex; align-items:center; justify-content:center;
+      height:100vh; margin:0; flex-direction:column; gap:16px;
+      text-align:center;
+    }}
+    .icon {{ font-size:64px; }}
+    h2 {{ color:#34d399; margin:0; font-size:22px; }}
+    p  {{ color:#6b7280; font-size:14px; margin:0; }}
+  </style>
+</head>
+<body>
+  <div class="icon">✅</div>
+  <h2>{tool_name} подключён!</h2>
+  <p>Можете закрыть это окно<br>и вернуться в NovaMind</p>
+  <script>
+    // Сообщаем главной странице об успехе
+    if (window.opener) {{
+      window.opener.postMessage({{
+        type: 'mcp_connected',
+        toolkit: '{toolkit_id}',
+        tool_name: '{tool_name}'
+      }}, '*');
+      setTimeout(() => window.close(), 1500);
+    }} else {{
+      setTimeout(() => window.location.href = '/', 2000);
+    }}
+  </script>
+</body>
+</html>"""
+
+
+@app.route('/api/mcp/disconnect/<toolkit_id>', methods=['POST'])
+def mcp_disconnect(toolkit_id):
+    """Отключает MCP инструмент."""
+    if toolkit_id in mcp_connections:
+        del mcp_connections[toolkit_id]
+    return jsonify({"success": True})
+
+
+@app.route('/api/mcp/execute', methods=['POST'])
+def mcp_execute():
+    """
+    Выполняет действие через подключённый MCP инструмент.
+    Вызывается из главного чата когда ИИ решает использовать инструмент.
+    """
+    data       = request.get_json() or {}
+    toolkit_id = data.get("toolkit", "")
+    action     = data.get("action", "")
+    params     = data.get("params", {})
+    user_msg   = data.get("user_message", "")
+
+    conn = mcp_connections.get(toolkit_id, {})
+    if not conn.get("connected"):
+        return jsonify({"error": f"{toolkit_id} не подключён. Подключи в боковой панели → MCP Серверы"}), 400
+
+    tool = next((t for t in MCP_CATALOG if t["id"] == toolkit_id), None)
+
+    # ── GitHub прямой API ─────────────────────────────────────
+    if toolkit_id == "github" and conn.get("auth_type") == "oauth":
+        token = conn.get("access_token", "")
+        gh_headers = {"Authorization": f"Bearer {token}",
+                      "Accept": "application/vnd.github+json",
+                      "X-GitHub-Api-Version": "2022-11-28"}
+        try:
+            # Автоматически определяем action из user_message
+            if not action:
+                action = _detect_github_action(user_msg)
+
+            if action == "list_repos":
+                r = requests.get("https://api.github.com/user/repos?sort=updated&per_page=10",
+                                 headers=gh_headers, timeout=10)
+                result = r.json()
+                text = "
+".join([f"• [{repo['name']}]({repo['html_url']}) — {repo.get('description','')}"
+                                  for repo in result[:10]])
+                return jsonify({"result": f"**📦 Твои репозитории GitHub:**
+
+{text}"})
+
+            elif action == "list_issues":
+                repo = params.get("repo", "")
+                r = requests.get(f"https://api.github.com/repos/{repo}/issues?state=open&per_page=10",
+                                 headers=gh_headers, timeout=10)
+                result = r.json()
+                text = "
+".join([f"• #{i['number']} {i['title']}" for i in result[:10]])
+                return jsonify({"result": f"**🐛 Issues {repo}:**
+
+{text}"})
+
+            elif action == "create_issue":
+                repo  = params.get("repo","")
+                title = params.get("title","")
+                body  = params.get("body","")
+                r = requests.post(f"https://api.github.com/repos/{repo}/issues",
+                                  headers=gh_headers,
+                                  json={"title":title,"body":body},
+                                  timeout=10)
+                iss = r.json()
+                return jsonify({"result": f"✅ Issue создан: [{iss['title']}]({iss['html_url']})"})
+
+            else:
+                # Общий API запрос через user_message
+                return jsonify({"result": "Используй: 'список репозиториев', 'issues <owner/repo>', 'создать issue'"})
+
+        except Exception as e:
+            return jsonify({"error": f"GitHub: {e}"}), 500
+
+    # ── Composio универсальный executor ─────────────────────
+    composio_key = os.getenv("COMPOSIO_API_KEY","")
+    if composio_key and conn.get("auth_type") == "composio":
+        try:
+            toolkit_name = tool["toolkit"] if tool else toolkit_id
+            # Через ИИ определяем нужное действие
+            ai_prompt = f"""Пользователь просит: "{user_msg}"
+Доступный инструмент: {toolkit_name}
+Вырази это как JSON с полями: action (строка), params (объект).
+Только JSON, без пояснений."""
+            action_plan, _ = call_ai(
+                [{"role":"user","content":ai_prompt}],
+                provider="groq", model="llama-3.1-8b-instant",
+                temperature=0, max_tokens=200, timeout=15)
+
+            try:
+                plan = json.loads(action_plan or "{}")
+                action = plan.get("action","")
+                params = plan.get("params",{})
+            except: pass
+
+            headers = {"x-api-key": composio_key, "Content-Type":"application/json"}
+            resp = requests.post(
+                "https://backend.composio.dev/api/v2/actions/execute",
+                headers=headers,
+                json={
+                    "actionName": f"{toolkit_name.upper()}_{action.upper()}",
+                    "input":      params,
+                    "connectedAccountId": conn.get("conn_id","")
+                },
+                timeout=30)
+            if resp.ok:
+                result = resp.json()
+                text = json.dumps(result.get("data",""), ensure_ascii=False, indent=2)[:2000]
+                return jsonify({"result": f"**✅ {toolkit_name} → {action}:**
+```json
+{text}
+```"})
+            return jsonify({"error": resp.text[:300]}), 500
+
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
+
+    return jsonify({"error": "Не поддерживается для этого инструмента"})
+
+
+def _detect_github_action(message):
+    """Определяет GitHub action из сообщения пользователя."""
+    msg = message.lower()
+    if any(w in msg for w in ["список репо","мои репо","репозитори","list repo"]):
+        return "list_repos"
+    if any(w in msg for w in ["issue","задач","баг","ошибк"]):
+        return "list_issues"
+    if any(w in msg for w in ["создай issue","новый issue","create issue"]):
+        return "create_issue"
+    return "list_repos"
+
+
+@app.route('/api/mcp/status')
+def mcp_status():
+    """Статус всех подключений для главного чата."""
+    connected = {tid: {"connected": True, "user": c.get("user_info",{}).get("login","")}
+                 for tid, c in mcp_connections.items() if c.get("connected")}
+    return jsonify({"connected": connected, "count": len(connected)})
 
 
 @app.route("/mcp")

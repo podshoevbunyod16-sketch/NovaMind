@@ -109,9 +109,14 @@
         <span style="font-size:16px;">🔗</span>
         Composio MCP
       </div>
-      <div class="nav-item" onclick="window.location.href='/mcp'; closeSidebar();">
+      <div class="nav-item" onclick="openMcpPanel(); closeSidebar();">
         <span style="font-size:16px;">🔌</span>
-        MCP Servers
+        MCP Серверы
+        <span id="mcpBadge" style="
+          display:none; background:#34d399; color:#000;
+          font-size:10px; font-weight:700; padding:2px 6px;
+          border-radius:10px; margin-left:auto;">0
+        </span>
       </div>
       <div class="nav-label" style="margin-top:6px;">История</div>
       <div id="historyContainer"></div>
@@ -321,5 +326,110 @@
     }
 
 </script>
+
+<!-- ════════════════ MCP СЕРВЕРЫ ПАНЕЛЬ ════════════════ -->
+<div id="mcpDrawer" style="
+  position:fixed; inset:0; z-index:300;
+  display:none; align-items:flex-end; justify-content:center;
+  background:rgba(0,0,0,0.7); backdrop-filter:blur(6px);">
+
+  <div id="mcpDrawerInner" style="
+    background:#161923; border:1px solid #2a3045;
+    border-radius:20px 20px 0 0; width:100%; max-width:540px;
+    max-height:90dvh; overflow:hidden; display:flex; flex-direction:column;
+    animation:slideUp .3s ease;">
+
+    <!-- Заголовок -->
+    <div style="
+      padding:16px 18px 12px; border-bottom:1px solid #2a3045;
+      display:flex; align-items:center; justify-content:space-between;
+      flex-shrink:0;">
+      <div>
+        <div style="font-size:16px;font-weight:700;color:#e0e0f0;">🔌 MCP Серверы</div>
+        <div id="mcpConnCount" style="font-size:12px;color:#6b7280;margin-top:2px;">
+          Подключи инструменты — используй в чате
+        </div>
+      </div>
+      <button onclick="closeMcpPanel()" style="
+        background:#1e2330;border:1px solid #2a3045;border-radius:8px;
+        padding:6px 12px;color:#6b7280;cursor:pointer;font-size:14px;">✕</button>
+    </div>
+
+    <!-- Поиск -->
+    <div style="padding:12px 18px 8px;flex-shrink:0;">
+      <input id="mcpSearch" placeholder="🔍 Поиск инструментов..." oninput="filterMcpTools(this.value)"
+        style="width:100%;background:#0d0f14;border:1px solid #2a3045;border-radius:10px;
+          padding:9px 13px;color:#e0e0f0;font-size:13px;outline:none;box-sizing:border-box;">
+    </div>
+
+    <!-- Список инструментов -->
+    <div id="mcpToolList" style="
+      overflow-y:auto; padding:0 18px 18px; flex:1;
+      display:grid; grid-template-columns:1fr 1fr; gap:10px;
+      align-content:start;">
+      <!-- Заполняется JS -->
+      <div style="grid-column:1/-1;text-align:center;padding:30px;color:#6b7280;">
+        ⏳ Загрузка...
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- MCP API Key диалог -->
+<div id="mcpApiKeyDialog" style="
+  position:fixed;inset:0;z-index:400;
+  display:none;align-items:center;justify-content:center;
+  background:rgba(0,0,0,0.8);">
+  <div style="
+    background:#161923;border:1px solid #2a3045;border-radius:16px;
+    padding:24px;width:90%;max-width:380px;">
+    <div style="font-size:15px;font-weight:700;margin-bottom:12px;" id="mcpApiKeyTitle">
+      API ключ
+    </div>
+    <input id="mcpApiKeyInput" type="password" placeholder="Введи API ключ..."
+      style="width:100%;background:#0d0f14;border:1px solid #2a3045;border-radius:8px;
+        padding:10px 13px;color:#e0e0f0;font-size:14px;outline:none;
+        box-sizing:border-box;margin-bottom:12px;font-family:monospace;">
+    <div style="display:flex;gap:8px;">
+      <button onclick="document.getElementById('mcpApiKeyDialog').style.display='none'"
+        style="flex:1;background:#1e2330;border:1px solid #2a3045;border-radius:8px;
+          padding:10px;color:#6b7280;cursor:pointer;">Отмена</button>
+      <button onclick="submitMcpApiKey()" id="mcpApiKeySubmit"
+        style="flex:1;background:linear-gradient(135deg,#6c63ff,#a78bfa);border:none;
+          border-radius:8px;padding:10px;color:#fff;cursor:pointer;font-weight:700;">
+        Подключить
+      </button>
+    </div>
+  </div>
+</div>
+
+<!-- CSS -->
+<style>
+  @keyframes slideUp {
+    from { transform:translateY(100%); opacity:0; }
+    to   { transform:translateY(0);    opacity:1; }
+  }
+  .mcp-card {
+    background:#1a1f2e; border:1.5px solid #2a3045;
+    border-radius:12px; padding:13px 12px;
+    cursor:pointer; transition:all .2s; position:relative;
+  }
+  .mcp-card:hover   { border-color:#6c63ff; transform:translateY(-1px); }
+  .mcp-card.connected { border-color:#34d399; }
+  .mcp-card-icon  { font-size:28px; line-height:1; margin-bottom:6px; }
+  .mcp-card-name  { font-size:13px; font-weight:700; color:#e0e0f0; }
+  .mcp-card-desc  { font-size:11px; color:#6b7280; margin-top:3px; line-height:1.4; }
+  .mcp-card-badge {
+    position:absolute; top:8px; right:8px;
+    font-size:10px; font-weight:700; padding:2px 7px; border-radius:10px;
+  }
+  .badge-on  { background:rgba(52,211,153,.2); color:#34d399; }
+  .badge-off { background:rgba(107,114,128,.1); color:#6b7280; }
+  .mcp-card-user {
+    font-size:10px; color:#34d399; margin-top:4px;
+    white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+  }
+</style>
+
 </body>
 </html>
