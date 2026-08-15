@@ -180,74 +180,196 @@ def clear_history():
 # ========== GROQ API KEY ROTATION SYSTEM ====================
 # ============================================================
 
-# --- Загрузка всех Groq ключей ---
-GROQ_KEYS = []
-for i in range(1, 10):
-    k = os.getenv(f"GROQ_API_KEY_{i}", "")
-    if k:
-        GROQ_KEYS.append({"key": k, "index": i, "exhausted_at": None})
+# ════════════════════════════════════════════════════════════
+#  РОТАЦИЯ GROQ КЛЮЧЕЙ
+#  Поддерживает: GROQ_API_KEY, GROQ_API_KEY_1 ... GROQ_API_KEY_9
+#  Лимит сбрасывается каждый день в полночь UTC (как у Groq)
+# ════════════════════════════════════════════════════════════
 
-if not GROQ_KEYS:
-    main_key = os.getenv("GROQ_API_KEY", "")
-    if main_key:
-        GROQ_KEYS.append({"key": main_key, "index": 0, "exhausted_at": None})
+def _load_groq_keys():
+    """Загружает все Groq ключи из env в порядке: основной → 1..9"""
+    keys = []
+    # Сначала основной GROQ_API_KEY (без цифры)
+    main = os.getenv("GROQ_API_KEY", "").strip()
+    if main:
+        keys.append({"key": main, "index": 0, "label": "GROQ_API_KEY",
+                     "exhausted_at": None, "exhausted_date": None,
+                     "requests_today": 0, "errors_today": 0})
+    # Затем GROQ_API_KEY_1 ... GROQ_API_KEY_9
+    for i in range(1, 10):
+        k = os.getenv(f"GROQ_API_KEY_{i}", "").strip()
+        if k:
+            keys.append({"key": k, "index": i, "label": f"GROQ_API_KEY_{i}",
+                         "exhausted_at": None, "exhausted_date": None,
+                         "requests_today": 0, "errors_today": 0})
+    return keys
 
+GROQ_KEYS      = _load_groq_keys()
 groq_key_index = 0
-GROQ_KEY_COOLDOWN = 90000
+
+# Файл для хранения состояния ключей между рестартами
+_GROQ_STATE_FILE = os.path.join(os.path.dirname(__file__), ".groq_key_state.json")
+
+def _save_groq_state():
+    """Сохраняет состояние ключей на диск."""
+    try:
+        state = [{"index": k["index"], "exhausted_at": k["exhausted_at"],
+                  "exhausted_date": k["exhausted_date"],
+                  "requests_today": k["requests_today"],
+                  "errors_today": k["errors_today"]}
+                 for k in GROQ_KEYS]
+        with open(_GROQ_STATE_FILE, "w") as f:
+            json.dump({"keys": state, "current_index": groq_key_index,
+                       "saved_at": time.time()}, f)
+    except Exception as e:
+        print(f"[GroqState] Не удалось сохранить: {e}")
+
+def _load_groq_state():
+    """Загружает состояние ключей с диска и восстанавливает."""
+    global groq_key_index
+    try:
+        if not os.path.exists(_GROQ_STATE_FILE):
+            return
+        with open(_GROQ_STATE_FILE) as f:
+            state = json.load(f)
+        saved_at = state.get("saved_at", 0)
+        # Если состояние сохранено в другой UTC-день — не восстанавливаем
+        saved_day = datetime.utcfromtimestamp(saved_at).date() if saved_at else None
+        today     = datetime.utcnow().date()
+        if saved_day != today:
+            print(f"[GroqState] Новый день ({today}) — все ключи сброшены")
+            _groq_reset_daily()
+            return
+        # Восстанавливаем состояние
+        by_index = {s["index"]: s for s in state.get("keys", [])}
+        for k in GROQ_KEYS:
+            if k["index"] in by_index:
+                s = by_index[k["index"]]
+                k["exhausted_at"]    = s.get("exhausted_at")
+                k["exhausted_date"]  = s.get("exhausted_date")
+                k["requests_today"]  = s.get("requests_today", 0)
+                k["errors_today"]    = s.get("errors_today", 0)
+        groq_key_index = state.get("current_index", 0)
+        if groq_key_index >= len(GROQ_KEYS):
+            groq_key_index = 0
+        print(f"[GroqState] Восстановлено: {len(GROQ_KEYS)} ключей, текущий #{groq_key_index}")
+    except Exception as e:
+        print(f"[GroqState] Ошибка загрузки: {e}")
+
+def _groq_reset_daily():
+    """Сбрасывает все ключи — вызывается в начале нового дня UTC."""
+    global groq_key_index
+    for k in GROQ_KEYS:
+        k["exhausted_at"]   = None
+        k["exhausted_date"] = None
+        k["requests_today"] = 0
+        k["errors_today"]   = 0
+    groq_key_index = 0
+    print(f"[GroqKeys] Ежедневный сброс: {len(GROQ_KEYS)} ключей готовы")
+    _save_groq_state()
+
+def _check_daily_reset():
+    """Проверяет нужен ли сброс (вызывается при каждом get_groq_key)."""
+    today = datetime.utcnow().date()
+    for k in GROQ_KEYS:
+        ed = k.get("exhausted_date")
+        if ed and ed != str(today):
+            # Ключ был исчерпан в другой день — сбрасываем его
+            k["exhausted_at"]   = None
+            k["exhausted_date"] = None
+            k["requests_today"] = 0
+            k["errors_today"]   = 0
+            print(f"[GroqKeys] Ключ #{k['index']} ({k['label']}) восстановлен (новый день)")
+
+# Загружаем состояние при старте
+if GROQ_KEYS:
+    _load_groq_state()
+else:
+    print("[GroqKeys] ⚠️ Нет ни одного Groq ключа! Добавь GROQ_API_KEY в .env")
 
 def get_groq_key():
+    """
+    Возвращает следующий доступный Groq ключ.
+    Автоматически проверяет сброс при смене UTC-дня.
+    Порядок: GROQ_API_KEY → GROQ_API_KEY_1 → ... → GROQ_API_KEY_9
+    """
     global groq_key_index, GROQ_KEYS
     if not GROQ_KEYS:
         return ""
-    now = time.time()
-    for key_info in GROQ_KEYS:
-        if key_info["exhausted_at"] and (now - key_info["exhausted_at"]) >= GROQ_KEY_COOLDOWN:
-            key_info["exhausted_at"] = None
-            print(f"[Groq Key] Ключ #{key_info['index']} восстановлен")
+    # Проверяем сброс по смене дня
+    _check_daily_reset()
+    # Ищем первый доступный ключ начиная с текущего
     for i in range(len(GROQ_KEYS)):
         idx = (groq_key_index + i) % len(GROQ_KEYS)
         if GROQ_KEYS[idx]["exhausted_at"] is None:
             groq_key_index = idx
+            GROQ_KEYS[idx]["requests_today"] += 1
             return GROQ_KEYS[idx]["key"]
+    # Все исчерпаны — возвращаем текущий (Groq сам вернёт 429)
+    print(f"[GroqKeys] ⚠️ Все {len(GROQ_KEYS)} ключей исчерпаны")
     return GROQ_KEYS[groq_key_index]["key"]
 
 def mark_groq_key_exhausted():
+    """
+    Помечает текущий ключ как исчерпанный и переключается на следующий.
+    Сохраняет дату исчерпания — в новый UTC-день ключ восстановится.
+    """
     global groq_key_index, GROQ_KEYS
     if not GROQ_KEYS:
         return
-    current_key = GROQ_KEYS[groq_key_index]
-    current_key["exhausted_at"] = time.time()
-    print(f"[Groq Key] Ключ #{current_key['index']} исчерпан")
-    found = False
+    now   = time.time()
+    today = str(datetime.utcnow().date())
+    cur   = GROQ_KEYS[groq_key_index]
+    cur["exhausted_at"]   = now
+    cur["exhausted_date"] = today
+    cur["errors_today"]  += 1
+    print(f"[GroqKeys] ❌ Ключ #{cur['index']} ({cur['label']}) исчерпан "
+          f"(использовано: {cur['requests_today']} запросов сегодня)")
+    # Ищем следующий доступный
+    switched = False
     for i in range(1, len(GROQ_KEYS)):
         idx = (groq_key_index + i) % len(GROQ_KEYS)
         if GROQ_KEYS[idx]["exhausted_at"] is None:
             groq_key_index = idx
-            found = True
-            print(f"[Groq Key] Переключение на ключ #{GROQ_KEYS[idx]['index']}")
+            switched = True
+            next_key = GROQ_KEYS[idx]
+            print(f"[GroqKeys] ✅ Переключение на ключ #{next_key['index']} ({next_key['label']})")
             break
-    if not found:
-        print("[Groq Key] ВСЕ ключи исчерпаны!")
+    if not switched:
+        print(f"[GroqKeys] ⚠️ Все {len(GROQ_KEYS)} ключей исчерпаны! "
+              f"Сброс будет в полночь UTC.")
+    _save_groq_state()
 
 def get_groq_key_status():
-    now = time.time()
+    """
+    Возвращает статус всех ключей для отображения в админке.
+    """
+    now   = time.time()
+    today = datetime.utcnow()
+    # Вычисляем сколько до полуночи UTC
+    next_midnight = datetime(today.year, today.month, today.day) + __import__('datetime').timedelta(days=1)
+    secs_to_reset = (next_midnight - today).total_seconds()
     status = []
-    for key_info in GROQ_KEYS:
-        if key_info["exhausted_at"] is None:
-            status.append({
-                "index": key_info["index"],
-                "active": (GROQ_KEYS.index(key_info) == groq_key_index),
-                "status": "active"
-            })
-        else:
-            remaining = max(0, GROQ_KEY_COOLDOWN - (now - key_info["exhausted_at"]))
-            status.append({
-                "index": key_info["index"],
-                "active": False,
-                "status": "cooldown",
-                "cooldown_remaining_sec": int(remaining),
-                "cooldown_remaining_hr": round(remaining / 3600, 2)
-            })
+    for i, ki in enumerate(GROQ_KEYS):
+        is_active    = (i == groq_key_index)
+        is_exhausted = ki["exhausted_at"] is not None
+        entry = {
+            "index":          ki["index"],
+            "label":          ki["label"],
+            "active":         is_active and not is_exhausted,
+            "exhausted":      is_exhausted,
+            "requests_today": ki.get("requests_today", 0),
+            "errors_today":   ki.get("errors_today", 0),
+            "exhausted_date": ki.get("exhausted_date"),
+            "reset_in_sec":   int(secs_to_reset),
+            "reset_in_hr":    round(secs_to_reset / 3600, 1),
+            "status": (
+                "active"    if is_active and not is_exhausted else
+                "standby"   if not is_active and not is_exhausted else
+                "exhausted"
+            )
+        }
+        status.append(entry)
     return status
 
 def groq_request_with_rotation(url, payload, headers, timeout=90, max_retries=3):
@@ -2167,6 +2289,36 @@ def ollama_models():
         return jsonify({"success": True, "models": result, "ollama_url": ollama_url})
     except Exception as e:
         return jsonify({"success": False, "error": str(e), "models": []})
+
+
+@app.route('/api/groq/keys')
+def groq_keys_status():
+    """Статус всех Groq ключей — для главного чата и админки."""
+    status = get_groq_key_status()
+    total     = len(status)
+    available = sum(1 for s in status if not s["exhausted"])
+    exhausted = total - available
+    # Время до сброса
+    today = datetime.utcnow()
+    import datetime as _dt
+    next_midnight = datetime(today.year, today.month, today.day) + _dt.timedelta(days=1)
+    reset_in = int((next_midnight - today).total_seconds())
+    return jsonify({
+        "keys":      status,
+        "total":     total,
+        "available": available,
+        "exhausted": exhausted,
+        "current_index": groq_key_index,
+        "reset_in_sec":  reset_in,
+        "reset_in_hr":   round(reset_in / 3600, 1),
+        "reset_time_utc": str(next_midnight)
+    })
+
+@app.route('/api/groq/reset', methods=['POST'])
+def groq_reset_keys():
+    """Принудительный сброс всех ключей (только для тестирования)."""
+    _groq_reset_daily()
+    return jsonify({"success": True, "message": f"Сброшено {len(GROQ_KEYS)} ключей"})
 
 @app.route('/api/admin/stats')
 def admin_stats():
