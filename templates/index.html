@@ -40,6 +40,96 @@
       0%   { opacity:1; }
       100% { opacity:0; }
     }
+  
+  /* ════ ИСТОРИЯ ЧАТОВ В САЙДБАРЕ ════ */
+  #historyContainer {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    margin-top: 4px;
+    overflow-y: auto;
+    max-height: 55vh;
+  }
+  #historyContainer::-webkit-scrollbar { width: 3px; }
+  #historyContainer::-webkit-scrollbar-thumb {
+    background: var(--border, #2a3045); border-radius: 2px;
+  }
+  .history-group-label {
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: var(--text-muted, #4a5270);
+    padding: 8px 8px 3px;
+  }
+  .history-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 8px;
+    border-radius: 10px;
+    cursor: pointer;
+    transition: background 0.15s;
+    border: 1px solid transparent;
+  }
+  .history-item:hover {
+    background: var(--surface2, #1e2330);
+  }
+  .history-item.active {
+    background: rgba(108,99,255,0.12);
+    border-color: rgba(108,99,255,0.3);
+  }
+  .history-item-icon {
+    font-size: 14px;
+    flex-shrink: 0;
+    opacity: 0.6;
+  }
+  .history-item-body {
+    flex: 1;
+    min-width: 0;
+  }
+  .history-item-title {
+    font-size: 12.5px;
+    font-weight: 500;
+    color: var(--text, #e0e0f0);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .history-item-meta {
+    font-size: 10px;
+    color: var(--text-muted, #4a5270);
+    margin-top: 1px;
+  }
+  .history-item-actions {
+    display: flex;
+    gap: 3px;
+    opacity: 0;
+    transition: opacity 0.15s;
+  }
+  .history-item:hover .history-item-actions { opacity: 1; }
+  .hist-btn {
+    background: none;
+    border: 1px solid var(--border, #2a3045);
+    border-radius: 5px;
+    padding: 2px 6px;
+    cursor: pointer;
+    font-size: 12px;
+    line-height: 1.4;
+    transition: all 0.15s;
+  }
+  .hist-btn.load-btn { color: #a78bfa; }
+  .hist-btn.load-btn:hover { background: rgba(108,99,255,0.2); border-color: #6c63ff; }
+  .hist-btn.del-btn  { color: #f87171; }
+  .hist-btn.del-btn:hover  { background: rgba(239,68,68,0.15); border-color: #f87171; }
+  .history-empty {
+    text-align: center;
+    padding: 20px 10px;
+    color: var(--text-muted, #4a5270);
+    font-size: 12px;
+    line-height: 1.6;
+  }
+
   </style>
 </head>
 <body>
@@ -118,7 +208,15 @@
           border-radius:10px; margin-left:auto;">0
         </span>
       </div>
-      <div class="nav-label" style="margin-top:6px;">История</div>
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-top:10px;margin-bottom:4px;">
+        <div class="nav-label">История чатов</div>
+        <button onclick="startNewChat()" title="Новый чат" style="
+          background:rgba(108,99,255,0.15);border:1px solid #6c63ff;
+          border-radius:8px;padding:4px 10px;color:#a78bfa;
+          cursor:pointer;font-size:12px;font-weight:600;line-height:1;">
+          + Новый
+        </button>
+      </div>
       <div id="historyContainer"></div>
 
     </div>
