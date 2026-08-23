@@ -1565,28 +1565,122 @@ function scrollToBottom() {
   setTimeout(() => chatContainer.scrollTo({ top: chatContainer.scrollHeight, behavior: 'smooth' }), 50);
 }
 async function saveServerHistory() {
+  // Обновляем сайдбар после каждого сообщения
+  await loadChatList();
+}
+
+async function loadChatList() {
   try {
-    const messages = [];
-    const bubbles = document.querySelectorAll('.msg-bubble');
-    let currentRole = null;
-    let currentContent = '';
-    for (const bubble of bubbles) {
-      const isUser = bubble.closest('.message')?.classList.contains('user');
-      const role = isUser ? 'user' : 'assistant';
-      const text = bubble.textContent || '';
-      if (text.trim()) {
-        messages.push({role: role, content: text.trim()});
-      }
-    }
-    await fetch('/api/history/save', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({history: messages})
-    });
-  } catch (e) {
-    console.log('Save history error:', e);
+    const r    = await fetch('/api/chats');
+    const data = await r.json();
+    renderChatList(data.chats || [], data.active_chat);
+  } catch(e) {
+    console.log('[History] loadChatList error:', e);
   }
 }
+
+function renderChatList(chats, activeChatId) {
+  const container = document.getElementById('historyContainer');
+  if (!container) return;
+  container.innerHTML = '';
+
+  if (!chats || chats.length === 0) {
+    container.innerHTML = `
+      <div class="history-empty">
+        <span style="font-size:24px;display:block;margin-bottom:6px;">💬</span>
+        Начни диалог — он появится здесь
+      </div>`;
+    return;
+  }
+
+  // Группируем по дате
+  const today     = new Date().toLocaleDateString('ru');
+  const yesterday = new Date(Date.now()-86400000).toLocaleDateString('ru');
+  const groups    = {};
+
+  for (const chat of chats) {
+    const d = chat.updated_at
+      ? new Date(chat.updated_at).toLocaleDateString('ru')
+      : 'Ранее';
+    const label = d === today ? 'Сегодня' : d === yesterday ? 'Вчера' : d;
+    (groups[label] = groups[label] || []).push(chat);
+  }
+
+  for (const [label, groupChats] of Object.entries(groups)) {
+    // Заголовок группы
+    const hdr = document.createElement('div');
+    hdr.className = 'history-group-label';
+    hdr.textContent = label;
+    container.appendChild(hdr);
+
+    for (const chat of groupChats) {
+      const item = document.createElement('div');
+      item.className = 'history-item' + (chat.id === activeChatId ? ' active' : '');
+      item.dataset.chatId = chat.id;
+      item.innerHTML = `
+        <div class="history-item-icon">💬</div>
+        <div class="history-item-body">
+          <div class="history-item-title">${escapeHtml(chat.title)}</div>
+          <div class="history-item-meta">${chat.count} сообщ.</div>
+        </div>
+        <div class="history-item-actions">
+          <button class="hist-btn load-btn" title="Загрузить" onclick="loadChat('${chat.id}',event)">↩</button>
+          <button class="hist-btn del-btn"  title="Удалить"   onclick="deleteChat('${chat.id}',event)">×</button>
+        </div>`;
+      item.addEventListener('click', () => loadChat(chat.id));
+      container.appendChild(item);
+    }
+  }
+}
+
+async function loadChat(chatId, e) {
+  if (e) e.stopPropagation();
+  try {
+    const r    = await fetch(`/api/chats/${chatId}/load`, {method:'POST'});
+    const data = await r.json();
+    if (!data.success) { showNotification('❌ Чат не найден', 'error'); return; }
+    // Отображаем сообщения
+    chatContainer.innerHTML = '';
+    for (const msg of data.messages) {
+      appendMessage(msg.role === 'user' ? 'user' : 'ai', msg.content);
+    }
+    closeSidebar();
+    // Помечаем активный
+    document.querySelectorAll('.history-item').forEach(el => {
+      el.classList.toggle('active', el.dataset.chatId === chatId);
+    });
+    showNotification('✅ Чат загружен', 'success');
+  } catch(e) {
+    showNotification('❌ Ошибка: ' + e.message, 'error');
+  }
+}
+
+async function deleteChat(chatId, e) {
+  if (e) e.stopPropagation();
+  if (!confirm('Удалить этот чат?')) return;
+  try {
+    await fetch(`/api/chats/${chatId}`, {method:'DELETE'});
+    await loadChatList();
+    showNotification('🗑 Чат удалён', 'info');
+  } catch(err) {
+    showNotification('❌ Ошибка удаления', 'error');
+  }
+}
+
+async function startNewChat() {
+  try {
+    await fetch('/api/chats/new', {method:'POST'});
+    chatContainer.innerHTML = '';
+    appendMessage('ai', '👋 Новый диалог начат! Чем могу помочь?');
+    await loadChatList();
+    closeSidebar();
+  } catch(e) {
+    showNotification('❌ Ошибка: ' + e.message, 'error');
+  }
+}
+
+// Устаревшие функции — оставляем для совместимости
+function updateSidebarHistory(history) { loadChatList(); }
 
 function addToHistory(text) {
   if (chatHistory.includes(text)) return;
@@ -1983,3 +2077,14 @@ async function mcpCheckAndExecute(message) {
   // Обновляем бейдж каждые 30 сек
   setInterval(updateMcpBadge, 30000);
 })();
+
+
+
+// ── Загружаем историю чатов при старте ───────────────────────
+document.addEventListener('DOMContentLoaded', function() {
+  loadChatList();
+});
+// Также вызываем сразу (если DOM уже загружен)
+if (document.readyState !== 'loading') {
+  setTimeout(loadChatList, 300);
+}
