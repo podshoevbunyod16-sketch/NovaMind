@@ -156,12 +156,17 @@ def set_current_contents(new_contents):
         guest_contents = new_contents
 
 def append_to_history(role, content):
-    """Добавляет сообщение в историю и сохраняет"""
+    """Добавляет сообщение в историю и сохраняет в чат."""
     history = get_current_contents()
     history.append({"role": role, "content": content})
-    if len(history) > 50:
-        history = history[-50:]
+    if len(history) > 100:
+        history = history[-100:]
     set_current_contents(history)
+    # Дополнительно сохраняем в систему чатов
+    try:
+        _save_chat_message(role, content)
+    except Exception as _e:
+        pass  # Не блокируем основной поток
 
 def clear_history():
     """Очищает историю текущего пользователя"""
@@ -3075,6 +3080,117 @@ def save_history_api():
     history = data.get("history", [])
     set_current_contents(history)
     return jsonify({"success": True})
+
+# ════════════════════════════════════════════════════════════
+#  ХРАНИЛИЩЕ ЧАТОВ (localStorage-стиль на сервере)
+#  Каждый чат = {id, title, messages, created_at, updated_at}
+# ════════════════════════════════════════════════════════════
+import uuid as _uuid
+from datetime import datetime as _dt
+
+# In-memory хранилище чатов (по email или guest)
+_chats_store = {}   # {"guest": [...chats], "email": [...chats]}
+_active_chat = {}   # {"guest": chat_id, "email": chat_id}
+
+def _user_key():
+    email = get_user_email()
+    return email if email else "guest"
+
+def _get_chats(key=None):
+    k = key or _user_key()
+    return _chats_store.setdefault(k, [])
+
+def _save_chat_message(role, content):
+    """Сохраняет сообщение в активный чат, создаёт новый если нет."""
+    k   = _user_key()
+    cid = _active_chat.get(k)
+    chats = _get_chats(k)
+    # Ищем активный чат
+    chat = next((c for c in chats if c["id"] == cid), None)
+    if not chat:
+        # Создаём новый чат
+        chat = {
+            "id":         str(_uuid.uuid4())[:8],
+            "title":      content[:40] + ("…" if len(content) > 40 else ""),
+            "messages":   [],
+            "created_at": _dt.utcnow().isoformat(),
+            "updated_at": _dt.utcnow().isoformat(),
+        }
+        chats.append(chat)
+        _active_chat[k] = chat["id"]
+    # Добавляем сообщение
+    chat["messages"].append({"role": role, "content": content})
+    chat["updated_at"] = _dt.utcnow().isoformat()
+    # Обновляем заголовок из первого user-сообщения
+    if role == "user" and len(chat["messages"]) == 1:
+        chat["title"] = content[:40] + ("…" if len(content) > 40 else "")
+    # Лимит: 100 сообщений на чат
+    if len(chat["messages"]) > 100:
+        chat["messages"] = chat["messages"][-100:]
+
+@app.route("/api/chats")
+def api_get_chats():
+    """Возвращает список всех чатов пользователя (без сообщений — только мета)."""
+    chats = _get_chats()
+    # Сортируем по дате обновления — сначала новые
+    sorted_chats = sorted(chats, key=lambda c: c.get("updated_at",""), reverse=True)
+    result = [{
+        "id":         c["id"],
+        "title":      c["title"],
+        "count":      len(c.get("messages",[])),
+        "updated_at": c.get("updated_at",""),
+        "created_at": c.get("created_at",""),
+        "preview":    (c["messages"][-1]["content"][:60] + "…"
+                       if c.get("messages") else ""),
+    } for c in sorted_chats[:30]]
+    k = _user_key()
+    return jsonify({
+        "chats":       result,
+        "active_chat": _active_chat.get(k),
+        "total":       len(chats)
+    })
+
+@app.route("/api/chats/<chat_id>")
+def api_get_chat(chat_id):
+    """Возвращает полный чат с сообщениями."""
+    chats = _get_chats()
+    chat = next((c for c in chats if c["id"] == chat_id), None)
+    if not chat:
+        return jsonify({"error": "Чат не найден"}), 404
+    return jsonify(chat)
+
+@app.route("/api/chats/<chat_id>/load", methods=["POST"])
+def api_load_chat(chat_id):
+    """Загружает чат как текущий (для кнопки ↩ в сайдбаре)."""
+    k     = _user_key()
+    chats = _get_chats(k)
+    chat  = next((c for c in chats if c["id"] == chat_id), None)
+    if not chat:
+        return jsonify({"error": "Чат не найден"}), 404
+    _active_chat[k] = chat_id
+    set_current_contents(chat["messages"])
+    return jsonify({"success": True, "messages": chat["messages"]})
+
+@app.route("/api/chats/<chat_id>", methods=["DELETE"])
+def api_delete_chat(chat_id):
+    """Удаляет чат."""
+    k     = _user_key()
+    chats = _get_chats(k)
+    before = len(chats)
+    _chats_store[k] = [c for c in chats if c["id"] != chat_id]
+    if _active_chat.get(k) == chat_id:
+        _active_chat.pop(k, None)
+    deleted = before - len(_chats_store[k])
+    return jsonify({"success": True, "deleted": deleted})
+
+@app.route("/api/chats/new", methods=["POST"])
+def api_new_chat():
+    """Начинает новый чат (сбрасывает активный)."""
+    k = _user_key()
+    _active_chat.pop(k, None)
+    set_current_contents([])
+    return jsonify({"success": True})
+
 
 if __name__ == '__main__':
     print("=" * 50)
