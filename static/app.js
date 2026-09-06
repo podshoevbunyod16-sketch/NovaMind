@@ -1571,11 +1571,30 @@ async function saveServerHistory() {
 
 async function loadChatList() {
   try {
-    const r    = await fetch('/api/chats');
+    const r = await fetch('/api/chats');
+    if (!r.ok) throw new Error('HTTP ' + r.status);
     const data = await r.json();
-    renderChatList(data.chats || [], data.active_chat);
-  } catch(e) {
-    console.log('[History] loadChatList error:', e);
+    const chats = data.chats || [];
+    // Кэшируем в localStorage
+    try {
+      localStorage.setItem('nova_chats_cache', JSON.stringify({
+        chats, active: data.active_chat, ts: Date.now()
+      }));
+    } catch(e2) {}
+    renderChatList(chats, data.active_chat);
+  } catch(err) {
+    console.warn('[History] Сервер недоступен, читаем из кэша:', err);
+    try {
+      const cached = localStorage.getItem('nova_chats_cache');
+      if (cached) {
+        const d = JSON.parse(cached);
+        renderChatList(d.chats || [], d.active);
+      } else {
+        renderChatList([], null);
+      }
+    } catch(e3) {
+      renderChatList([], null);
+    }
   }
 }
 
@@ -1670,13 +1689,11 @@ async function deleteChat(chatId, e) {
 async function startNewChat() {
   try {
     await fetch('/api/chats/new', {method:'POST'});
-    chatContainer.innerHTML = '';
-    appendMessage('ai', '👋 Новый диалог начат! Чем могу помочь?');
-    await loadChatList();
-    closeSidebar();
-  } catch(e) {
-    showNotification('❌ Ошибка: ' + e.message, 'error');
-  }
+  } catch(e) {}
+  chatContainer.innerHTML = '';
+  appendMessage('ai', '👋 Новый диалог начат! Чем могу помочь?');
+  setTimeout(loadChatList, 300);
+  closeSidebar();
 }
 
 // Устаревшие функции — оставляем для совместимости
@@ -2081,10 +2098,16 @@ async function mcpCheckAndExecute(message) {
 
 
 // ── Загружаем историю чатов при старте ───────────────────────
-document.addEventListener('DOMContentLoaded', function() {
-  loadChatList();
-});
-// Также вызываем сразу (если DOM уже загружен)
-if (document.readyState !== 'loading') {
-  setTimeout(loadChatList, 300);
-}
+// Загружаем историю при старте — надёжный вызов
+(function _initHistory() {
+  function run() {
+    loadChatList().catch(function(e) {
+      console.error('[History] init failed:', e);
+    });
+  }
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', run);
+  } else {
+    setTimeout(run, 150);
+  }
+})();
