@@ -3088,9 +3088,40 @@ def save_history_api():
 import uuid as _uuid
 from datetime import datetime as _dt
 
-# In-memory хранилище чатов (по email или guest)
-_chats_store = {}   # {"guest": [...chats], "email": [...chats]}
-_active_chat = {}   # {"guest": chat_id, "email": chat_id}
+# ── Персистентное хранилище чатов (файл на диске) ──────────
+_CHATS_FILE  = os.path.join(os.path.dirname(os.path.abspath(__file__)), "chats_store.json")
+_chats_store = {}
+_active_chat = {}
+
+def _load_chats_file():
+    """Загружает чаты с диска при старте сервера."""
+    global _chats_store, _active_chat
+    try:
+        if os.path.exists(_CHATS_FILE):
+            with open(_CHATS_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            _chats_store = data.get("chats", {})
+            _active_chat = data.get("active", {})
+            total = sum(len(v) for v in _chats_store.values())
+            print(f"[Chats] ✅ Загружено {total} чатов с диска")
+        else:
+            print("[Chats] Файл chats_store.json не найден — начинаем с чистого листа")
+    except Exception as e:
+        print(f"[Chats] ⚠️ Ошибка загрузки: {e}")
+        _chats_store = {}
+        _active_chat = {}
+
+def _save_chats_file():
+    """Сохраняет все чаты на диск."""
+    try:
+        with open(_CHATS_FILE, "w", encoding="utf-8") as f:
+            json.dump({"chats": _chats_store, "active": _active_chat}, f,
+                      ensure_ascii=False, separators=(',', ':'))
+    except Exception as e:
+        print(f"[Chats] ⚠️ Ошибка сохранения: {e}")
+
+# Загружаем при старте
+_load_chats_file()
 
 def _user_key():
     email = get_user_email()
@@ -3098,15 +3129,16 @@ def _user_key():
 
 def _get_chats(key=None):
     k = key or _user_key()
-    return _chats_store.setdefault(k, [])
+    if k not in _chats_store:
+        _chats_store[k] = []
+    return _chats_store[k]
 
 def _save_chat_message(role, content):
-    """Сохраняет сообщение в активный чат, создаёт новый если нет."""
-    k   = _user_key()
-    cid = _active_chat.get(k)
+    """Сохраняет сообщение в активный чат и пишет на диск."""
+    k     = _user_key()
+    cid   = _active_chat.get(k)
     chats = _get_chats(k)
-    # Ищем активный чат
-    chat = next((c for c in chats if c["id"] == cid), None)
+    chat  = next((c for c in chats if c["id"] == cid), None)
     if not chat:
         # Создаём новый чат
         chat = {
@@ -3116,17 +3148,16 @@ def _save_chat_message(role, content):
             "created_at": _dt.utcnow().isoformat(),
             "updated_at": _dt.utcnow().isoformat(),
         }
-        chats.append(chat)
+        _chats_store[k].append(chat)
         _active_chat[k] = chat["id"]
-    # Добавляем сообщение
     chat["messages"].append({"role": role, "content": content})
     chat["updated_at"] = _dt.utcnow().isoformat()
-    # Обновляем заголовок из первого user-сообщения
     if role == "user" and len(chat["messages"]) == 1:
         chat["title"] = content[:40] + ("…" if len(content) > 40 else "")
-    # Лимит: 100 сообщений на чат
     if len(chat["messages"]) > 100:
         chat["messages"] = chat["messages"][-100:]
+    # ── КЛЮЧЕВОЕ: сохраняем на диск после каждого сообщения ──
+    _save_chats_file()
 
 @app.route("/api/chats")
 def api_get_chats():
@@ -3169,6 +3200,7 @@ def api_load_chat(chat_id):
         return jsonify({"error": "Чат не найден"}), 404
     _active_chat[k] = chat_id
     set_current_contents(chat["messages"])
+    _save_chats_file()
     return jsonify({"success": True, "messages": chat["messages"]})
 
 @app.route("/api/chats/<chat_id>", methods=["DELETE"])
@@ -3181,6 +3213,7 @@ def api_delete_chat(chat_id):
     if _active_chat.get(k) == chat_id:
         _active_chat.pop(k, None)
     deleted = before - len(_chats_store[k])
+    _save_chats_file()
     return jsonify({"success": True, "deleted": deleted})
 
 @app.route("/api/chats/new", methods=["POST"])
@@ -3189,6 +3222,7 @@ def api_new_chat():
     k = _user_key()
     _active_chat.pop(k, None)
     set_current_contents([])
+    _save_chats_file()
     return jsonify({"success": True})
 
 
