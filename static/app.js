@@ -630,6 +630,7 @@ function initSidebarSwipe() {
     sidebarDrag = {
       id: e.pointerId,
       startX: x,
+      startY: e.clientY,
       startOffset: getSidebarOffset(),
       lastX: x,
       lastTime: performance.now(),
@@ -660,7 +661,8 @@ function initSidebarSwipe() {
 
     const width = Math.min(300, Math.max(240, window.innerWidth * 0.82));
     const dx = e.clientX - sidebarDrag.startX;
-    const velocity = dx / Math.max(1, performance.now() - sidebarDrag.lastTime + 1);
+    const now = performance.now();
+    const velocity = (e.clientX - sidebarDrag.lastX) / Math.max(1, now - sidebarDrag.lastTime);
     const current = getSidebarOffset();
 
     // При открытом drawer свайп влево закрывает его; вправо открывает.
