@@ -417,3 +417,141 @@ button, input, select, textarea {
   margin: 0 auto 20px;   /* центрирование и отступ снизу */
   border-radius: 12px;   /* если нужны скруглённые углы */
 }
+
+
+/* ══════════════════════════════════════════
+   Chat history
+══════════════════════════════════════════ */
+#historyContainer {
+  flex: 0 1 auto;
+  max-height: min(44vh, 520px);
+  overflow-y: auto;
+  padding-bottom: 4px;
+}
+.history-group-label {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  padding: 10px 8px 4px;
+}
+.history-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 44px;
+  padding: 7px 8px;
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  cursor: pointer;
+  user-select: none;
+  transition: background var(--transition), color var(--transition);
+}
+.history-item:hover,
+.history-item.active {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+.history-item.active {
+  background: var(--accent-dim);
+  border: 1px solid var(--border);
+}
+.history-item-icon {
+  flex: 0 0 auto;
+  font-size: 13px;
+}
+.history-item-body {
+  min-width: 0;
+  flex: 1;
+}
+.history-item-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  line-height: 1.35;
+}
+.history-item-meta {
+  color: var(--text-muted);
+  font-size: 10px;
+  margin-top: 2px;
+}
+.hist-del-btn {
+  flex: 0 0 auto;
+  opacity: 0;
+  width: 28px;
+  height: 28px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 18px;
+  line-height: 1;
+}
+.history-item:hover .hist-del-btn,
+.history-item.active .hist-del-btn {
+  opacity: 1;
+}
+.hist-del-btn:hover {
+  color: #f87171;
+  background: rgba(239,68,68,.12);
+}
+.history-empty {
+  text-align: center;
+  padding: 22px 10px;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+/* ══════════════════════════════════════════
+   Mobile sidebar follows the finger together with chat
+══════════════════════════════════════════ */
+.drawer-animate .main,
+.drawer-animate .sidebar {
+  transition: transform var(--transition);
+}
+@media (max-width: 768px) {
+  .app {
+    --drawer-x: 0px;
+    --drawer-width: min(300px, 82vw);
+    touch-action: pan-y;
+  }
+
+  .sidebar {
+    width: var(--drawer-width);
+    transform: translateX(calc(var(--drawer-x) - var(--drawer-width)));
+    transition: none;
+    touch-action: pan-y;
+  }
+
+  .sidebar.open {
+    transform: translateX(0);
+    box-shadow: 8px 0 40px rgba(0,0,0,.5);
+  }
+
+  .app .main {
+    transform: translateX(var(--drawer-x));
+    min-width: 100%;
+    width: 100%;
+    will-change: transform;
+  }
+
+  .app.drawer-animate .sidebar {
+    transform: translateX(calc(var(--drawer-x) - var(--drawer-width)));
+  }
+
+  .app.drawer-animate .main {
+    transform: translateX(var(--drawer-x));
+  }
+
+  #historyContainer {
+    max-height: 38vh;
+  }
+
+  .hist-del-btn {
+    opacity: 1;
+  }
+}
