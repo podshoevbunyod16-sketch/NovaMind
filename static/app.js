@@ -14,6 +14,8 @@ let msgCount       = 0;
 let chatHistory    = JSON.parse(localStorage.getItem('nova_history') || '[]');
 let selectedModelName = 'Nova Ultra';
 let inputMode      = null;
+let historyReplay  = false;
+let sidebarDrag    = null;
 // ══════════════════════════════════════════
 // ЗАЩИТА ОТ КОПИРОВАНИЯ ИНТЕРФЕЙСА
 // ══════════════════════════════════════════
@@ -284,7 +286,6 @@ async function sendMessage(text) {
   input.value = '';
   input.style.height = 'auto';
   sendBtn.disabled = true;
-  addToHistory(finalMsg);
   showTyping();
 
   const isCommand = finalMsg.startsWith('/');
@@ -459,6 +460,10 @@ function appendMessage(role, content) {
     </div>`;
   chatContainer.appendChild(wrap);
   scrollToBottom();
+
+  if (!historyReplay && (role === 'user' || role === 'ai') && content) {
+    historyAddMessage(role, content);
+  }
 }
 
 function formatContent(text) {
@@ -563,13 +568,127 @@ function stopRecording() {
 }
 
 // ========== САЙДБАР ==========
-function toggleSidebar() {
-  document.getElementById('sidebar').classList.toggle('open');
-  document.getElementById('overlay').classList.toggle('visible');
+function setSidebarOffset(offset, animate = false) {
+  const app = document.querySelector('.app');
+  const sidebar = document.getElementById('sidebar');
+  const overlay = document.getElementById('overlay');
+  if (!app || !sidebar) return;
+
+  const width = Math.min(300, Math.max(240, window.innerWidth * 0.82));
+  const x = Math.max(0, Math.min(width, offset));
+
+  app.style.setProperty('--drawer-x', x + 'px');
+  app.style.setProperty('--drawer-width', width + 'px');
+
+  if (animate) app.classList.add('drawer-animate');
+  else app.classList.remove('drawer-animate');
+
+  if (x > width * 0.5) {
+    sidebar.classList.add('open');
+    overlay.classList.add('visible');
+  } else {
+    sidebar.classList.remove('open');
+    overlay.classList.remove('visible');
+  }
+
+  overlay.style.opacity = String(Math.min(0.75, (x / width) * 0.75));
 }
+
+function getSidebarOffset() {
+  const app = document.querySelector('.app');
+  return parseFloat(getComputedStyle(app).getPropertyValue('--drawer-x')) || 0;
+}
+
+function toggleSidebar() {
+  const width = Math.min(300, Math.max(240, window.innerWidth * 0.82));
+  setSidebarOffset(getSidebarOffset() > width * 0.5 ? 0 : width, true);
+}
+
 function closeSidebar() {
-  document.getElementById('sidebar').classList.remove('open');
-  document.getElementById('overlay').classList.remove('visible');
+  setSidebarOffset(0, true);
+}
+
+function initSidebarSwipe() {
+  const app = document.querySelector('.app');
+  const sidebar = document.getElementById('sidebar');
+  if (!app || !sidebar || !window.matchMedia('(max-width: 768px)').matches) return;
+
+  const edge = 28;
+  const minDrag = 6;
+
+  const begin = (e) => {
+    if (e.pointerType === 'mouse' && e.button !== 0) return;
+
+    const open = getSidebarOffset() > 1;
+    const x = e.clientX;
+    const startedOnSidebar = sidebar.contains(e.target);
+
+    // Открытие начинается только от левого края, закрытие — из открытого drawer.
+    if (!open && x > edge) return;
+    if (open && !startedOnSidebar && x < 280) return;
+
+    sidebarDrag = {
+      id: e.pointerId,
+      startX: x,
+      startOffset: getSidebarOffset(),
+      lastX: x,
+      lastTime: performance.now(),
+      moved: false
+    };
+
+    app.classList.remove('drawer-animate');
+    try { e.target.setPointerCapture(e.pointerId); } catch (_) {}
+  };
+
+  const move = (e) => {
+    if (!sidebarDrag || e.pointerId !== sidebarDrag.id) return;
+
+    const dx = e.clientX - sidebarDrag.startX;
+    if (Math.abs(dx) > minDrag) sidebarDrag.moved = true;
+
+    const next = Math.max(0, sidebarDrag.startOffset + dx);
+    if (Math.abs(dx) > Math.abs(e.clientY - (sidebarDrag.startY || e.clientY))) {
+      e.preventDefault();
+      setSidebarOffset(next, false);
+    }
+    sidebarDrag.lastX = e.clientX;
+    sidebarDrag.lastTime = performance.now();
+  };
+
+  const end = (e) => {
+    if (!sidebarDrag || e.pointerId !== sidebarDrag.id) return;
+
+    const width = Math.min(300, Math.max(240, window.innerWidth * 0.82));
+    const dx = e.clientX - sidebarDrag.startX;
+    const velocity = dx / Math.max(1, performance.now() - sidebarDrag.lastTime + 1);
+    const current = getSidebarOffset();
+
+    // При открытом drawer свайп влево закрывает его; вправо открывает.
+    const shouldOpen = current > width * 0.5 || dx > 80 || velocity > 0.45;
+    setSidebarOffset(shouldOpen ? width : 0, true);
+    sidebarDrag = null;
+  };
+
+  app.addEventListener('pointerdown', begin, {passive: false});
+  app.addEventListener('pointermove', move, {passive: false});
+  app.addEventListener('pointerup', end, {passive: false});
+  app.addEventListener('pointercancel', end, {passive: false});
+
+  window.addEventListener('resize', () => {
+    if (!window.matchMedia('(max-width: 768px)').matches) {
+      app.style.removeProperty('--drawer-x');
+      app.style.removeProperty('--drawer-width');
+      app.classList.remove('drawer-animate');
+      sidebar.classList.remove('open');
+      document.getElementById('overlay')?.classList.remove('visible');
+    }
+  });
+}
+
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', initSidebarSwipe);
+} else {
+  initSidebarSwipe();
 }
 function setActive(el) {
   document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
@@ -590,23 +709,207 @@ document.addEventListener('click', (e) => {
 
 // ========== ЧАТ ==========
 function newChat() {
-  chatContainer.innerHTML = '';
-  chatContainer.appendChild(welcomeScreen);
-  welcomeScreen.style.display = 'flex';
-  msgCount = 0;
+  const store = historyLoad();
+  store.activeId = null;
+  historySave(store);
+  historyReplay = true;
+  try {
+    chatContainer.innerHTML = '';
+    chatContainer.appendChild(welcomeScreen);
+    welcomeScreen.style.display = 'flex';
+    msgCount = 0;
+  } finally {
+    historyReplay = false;
+  }
+  renderChatList();
 }
-function clearChat() { newChat(); }
+function clearChat() {
+  newChat();
+  fetch('/api/history/clear', {method: 'DELETE'}).catch(() => {});
+}
 function shareChat() {
   navigator.clipboard.writeText(window.location.href).then(() => showNotification('Ссылка скопирована', 'success'));
 }
 function scrollToBottom() {
   setTimeout(() => chatContainer.scrollTo({ top: chatContainer.scrollHeight, behavior: 'smooth' }), 50);
 }
-function addToHistory(text) {
-  if (chatHistory.includes(text)) return;
-  chatHistory.unshift(text);
-  if (chatHistory.length > 8) chatHistory.pop();
-  localStorage.setItem('nova_history', JSON.stringify(chatHistory));
+
+// ========== ИСТОРИЯ ЧАТОВ ==========
+// Локальная история: сохраняет полноценные диалоги на этом устройстве.
+const HISTORY_KEY = 'nova_history_v2';
+const MAX_CHATS = 50;
+const MAX_MSGS = 60;
+
+function historyLoad() {
+  try {
+    return JSON.parse(localStorage.getItem(HISTORY_KEY) || '{"chats":[],"activeId":null}');
+  } catch (e) {
+    return {chats: [], activeId: null};
+  }
+}
+
+function historySave(store) {
+  try {
+    localStorage.setItem(HISTORY_KEY, JSON.stringify(store));
+  } catch (e) {
+    console.warn('[History] localStorage unavailable/full');
+  }
+}
+
+function historyAddMessage(role, content) {
+  if (historyReplay || !content || content.length < 1) return;
+
+  const store = historyLoad();
+  let chat = store.chats.find(c => c.id === store.activeId);
+
+  if (!chat) {
+    const title = content.slice(0, 55) + (content.length > 55 ? '…' : '');
+    chat = {
+      id: Date.now().toString(36) + Math.random().toString(36).slice(2, 7),
+      title,
+      messages: [],
+      createdAt: Date.now(),
+      updatedAt: Date.now()
+    };
+    store.chats.unshift(chat);
+    store.activeId = chat.id;
+  }
+
+  chat.messages.push({role, content});
+  chat.updatedAt = Date.now();
+
+  if (role === 'user' && chat.messages.filter(m => m.role === 'user').length === 1) {
+    chat.title = content.slice(0, 55) + (content.length > 55 ? '…' : '');
+  }
+
+  if (chat.messages.length > MAX_MSGS) {
+    chat.messages = chat.messages.slice(-MAX_MSGS);
+  }
+  if (store.chats.length > MAX_CHATS) {
+    store.chats = store.chats.slice(0, MAX_CHATS);
+  }
+
+  historySave(store);
+  renderChatList();
+}
+
+function renderChatList() {
+  const container = document.getElementById('historyContainer');
+  if (!container) return;
+
+  const store = historyLoad();
+  const chats = store.chats || [];
+  const active = store.activeId;
+  container.innerHTML = '';
+
+  if (!chats.length) {
+    container.innerHTML = '<div class="history-empty">💬<br>Начни диалог —<br>он появится здесь</div>';
+    return;
+  }
+
+  const now = Date.now();
+  const groups = {'Сегодня': [], 'Вчера': [], '7 дней': [], 'Ранее': []};
+
+  for (const chat of chats) {
+    const ageDays = (now - (chat.updatedAt || now)) / 86400000;
+    if (ageDays < 1) groups['Сегодня'].push(chat);
+    else if (ageDays < 2) groups['Вчера'].push(chat);
+    else if (ageDays < 7) groups['7 дней'].push(chat);
+    else groups['Ранее'].push(chat);
+  }
+
+  for (const [label, group] of Object.entries(groups)) {
+    if (!group.length) continue;
+
+    const heading = document.createElement('div');
+    heading.className = 'history-group-label';
+    heading.textContent = label;
+    container.appendChild(heading);
+
+    for (const chat of group) {
+      const item = document.createElement('div');
+      item.className = 'history-item' + (chat.id === active ? ' active' : '');
+      item.title = chat.title || 'Новый диалог';
+
+      const updated = new Date(chat.updatedAt || chat.createdAt || Date.now());
+      const time = updated.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
+      const count = (chat.messages || []).length;
+
+      item.innerHTML = `
+        <div class="history-item-icon">💬</div>
+        <div class="history-item-body">
+          <div class="history-item-title">${escapeHtml(chat.title || 'Новый диалог')}</div>
+          <div class="history-item-meta">${time} · ${count} сообщ.</div>
+        </div>
+        <button class="hist-del-btn" type="button" title="Удалить чат">×</button>
+      `;
+
+      item.addEventListener('click', (e) => {
+        if (e.target.closest('.hist-del-btn')) return;
+        loadChat(chat.id);
+      });
+
+      item.querySelector('.hist-del-btn').addEventListener('click', (e) => {
+        e.stopPropagation();
+        deleteChat(chat.id);
+      });
+
+      container.appendChild(item);
+    }
+  }
+}
+
+function loadChat(chatId) {
+  const store = historyLoad();
+  const chat = store.chats.find(c => c.id === chatId);
+  if (!chat) return;
+
+  store.activeId = chatId;
+  historySave(store);
+
+  historyReplay = true;
+  try {
+    chatContainer.innerHTML = '';
+    for (const msg of (chat.messages || [])) {
+      appendMessage(msg.role === 'user' ? 'user' : 'ai', msg.content);
+    }
+    if (!chat.messages.length) {
+      chatContainer.appendChild(welcomeScreen);
+      welcomeScreen.style.display = 'flex';
+    }
+  } finally {
+    historyReplay = false;
+  }
+
+  msgCount = (chat.messages || []).length;
+  renderChatList();
+  closeSidebar();
+  scrollToBottom();
+}
+
+function deleteChat(chatId) {
+  const store = historyLoad();
+  store.chats = (store.chats || []).filter(c => c.id !== chatId);
+  if (store.activeId === chatId) store.activeId = null;
+  historySave(store);
+  renderChatList();
+}
+
+function startNewChat() {
+  newChat();
+  closeSidebar();
+  if (input) input.focus();
+}
+
+function loadChatList() {
+  renderChatList();
+  return Promise.resolve();
+}
+
+(function initChatHistory() {
+  const run = () => renderChatList();
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', run);
+  else setTimeout(run, 50);
 }
 
 // ========== УВЕДОМЛЕНИЯ ==========
