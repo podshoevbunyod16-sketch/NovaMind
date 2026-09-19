@@ -555,3 +555,22 @@ button, input, select, textarea {
     opacity: 1;
   }
 }
+
+.history-new-btn {
+  border: 1px solid var(--border);
+  background: var(--accent-dim);
+  color: var(--text-accent);
+  border-radius: 8px;
+  padding: 4px 9px;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.history-new-btn:hover {
+  background: rgba(124,58,237,.22);
+}
+@media (max-width: 768px) {
+  .app:not(.drawer-animate) .sidebar.open {
+    transform: translateX(calc(var(--drawer-x) - var(--drawer-width)));
+  }
+}
