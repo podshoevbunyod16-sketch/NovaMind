@@ -575,33 +575,38 @@ function setSidebarOffset(offset, animate = false) {
   if (!app || !sidebar) return;
 
   const width = Math.min(300, Math.max(240, window.innerWidth * 0.82));
-  const x = Math.max(0, Math.min(width, offset));
+  const x = Math.max(0, Math.min(width, Number(offset) || 0));
 
   app.style.setProperty('--drawer-x', x + 'px');
   app.style.setProperty('--drawer-width', width + 'px');
 
-  if (animate) app.classList.add('drawer-animate');
-  else app.classList.remove('drawer-animate');
-
-  if (x > width * 0.5) {
-    sidebar.classList.add('open');
-    overlay.classList.add('visible');
+  if (animate) {
+    app.classList.add('drawer-animate');
   } else {
-    sidebar.classList.remove('open');
-    overlay.classList.remove('visible');
+    app.classList.remove('drawer-animate');
   }
 
-  overlay.style.opacity = String(Math.min(0.75, (x / width) * 0.75));
+  const isOpen = x > width * 0.5;
+  sidebar.classList.toggle('open', isOpen);
+
+  if (overlay) {
+    overlay.classList.toggle('visible', isOpen);
+    overlay.style.opacity = String(Math.min(0.75, (x / width) * 0.75));
+    overlay.style.pointerEvents = isOpen ? 'auto' : 'none';
+  }
 }
 
 function getSidebarOffset() {
   const app = document.querySelector('.app');
-  return parseFloat(getComputedStyle(app).getPropertyValue('--drawer-x')) || 0;
+  if (!app) return 0;
+  const value = parseFloat(getComputedStyle(app).getPropertyValue('--drawer-x'));
+  return Number.isFinite(value) ? value : 0;
 }
 
 function toggleSidebar() {
   const width = Math.min(300, Math.max(240, window.innerWidth * 0.82));
-  setSidebarOffset(getSidebarOffset() > width * 0.5 ? 0 : width, true);
+  const current = getSidebarOffset();
+  setSidebarOffset(current > width * 0.5 ? 0 : width, true);
 }
 
 function closeSidebar() {
@@ -611,64 +616,123 @@ function closeSidebar() {
 function initSidebarSwipe() {
   const app = document.querySelector('.app');
   const sidebar = document.getElementById('sidebar');
-  if (!app || !sidebar || !window.matchMedia('(max-width: 768px)').matches) return;
+  const overlay = document.getElementById('overlay');
+  if (!app || !sidebar) return;
 
-  const edge = 28;
-  const minDrag = 6;
+  let swipeEnabled = false;
+
+  const enableForViewport = () => {
+    swipeEnabled = window.matchMedia('(max-width: 768px)').matches;
+    if (!swipeEnabled) {
+      app.classList.remove('drawer-animate');
+      sidebar.classList.remove('open');
+      if (overlay) {
+        overlay.classList.remove('visible');
+        overlay.style.pointerEvents = 'none';
+        overlay.style.opacity = '0';
+      }
+      app.style.removeProperty('--drawer-x');
+      app.style.removeProperty('--drawer-width');
+    } else {
+      const width = Math.min(300, Math.max(240, window.innerWidth * 0.82));
+      app.style.setProperty('--drawer-width', width + 'px');
+      if (!app.style.getPropertyValue('--drawer-x')) {
+        app.style.setProperty('--drawer-x', '0px');
+      }
+    }
+  };
+
+  enableForViewport();
+
+  let drag = null;
 
   const begin = (e) => {
+    if (!swipeEnabled) return;
     if (e.pointerType === 'mouse' && e.button !== 0) return;
 
     const open = getSidebarOffset() > 1;
     const x = e.clientX;
     const startedOnSidebar = sidebar.contains(e.target);
 
-    // Открытие начинается только от левого края, закрытие — из открытого drawer.
-    if (!open && x > edge) return;
-    if (open && !startedOnSidebar && x < 280) return;
+    // Closed: start only from the left screen edge.
+    // Open: allow closing from anywhere inside the sidebar.
+    if (!open && x > 32) return;
+    if (open && !startedOnSidebar) return;
 
-    sidebarDrag = {
+    drag = {
       id: e.pointerId,
       startX: x,
       startY: e.clientY,
       startOffset: getSidebarOffset(),
       lastX: x,
       lastTime: performance.now(),
-      moved: false
+      velocityX: 0,
+      horizontal: false
     };
 
     app.classList.remove('drawer-animate');
-    try { e.target.setPointerCapture(e.pointerId); } catch (_) {}
+
+    try {
+      app.setPointerCapture(e.pointerId);
+    } catch (_) {}
   };
 
   const move = (e) => {
-    if (!sidebarDrag || e.pointerId !== sidebarDrag.id) return;
+    if (!drag || e.pointerId !== drag.id) return;
 
-    const dx = e.clientX - sidebarDrag.startX;
-    if (Math.abs(dx) > minDrag) sidebarDrag.moved = true;
+    const dx = e.clientX - drag.startX;
+    const dy = e.clientY - drag.startY;
+    const now = performance.now();
+    const dt = Math.max(1, now - drag.lastTime);
 
-    const next = Math.max(0, sidebarDrag.startOffset + dx);
-    if (Math.abs(dx) > Math.abs(e.clientY - (sidebarDrag.startY || e.clientY))) {
-      e.preventDefault();
-      setSidebarOffset(next, false);
+    if (!drag.horizontal) {
+      if (Math.abs(dx) < 8) return;
+
+      // If the gesture is mainly vertical, leave it to the browser for scrolling.
+      if (Math.abs(dy) > Math.abs(dx) * 1.15) {
+        drag = null;
+        return;
+      }
+
+      drag.horizontal = true;
     }
-    sidebarDrag.lastX = e.clientX;
-    sidebarDrag.lastTime = performance.now();
+
+    e.preventDefault();
+
+    const next = Math.max(0, Math.min(
+      Math.min(300, Math.max(240, window.innerWidth * 0.82)),
+      drag.startOffset + dx
+    ));
+
+    drag.velocityX = (e.clientX - drag.lastX) / dt;
+    drag.lastX = e.clientX;
+    drag.lastTime = now;
+
+    setSidebarOffset(next, false);
   };
 
   const end = (e) => {
-    if (!sidebarDrag || e.pointerId !== sidebarDrag.id) return;
+    if (!drag || e.pointerId !== drag.id) return;
+
+    const currentDrag = drag;
+    drag = null;
+
+    try {
+      app.releasePointerCapture(e.pointerId);
+    } catch (_) {}
+
+    if (!currentDrag.horizontal) return;
 
     const width = Math.min(300, Math.max(240, window.innerWidth * 0.82));
-    const dx = e.clientX - sidebarDrag.startX;
-    const now = performance.now();
-    const velocity = (e.clientX - sidebarDrag.lastX) / Math.max(1, now - sidebarDrag.lastTime);
+    const dx = e.clientX - currentDrag.startX;
     const current = getSidebarOffset();
 
-    // При открытом drawer свайп влево закрывает его; вправо открывает.
-    const shouldOpen = current > width * 0.5 || dx > 80 || velocity > 0.45;
+    const shouldOpen =
+      current > width * 0.5 ||
+      dx > 70 ||
+      currentDrag.velocityX > 0.45;
+
     setSidebarOffset(shouldOpen ? width : 0, true);
-    sidebarDrag = null;
   };
 
   app.addEventListener('pointerdown', begin, {passive: false});
@@ -676,15 +740,7 @@ function initSidebarSwipe() {
   app.addEventListener('pointerup', end, {passive: false});
   app.addEventListener('pointercancel', end, {passive: false});
 
-  window.addEventListener('resize', () => {
-    if (!window.matchMedia('(max-width: 768px)').matches) {
-      app.style.removeProperty('--drawer-x');
-      app.style.removeProperty('--drawer-width');
-      app.classList.remove('drawer-animate');
-      sidebar.classList.remove('open');
-      document.getElementById('overlay')?.classList.remove('visible');
-    }
-  });
+  window.addEventListener('resize', enableForViewport);
 }
 
 if (document.readyState === 'loading') {
