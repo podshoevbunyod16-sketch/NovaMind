@@ -565,13 +565,21 @@ button, input, select, textarea {
     will-change: transform;
   }
 
+  /* На телефоне весь сайдбар прокручивается одним потоком вместе с историей. */
+  .sidebar-body {
+    overflow-y: auto;
+    overscroll-behavior-y: contain;
+  }
+
   .app.drawer-animate .sidebar,
   .app.drawer-animate .main {
     transition: transform var(--transition);
   }
 
   #historyContainer {
-    max-height: 38vh;
+    max-height: none;
+    overflow: visible;
+    touch-action: auto;
   }
 
   .hist-del-btn {
