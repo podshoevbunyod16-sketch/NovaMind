@@ -5,7 +5,7 @@ import requests
 import subprocess
 import time
 from datetime import datetime
-from flask import Flask, request, jsonify, render_template, send_file, session, send_from_directory, redirect
+from flask import Flask, request, jsonify, render_template, send_file, session, send_from_directory, redirect, Response, stream_with_context
 
 # ---------- Загрузка .env ----------
 env_path = os.path.join(os.path.dirname(__file__), ".env")
@@ -753,6 +753,86 @@ def send():
     if len(contents) > 20:
         contents = contents[-20:]
     return jsonify({'reply': reply})
+
+
+@app.route('/send_stream', methods=['POST'])
+def send_stream():
+    """Потоковая версия /send: отдаёт токены NDJSON по мере генерации ответа."""
+    global contents
+    data = request.get_json() or {}
+    message = data.get('message', '').strip()
+    reasoning = data.get('reasoning', False)
+
+    if not message:
+        return jsonify({'error': 'Пустое сообщение'}), 400
+
+    contents.append({"role": "user", "content": message})
+    if reasoning and os.getenv("CEREBRAS_API_KEY"):
+        provider = PROVIDERS["cerebras"]
+        model = "zai-glm-4.7"
+    else:
+        provider = PROVIDERS[current_provider]
+        model = current_model
+
+    payload = {
+        "model": model,
+        "messages": [{"role": "system", "content": system_prompt}] + contents,
+        "temperature": 0.7,
+        "max_tokens": 4000,
+        "stream": True,
+    }
+    headers = provider["headers"].copy()
+    if "api.groq.com" in provider["url"]:
+        key = get_groq_key()
+        if not key:
+            contents.pop()
+            return jsonify({'error': 'Нет доступных Groq API ключей'}), 503
+        headers["Authorization"] = f"Bearer {key}"
+
+    try:
+        upstream = requests.post(
+            provider["url"], json=payload, headers=headers, timeout=90, stream=True
+        )
+        upstream.raise_for_status()
+    except requests.exceptions.RequestException as exc:
+        if contents and contents[-1]["role"] == "user":
+            contents.pop()
+        return jsonify({'error': f'Ошибка подключения к AI: {exc}'}), 502
+
+    @stream_with_context
+    def generate():
+        full_reply = ""
+        try:
+            for raw_line in upstream.iter_lines(decode_unicode=True):
+                if not raw_line:
+                    continue
+                line = raw_line.strip()
+                if line.startswith("data:"):
+                    line = line[5:].strip()
+                if line == "[DONE]":
+                    break
+                try:
+                    chunk = json.loads(line)
+                except (TypeError, json.JSONDecodeError):
+                    continue
+                choice = (chunk.get("choices") or [{}])[0]
+                delta = choice.get("delta") or {}
+                token = delta.get("content") or choice.get("text") or ""
+                if token:
+                    full_reply += token
+                    yield json.dumps({"token": token}, ensure_ascii=False) + "\n"
+
+            if full_reply:
+                contents.append({"role": "assistant", "content": full_reply})
+                if len(contents) > 20:
+                    del contents[:-20]
+            yield json.dumps({"done": True}, ensure_ascii=False) + "\n"
+        except Exception as exc:
+            yield json.dumps({"error": f"Ошибка потокового ответа: {exc}"}, ensure_ascii=False) + "\n"
+        finally:
+            upstream.close()
+
+    return Response(generate(), mimetype="application/x-ndjson")
 
 
 # ========== КОМАНДЫ ==========

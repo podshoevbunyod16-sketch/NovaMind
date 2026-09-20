@@ -266,6 +266,67 @@ function activateMode(mode) {
 }
 
 // ========== ОТПРАВКА СООБЩЕНИЙ ==========
+async function streamMessage(message) {
+  const response = await fetch('/send_stream', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ message, reasoning: reasoningOn })
+  });
+
+  if (!response.ok) {
+    let details = `HTTP ${response.status}`;
+    try { details = (await response.json()).error || details; } catch (_) {}
+    throw new Error(details);
+  }
+  if (!response.body) throw new Error('Браузер не поддерживает потоковый ответ');
+
+  removeTyping();
+  isTyping = true;
+  const wrap = document.createElement('div');
+  wrap.className = 'message ai';
+  wrap.innerHTML = '<div class="msg-avatar">✦</div><div class="msg-body"><div class="msg-name">NovaMind</div><div class="msg-bubble"></div></div>';
+  chatContainer.appendChild(wrap);
+  const bubble = wrap.querySelector('.msg-bubble');
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let fullReply = '';
+  let streamDone = false;
+
+  const consumeLine = (line) => {
+    if (!line.trim()) return false;
+    const data = JSON.parse(line);
+    if (data.error) throw new Error(data.error);
+    if (data.token) {
+      fullReply += data.token;
+      bubble.innerHTML = formatContent(fullReply);
+      scrollToBottom();
+    }
+    if (data.done) streamDone = true;
+    return streamDone;
+  };
+
+  try {
+    while (true) {
+      const {value, done} = await reader.read();
+      buffer += decoder.decode(value || new Uint8Array(), {stream: !done});
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+      for (const line of lines) {
+        consumeLine(line);
+      }
+      if (done || streamDone) break;
+    }
+    if (buffer.trim()) consumeLine(buffer);
+    if (!fullReply) throw new Error('AI не вернул текст ответа');
+    historyAddMessage('ai', fullReply);
+    return fullReply;
+  } finally {
+    isTyping = false;
+    sendBtn.disabled = !input.value.trim();
+  }
+}
+
 async function sendMessage(text) {
   const msg = (text || input.value).trim();
   if (!msg || isTyping) return;
@@ -374,26 +435,12 @@ async function sendMessage(text) {
     return;
   }
 
-  // Обычный запрос к ИИ
+  // Обычный запрос к ИИ с потоковым выводом
   try {
-    const resp = await fetch('/send', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ 
-        message: finalMsg, 
-        reasoning: reasoningOn
-      })
-    });
-    const data = await resp.json();
-    removeTyping();
-    if (data.error) {
-      appendMessage('ai', 'Ошибка: ' + data.error);
-    } else {
-      appendMessage('ai', data.reply);
-    }
+    await streamMessage(finalMsg);
   } catch (e) {
     removeTyping();
-    appendMessage('ai', 'Ошибка соединения');
+    appendMessage('ai', 'Ошибка соединения: ' + (e.message || 'неизвестная ошибка'));
   }
 }
 
@@ -543,27 +590,57 @@ function startRecording() {
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
   recognition = new SR();
   recognition.lang = 'ru-RU';
-  recognition.continuous = false;
+  recognition.continuous = true;
   recognition.interimResults = true;
+  let finalTranscript = '';
   recognition.onstart = () => {
     isRecording = true;
     voiceBtn.classList.add('recording');
-    voiceTooltip.textContent = '● Запись...';
+    voiceTooltip.textContent = '● Слушаю... Нажмите для остановки';
   };
   recognition.onresult = (e) => {
-    input.value = Array.from(e.results).map(r => r[0].transcript).join('');
+    let interimTranscript = '';
+    for (let i = e.resultIndex; i < e.results.length; i++) {
+      const transcript = e.results[i][0].transcript;
+      if (e.results[i].isFinal) finalTranscript += transcript + ' ';
+      else interimTranscript += transcript;
+    }
+    input.value = (finalTranscript + interimTranscript).trim();
+    autoResize(input);
     sendBtn.disabled = !input.value.trim();
   };
-  recognition.onend = () => stopRecording();
-  recognition.onerror = () => stopRecording();
-  recognition.start();
+  recognition.onend = () => {
+    // Браузер может завершить сессию сам после паузы — сохраняем уже распознанный текст.
+    if (isRecording) {
+      isRecording = false;
+      voiceBtn.classList.remove('recording');
+      voiceTooltip.textContent = 'Готово — проверьте текст';
+      recognition = null;
+    }
+  };
+  recognition.onerror = (event) => {
+    if (event.error !== 'no-speech' && event.error !== 'aborted') {
+      showNotification('Ошибка голосового ввода: ' + event.error, 'warn');
+    }
+    stopRecording();
+  };
+  try {
+    recognition.start();
+  } catch (error) {
+    stopRecording();
+    showNotification('Не удалось запустить голосовой ввод', 'warn');
+  }
 }
 
 function stopRecording() {
+  const activeRecognition = recognition;
   isRecording = false;
   voiceBtn.classList.remove('recording');
-  voiceTooltip.textContent = 'Нажмите для записи';
-  if (recognition) { recognition.stop(); recognition = null; }
+  voiceTooltip.textContent = input.value.trim() ? 'Готово — проверьте текст' : 'Нажмите для записи';
+  recognition = null;
+  if (activeRecognition) {
+    try { activeRecognition.stop(); } catch (_) {}
+  }
 }
 
 // ========== САЙДБАР ==========
