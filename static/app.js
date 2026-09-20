@@ -604,6 +604,12 @@ function getSidebarOffset() {
 }
 
 function toggleSidebar() {
+  const sidebar = document.getElementById('sidebar');
+  if (!sidebar) return;
+
+  // На ПК sidebar постоянно виден.
+  if (!window.matchMedia('(max-width: 768px)').matches) return;
+
   const width = Math.min(300, Math.max(240, window.innerWidth * 0.82));
   const current = getSidebarOffset();
   setSidebarOffset(current > width * 0.5 ? 0 : width, true);
