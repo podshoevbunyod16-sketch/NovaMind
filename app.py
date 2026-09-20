@@ -757,7 +757,7 @@ def send():
 
 @app.route('/send_stream', methods=['POST'])
 def send_stream():
-    """Потоковая версия /send: отдаёт токены NDJSON по мере генерации ответа."""
+    """Потоковый чат с надёжной обработкой Groq rate-limit/auth ошибок."""
     global contents
     data = request.get_json() or {}
     message = data.get('message', '').strip()
@@ -767,6 +767,7 @@ def send_stream():
         return jsonify({'error': 'Пустое сообщение'}), 400
 
     contents.append({"role": "user", "content": message})
+
     if reasoning and os.getenv("CEREBRAS_API_KEY"):
         provider = PROVIDERS["cerebras"]
         model = "zai-glm-4.7"
@@ -781,26 +782,45 @@ def send_stream():
         "max_tokens": 4000,
         "stream": True,
     }
-    headers = provider["headers"].copy()
-    if "api.groq.com" in provider["url"]:
-        key = get_groq_key()
-        if not key:
-            contents.pop()
-            return jsonify({'error': 'Нет доступных Groq API ключей'}), 503
-        headers["Authorization"] = f"Bearer {key}"
 
-    try:
-        upstream = requests.post(
-            provider["url"], json=payload, headers=headers, timeout=90, stream=True
-        )
-        upstream.raise_for_status()
-        # Некоторые локальные OpenAI-compatible серверы не указывают charset.
-        # Без этого requests может декодировать UTF-8 поток как ISO-8859-1.
-        upstream.encoding = "utf-8"
-    except requests.exceptions.RequestException as exc:
+    # Для Groq делаем несколько попыток с ротацией ключей.
+    upstream = None
+    last_error = None
+    max_attempts = max(1, min(len(GROQ_KEYS), 9)) if "api.groq.com" in provider["url"] else 1
+
+    for _ in range(max_attempts):
+        headers = provider["headers"].copy()
+        if "api.groq.com" in provider["url"]:
+            key = get_groq_key()
+            if not key:
+                last_error = "Нет доступных Groq API ключей"
+                break
+            headers["Authorization"] = f"Bearer {key}"
+
+        try:
+            candidate = requests.post(
+                provider["url"], json=payload, headers=headers, timeout=90, stream=True
+            )
+            if candidate.status_code in (401, 429) and "api.groq.com" in provider["url"]:
+                last_error = f"Groq HTTP {candidate.status_code}"
+                mark_groq_key_exhausted()
+                candidate.close()
+                continue
+            candidate.raise_for_status()
+            candidate.encoding = "utf-8"
+            upstream = candidate
+            break
+        except requests.exceptions.RequestException as exc:
+            last_error = str(exc)
+            if "api.groq.com" in provider["url"]:
+                mark_groq_key_exhausted()
+                continue
+            break
+
+    if upstream is None:
         if contents and contents[-1]["role"] == "user":
             contents.pop()
-        return jsonify({'error': f'Ошибка подключения к AI: {exc}'}), 502
+        return jsonify({'error': f'Ошибка подключения к AI: {last_error or "неизвестная ошибка"}'}), 502
 
     @stream_with_context
     def generate():
@@ -818,9 +838,12 @@ def send_stream():
                     chunk = json.loads(line)
                 except (TypeError, json.JSONDecodeError):
                     continue
+
                 choice = (chunk.get("choices") or [{}])[0]
                 delta = choice.get("delta") or {}
                 token = delta.get("content") or choice.get("text") or ""
+
+                # GPT-OSS может отдавать reasoning отдельно; пользователю нужен content.
                 if token:
                     full_reply += token
                     yield json.dumps({"token": token}, ensure_ascii=False) + "\n"
@@ -829,14 +852,22 @@ def send_stream():
                 contents.append({"role": "assistant", "content": full_reply})
                 if len(contents) > 20:
                     del contents[:-20]
+
             yield json.dumps({"done": True}, ensure_ascii=False) + "\n"
         except Exception as exc:
             yield json.dumps({"error": f"Ошибка потокового ответа: {exc}"}, ensure_ascii=False) + "\n"
         finally:
             upstream.close()
 
-    return Response(generate(), mimetype="application/x-ndjson")
-
+    return Response(
+        generate(),
+        mimetype="application/x-ndjson",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
 
 # ========== КОМАНДЫ ==========
 
