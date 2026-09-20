@@ -169,15 +169,6 @@ html, body {
 .menu-btn svg { width:17px; height:17px; }
 .topbar-title { font-size: 10px; font-weight: 700; white-space: nowrap; }
 
-.model-selector {
-  display: flex; align-items: center; gap: 6px; padding: 5px 10px; background: var(--bg-card);
-  border: 1px solid var(--border); border-radius: 99px; cursor: pointer;
-  font-size: 12px; color: var(--text-accent); font-weight: 600; white-space: nowrap;
-  transition: background var(--transition), box-shadow var(--transition);
-}
-.model-selector:hover { background: var(--bg-hover); box-shadow: 0 0 10px var(--accent-glow); }
-.model-dot { width:6px; height:6px; border-radius:50%; background:var(--accent-light); box-shadow: 0 0 6px var(--accent-light); }
-
 .topbar-actions { margin-left: auto; display: flex; gap: 6px; }
 .icon-btn {
   width: 34px; height: 34px; background: var(--bg-card); border: 1px solid var(--border-soft);
@@ -331,25 +322,6 @@ html, body {
 
 .input-footer { text-align: center; font-size: 10.5px; color: var(--text-muted); margin-top: 6px; }
 
-/* ── Model dropdown ── */
-.model-dropdown {
-  position: absolute; top: 52px; left: 14px; background: var(--bg-panel); border: 1px solid var(--border);
-  border-radius: var(--radius); padding: 4px; z-index: 200; min-width: 180px;
-  box-shadow: 0 12px 32px rgba(0,0,0,.5); display: none;
-}
-.model-dropdown.open { display: block; animation: drop-in .15s ease; }
-@keyframes drop-in { from { opacity:0; transform:translateY(-4px); } to { opacity:1; transform:translateY(0); } }
-
-.model-option {
-  display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-radius: var(--radius-sm);
-  cursor: pointer; transition: background var(--transition);
-}
-.model-option:hover { background: var(--bg-hover); }
-.model-option.selected { background: var(--accent-dim); }
-.model-option-dot { width:7px; height:7px; border-radius:50%; flex-shrink:0; }
-.model-option-name { font-size: 12.5px; font-weight: 600; }
-.model-option-desc { font-size: 10.5px; color: var(--text-muted); }
-
 .status-badge {
   display: flex; align-items: center; gap: 5px; padding: 3px 8px;
   background: rgba(34,197,94,.1); border: 1px solid rgba(34,197,94,.25);
@@ -382,7 +354,7 @@ html, body {
 
 /* Запрещаем выделение ВСЕГО */
 body, header, nav, aside, .sidebar, .toolbar, 
-.input-area, .model-selector, .chat-header,
+.input-area, .chat-header,
 .welcome-screen, .suggestions, .typing-indicator,
 .msg-avatar, .msg-name, .nav-item, .logo,
 button, input, select, textarea {

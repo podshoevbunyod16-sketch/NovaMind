@@ -168,14 +168,30 @@ FLASK_ENV=development
 FLASK_DEBUG=True
 SECRET_KEY=your_secret_key_here
 
-# API ключи (если используются)
-OPENAI_API_KEY=your_key_here
-ANTHROPIC_API_KEY=your_key_here
+# Cloud API ключи (необязательно)
+# GROQ_API_KEY=your_key_here
+# CEREBRAS_API_KEY=your_key_here
+# OPENROUTER_API_KEY=your_key_here
+
+# OpenAI-compatible сервер (Ollama, LM Studio, vLLM, LocalAI или удалённый URL)
+# Если cloud-ключей нет, приложение использует этот endpoint.
+OPENAI_BASE_URL=http://127.0.0.1:11434/v1
+OPENAI_API_KEY=
+OPENAI_MODEL=llama3.2
+
+# Можно использовать альтернативные имена:
+# AI_BASE_URL=https://your-host.example.com/v1
+# AI_API_KEY=your_key
+# AI_MODEL=your_model
+# LOCAL_LLM_URL=http://127.0.0.1:1234/v1
+# LOCAL_LLM_MODEL=local-model
 
 # Параметры сервера
 HOST=0.0.0.0
 PORT=5000
 ```
+
+Если `GROQ_API_KEY`, `CEREBRAS_API_KEY` и `OPENROUTER_API_KEY` не заданы, чат автоматически работает через `OPENAI_BASE_URL`. Для Ollama достаточно запустить модель локально и оставить URL по умолчанию. Для удалённого OpenAI-compatible сервера укажи его базовый URL, например `https://your-host.example.com/v1`, и при необходимости API-ключ. Модель выбирается только через `OPENAI_MODEL`/`AI_MODEL` и больше не выбирается в главном экране чата.
 
 ### Максимальный размер файла
 

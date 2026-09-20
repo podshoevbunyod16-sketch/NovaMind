@@ -119,11 +119,41 @@ def get_groq_key_status():
     return status
 
 
+def openai_compatible_request(url, payload, headers, timeout=90, max_retries=2):
+    """Запрос к любому OpenAI-compatible серверу: Ollama, LM Studio, vLLM или облачному endpoint."""
+    for attempt in range(max_retries):
+        try:
+            resp = requests.post(url, json=payload, headers=headers, timeout=timeout)
+            if resp.status_code == 429 and attempt < max_retries - 1:
+                time.sleep(2 ** attempt)
+                continue
+            if resp.status_code == 401:
+                return None, "OpenAI-compatible сервер отклонил API ключ (401)"
+            resp.raise_for_status()
+            return resp.json(), None
+        except requests.exceptions.Timeout:
+            if attempt < max_retries - 1:
+                continue
+            return None, "Таймаут OpenAI-compatible сервера"
+        except requests.exceptions.RequestException as e:
+            if attempt < max_retries - 1 and "429" in str(e):
+                time.sleep(2 ** attempt)
+                continue
+            return None, f"OpenAI-compatible сервер недоступен: {e}"
+        except ValueError:
+            return None, "OpenAI-compatible сервер вернул некорректный JSON"
+    return None, "OpenAI-compatible сервер недоступен"
+
+
 def groq_request_with_rotation(url, payload, headers, timeout=90, max_retries=3):
     """
     Выполняет запрос к Groq с автоматической ротацией ключей при rate limit.
     Возвращает (response_data, None) или (None, error_message).
     """
+    # Cerebras, OpenRouter и локальные серверы используют обычный OpenAI-compatible протокол.
+    if "api.groq.com" not in url:
+        return openai_compatible_request(url, payload, headers, timeout=timeout, max_retries=max_retries)
+
     for attempt in range(max_retries):
         current_key = get_groq_key()
         if not current_key:
@@ -215,8 +245,53 @@ PROVIDERS = {
     }
 }
 
-current_provider = "groq"
-current_model = "openai/gpt-oss-120b"
+COMPATIBLE_BASE_URL = (
+    os.getenv("OPENAI_BASE_URL")
+    or os.getenv("OPENAI_API_BASE")
+    or os.getenv("AI_BASE_URL")
+    or os.getenv("LOCAL_LLM_URL")
+    or ("https://api.openai.com/v1" if os.getenv("OPENAI_API_KEY") else "http://127.0.0.1:11434/v1")
+).rstrip("/")
+COMPATIBLE_API_KEY = (
+    os.getenv("OPENAI_API_KEY")
+    or os.getenv("AI_API_KEY")
+    or os.getenv("LOCAL_LLM_API_KEY")
+    or ""
+)
+COMPATIBLE_MODEL = (
+    os.getenv("OPENAI_MODEL")
+    or os.getenv("AI_MODEL")
+    or os.getenv("LOCAL_LLM_MODEL")
+    or ("gpt-4o-mini" if os.getenv("OPENAI_API_KEY") else "llama3.2")
+)
+COMPATIBLE_CHAT_URL = (
+    COMPATIBLE_BASE_URL
+    if COMPATIBLE_BASE_URL.endswith("/chat/completions")
+    else f"{COMPATIBLE_BASE_URL}/chat/completions"
+)
+
+compatible_headers = {"Content-Type": "application/json"}
+if COMPATIBLE_API_KEY:
+    compatible_headers["Authorization"] = f"Bearer {COMPATIBLE_API_KEY}"
+PROVIDERS["openai_compatible"] = {
+    "url": COMPATIBLE_CHAT_URL,
+    "headers": compatible_headers,
+    "models": [{"id": COMPATIBLE_MODEL, "name": f"Configured: {COMPATIBLE_MODEL}"}],
+    "configured_url": COMPATIBLE_BASE_URL,
+}
+
+if GROQ_KEYS:
+    current_provider = "groq"
+    current_model = os.getenv("AI_MODEL") or "openai/gpt-oss-120b"
+elif os.getenv("CEREBRAS_API_KEY"):
+    current_provider = "cerebras"
+    current_model = os.getenv("AI_MODEL") or "qwen-3-235b-a22b-instruct-2507"
+elif os.getenv("OPENROUTER_API_KEY"):
+    current_provider = "openrouter"
+    current_model = os.getenv("AI_MODEL") or "google/gemini-2.0-flash-001"
+else:
+    current_provider = "openai_compatible"
+    current_model = COMPATIBLE_MODEL
 
 system_prompt = """ Ты — продвинутый AI ассистент NovaMind, ориентированный на практическую пользу.
 
@@ -373,9 +448,9 @@ def auto_search():
     if not user_message:
         return jsonify({'error': 'Пустое сообщение'})
 
-    provider = PROVIDERS["groq"]
+    provider = PROVIDERS[current_provider]
 
-    # Шаг 1: Groq решает, нужен ли поиск
+    # Шаг 1: активная модель решает, нужен ли поиск
     decision_prompt = f"""Ты — интеллектуальный фильтр для AI-ассистента.
 
 Пользователь написал: "{user_message}"
@@ -400,7 +475,7 @@ def auto_search():
 Ответь ТОЛЬКО одним словом: SEARCH или DIRECT."""
 
     decision_payload = {
-        "model": "llama-3.1-8b-instant",
+        "model": current_model,
         "messages": [{"role": "user", "content": decision_prompt}],
         "temperature": 0.1,
         "max_tokens": 10,
@@ -425,7 +500,7 @@ def auto_search():
 Ответь ТОЛЬКО поисковым запросом, без кавычек и пояснений."""
 
     query_payload = {
-        "model": "llama-3.1-8b-instant",
+        "model": current_model,
         "messages": [{"role": "user", "content": search_query_prompt}],
         "temperature": 0.1,
         "max_tokens": 50,
@@ -507,7 +582,7 @@ def web_search_groq():
     if not search_result:
         search_result = "Поиск не дал результатов. Отвечай на основе своих знаний."
 
-    provider = PROVIDERS["groq"]
+    provider = PROVIDERS[current_provider]
     groq_prompt = f"""Пользователь спросил: "{query}"
 
 Вот результаты из Google:
@@ -522,7 +597,7 @@ def web_search_groq():
 - В конце напиши: "🔍 *Ответ на основе поиска Google*" """
 
     payload = {
-        "model": "openai/gpt-oss-120b",
+        "model": current_model,
         "messages": [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": groq_prompt}
@@ -651,8 +726,8 @@ def send():
 
     contents.append({"role": "user", "content": message})
 
-    if reasoning:
-        provider = PROVIDERS.get("cerebras", PROVIDERS[current_provider])
+    if reasoning and os.getenv("CEREBRAS_API_KEY"):
+        provider = PROVIDERS["cerebras"]
         model = "zai-glm-4.7"
     else:
         provider = PROVIDERS[current_provider]
@@ -857,7 +932,7 @@ def handle_command():
         if not search_result:
             search_result = "Информация не найдена в интернете."
 
-        provider = PROVIDERS["groq"]
+        provider = PROVIDERS[current_provider]
         analysis_prompt = f"""Проанализируй следующую информацию и выдели 3-5 ключевых фактов по вопросу: "{query}"
 
 Информация из интернета:
@@ -866,7 +941,7 @@ def handle_command():
 Выдели только ключевые факты, коротко."""
 
         analysis_payload = {
-            "model": "openai/gpt-oss-120b",
+            "model": current_model,
             "messages": [{"role": "user", "content": analysis_prompt}],
             "temperature": 0.3,
             "max_tokens": 1000,
@@ -898,7 +973,7 @@ def handle_command():
 | Вес | 10 кг |"""
 
         final_payload = {
-            "model": "openai/gpt-oss-120b",
+            "model": current_model,
             "messages": [{"role": "user", "content": final_prompt}],
             "temperature": 0.5,
             "max_tokens": 4000,
@@ -1086,9 +1161,9 @@ def upload_file():
 
     groq_error = None
     try:
-        provider = PROVIDERS["groq"]
+        provider = PROVIDERS[current_provider]
         payload = {
-            "model": "llama-3.3-70b-versatile",
+            "model": current_model,
             "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": analysis_prompt}
@@ -1111,7 +1186,7 @@ def upload_file():
             contents = contents[-20:]
 
         return jsonify({
-            'result': f'''📁 **Анализ файла {filename} (Groq):**
+            'result': f'''📁 **Анализ файла {filename}:**
 
 {reply}'''
         })

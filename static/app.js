@@ -68,7 +68,6 @@ const voiceBtn      = document.getElementById('voiceBtn');
 const voiceTooltip  = document.getElementById('voiceTooltip');
 const chatContainer = document.getElementById('chatContainer');
 const welcomeScreen = document.getElementById('welcomeScreen');
-const modelDropdown = document.getElementById('modelDropdown');
 
 // ========== ПРОВЕРКА АВТОРИЗАЦИИ ==========
 if (!localStorage.getItem('nova_user_nick')) {
@@ -758,18 +757,6 @@ function setActive(el) {
   document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
   el.classList.add('active');
 }
-
-// ========== МОДЕЛИ ==========
-function toggleModelDropdown() { modelDropdown.classList.toggle('open'); }
-function selectModel(name, el) {
-  document.querySelectorAll('.model-option').forEach(o => o.classList.remove('selected'));
-  el.classList.add('selected');
-  document.getElementById('currentModel').textContent = name;
-  modelDropdown.classList.remove('open');
-}
-document.addEventListener('click', (e) => {
-  if (!e.target.closest('#modelDropdown') && !e.target.closest('#modelSelectorBtn')) modelDropdown.classList.remove('open');
-});
 
 // ========== ЧАТ ==========
 function newChat() {
