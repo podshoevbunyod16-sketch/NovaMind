@@ -974,7 +974,7 @@ function loadChatList() {
   const run = () => renderChatList();
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', run);
   else setTimeout(run, 50);
-}
+})();
 
 // ========== УВЕДОМЛЕНИЯ ==========
 function showNotification(msg, type = 'info') {
