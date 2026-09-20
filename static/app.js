@@ -806,7 +806,18 @@ const MAX_MSGS = 60;
 
 function historyLoad() {
   try {
-    return JSON.parse(localStorage.getItem(HISTORY_KEY) || '{"chats":[],"activeId":null}');
+    const parsed = JSON.parse(localStorage.getItem(HISTORY_KEY) || '{"chats":[],"activeId":null}');
+    const chats = Array.isArray(parsed.chats) ? parsed.chats
+      .filter(chat => chat && chat.id)
+      .map(chat => ({
+        ...chat,
+        title: String(chat.title || 'Новый диалог'),
+        messages: Array.isArray(chat.messages) ? chat.messages : [],
+        createdAt: Number(chat.createdAt) || Number(chat.updatedAt) || Date.now(),
+        updatedAt: Number(chat.updatedAt) || Number(chat.createdAt) || Date.now()
+      })) : [];
+    const activeId = chats.some(chat => chat.id === parsed.activeId) ? parsed.activeId : null;
+    return {chats, activeId};
   } catch (e) {
     return {chats: [], activeId: null};
   }
@@ -862,7 +873,10 @@ function renderChatList() {
   if (!container) return;
 
   const store = historyLoad();
-  const chats = store.chats || [];
+  const chats = [...(store.chats || [])].sort((a, b) => {
+    const updatedDiff = (Number(b.updatedAt) || 0) - (Number(a.updatedAt) || 0);
+    return updatedDiff || String(b.id).localeCompare(String(a.id));
+  });
   const active = store.activeId;
   container.innerHTML = '';
 
@@ -871,14 +885,17 @@ function renderChatList() {
     return;
   }
 
-  const now = Date.now();
-  const groups = {'Сегодня': [], 'Вчера': [], '7 дней': [], 'Ранее': []};
+  const now = new Date();
+  const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  const yesterdayStart = todayStart - 86400000;
+  const weekStart = todayStart - 6 * 86400000;
+  const groups = {'Сегодня': [], 'Вчера': [], 'Последние 7 дней': [], 'Ранее': []};
 
   for (const chat of chats) {
-    const ageDays = (now - (chat.updatedAt || now)) / 86400000;
-    if (ageDays < 1) groups['Сегодня'].push(chat);
-    else if (ageDays < 2) groups['Вчера'].push(chat);
-    else if (ageDays < 7) groups['7 дней'].push(chat);
+    const updatedAt = Number(chat.updatedAt) || Date.now();
+    if (updatedAt >= todayStart) groups['Сегодня'].push(chat);
+    else if (updatedAt >= yesterdayStart) groups['Вчера'].push(chat);
+    else if (updatedAt >= weekStart) groups['Последние 7 дней'].push(chat);
     else groups['Ранее'].push(chat);
   }
 
@@ -895,15 +912,19 @@ function renderChatList() {
       item.className = 'history-item' + (chat.id === active ? ' active' : '');
       item.title = chat.title || 'Новый диалог';
 
-      const updated = new Date(chat.updatedAt || chat.createdAt || Date.now());
-      const time = updated.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
+      const updated = new Date(Number(chat.updatedAt) || Number(chat.createdAt) || Date.now());
+      const date = updated.toLocaleDateString('ru-RU', {day: '2-digit', month: '2-digit', year: 'numeric'});
+      const time = updated.toLocaleTimeString('ru-RU', {hour:'2-digit', minute:'2-digit'});
       const count = (chat.messages || []).length;
 
       item.innerHTML = `
         <div class="history-item-icon">💬</div>
         <div class="history-item-body">
           <div class="history-item-title">${escapeHtml(chat.title || 'Новый диалог')}</div>
-          <div class="history-item-meta">${time} · ${count} сообщ.</div>
+          <div class="history-item-meta">
+            <span class="history-item-datetime">${date} · ${time}</span>
+            <span class="history-item-count">${count} сообщ.</span>
+          </div>
         </div>
         <button class="hist-del-btn" type="button" title="Удалить чат">×</button>
       `;
