@@ -507,12 +507,8 @@ button, input, select, textarea {
 }
 
 /* ══════════════════════════════════════════
-   Mobile sidebar follows the finger together with chat
+   Mobile sidebar + synchronized chat movement
 ══════════════════════════════════════════ */
-.drawer-animate .main,
-.drawer-animate .sidebar {
-  transition: transform var(--transition);
-}
 @media (max-width: 768px) {
   .app {
     --drawer-x: 0px;
@@ -521,30 +517,32 @@ button, input, select, textarea {
   }
 
   .sidebar {
+    position: fixed;
+    top: 0;
+    left: 0;
+    bottom: 0;
     width: var(--drawer-width);
-    transform: translateX(calc(var(--drawer-x) - var(--drawer-width)));
+    transform: translate3d(calc(var(--drawer-x) - var(--drawer-width)), 0, 0);
     transition: none;
     touch-action: pan-y;
+    will-change: transform;
   }
 
   .sidebar.open {
-    transform: translateX(0);
+    transform: translate3d(calc(var(--drawer-x) - var(--drawer-width)), 0, 0);
     box-shadow: 8px 0 40px rgba(0,0,0,.5);
   }
 
   .app .main {
-    transform: translateX(var(--drawer-x));
-    min-width: 100%;
     width: 100%;
+    min-width: 100%;
+    transform: translate3d(var(--drawer-x), 0, 0);
     will-change: transform;
   }
 
-  .app.drawer-animate .sidebar {
-    transform: translateX(calc(var(--drawer-x) - var(--drawer-width)));
-  }
-
+  .app.drawer-animate .sidebar,
   .app.drawer-animate .main {
-    transform: translateX(var(--drawer-x));
+    transition: transform var(--transition);
   }
 
   #historyContainer {
@@ -555,6 +553,7 @@ button, input, select, textarea {
     opacity: 1;
   }
 }
+
 
 .history-new-btn {
   border: 1px solid var(--border);
