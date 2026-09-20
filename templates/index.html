@@ -224,7 +224,7 @@
   </svg>
 </button>
       <div class="input-wrapper">
-        <textarea id="chat-input" placeholder="Напишите сообщение..." rows="1" onkeydown="handleKey(event)" oninput="autoResize(this)"></textarea>
+        <textarea id="chat-input" placeholder="Напишите сообщение..." rows="1" onkeydown="handleKey(event)" oninput="autoResize(this); document.getElementById('sendBtn').disabled = !this.value.trim()"></textarea>
 
         <div class="input-actions">
           <button class="voice-btn" id="voiceBtn" onclick="toggleVoice()" title="Голосовой ввод">
@@ -237,7 +237,7 @@
             <div class="voice-tooltip" id="voiceTooltip">Нажмите для записи</div>
           </button>
 
-          <button class="send-btn" id="sendBtn" onclick="sendMessage()" disabled>
+          <button class="send-btn" id="sendBtn" onclick="sendMessage()">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
               <line x1="22" y1="2" x2="11" y2="13"/>
               <polygon points="22 2 15 22 11 13 2 9 22 2"/>
