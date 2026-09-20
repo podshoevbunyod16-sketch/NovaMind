@@ -794,6 +794,9 @@ def send_stream():
             provider["url"], json=payload, headers=headers, timeout=90, stream=True
         )
         upstream.raise_for_status()
+        # Некоторые локальные OpenAI-compatible серверы не указывают charset.
+        # Без этого requests может декодировать UTF-8 поток как ISO-8859-1.
+        upstream.encoding = "utf-8"
     except requests.exceptions.RequestException as exc:
         if contents and contents[-1]["role"] == "user":
             contents.pop()
