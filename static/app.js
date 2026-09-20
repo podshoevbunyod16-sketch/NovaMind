@@ -439,8 +439,26 @@ async function sendMessage(text) {
   try {
     await streamMessage(finalMsg);
   } catch (e) {
-    removeTyping();
-    appendMessage('ai', 'Ошибка соединения: ' + (e.message || 'неизвестная ошибка'));
+    // Надёжный fallback: если потоковый endpoint временно недоступен,
+    // используем обычный /send и не теряем сообщение пользователя.
+    console.warn('Streaming chat failed, using /send fallback:', e);
+    try {
+      const resp = await fetch('/send', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message: finalMsg, reasoning: reasoningOn })
+      });
+      const data = await resp.json();
+      removeTyping();
+      if (!resp.ok || data.error) {
+        appendMessage('ai', '❌ Ошибка AI: ' + (data.error || ('HTTP ' + resp.status)));
+      } else {
+        appendMessage('ai', data.reply || 'AI не вернул ответ');
+      }
+    } catch (fallbackError) {
+      removeTyping();
+      appendMessage('ai', '❌ Не удалось подключиться к AI: ' + (fallbackError.message || 'неизвестная ошибка'));
+    }
   }
 }
 
