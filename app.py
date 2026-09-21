@@ -592,7 +592,7 @@ def auto_search():
         "model": current_model,
         "messages": [{"role": "user", "content": decision_prompt}],
         "temperature": 0.1,
-        "max_tokens": 10,
+        "max_tokens": 300,
     }
     data_decision, error = groq_request_with_rotation(
         provider["url"], decision_payload, provider["headers"].copy(), timeout=15
@@ -617,7 +617,7 @@ def auto_search():
         "model": current_model,
         "messages": [{"role": "user", "content": search_query_prompt}],
         "temperature": 0.1,
-        "max_tokens": 50,
+        "max_tokens": 128000,
     }
     data_query, error = groq_request_with_rotation(
         provider["url"], query_payload, provider["headers"].copy(), timeout=15
@@ -655,7 +655,7 @@ def auto_search():
             {"role": "user", "content": final_prompt}
         ],
         "temperature": 0.5,
-        "max_tokens": 3000,
+        "max_tokens": 128000,
     }
     data_final, error = groq_request_with_rotation(
         provider["url"], final_payload, provider["headers"].copy(), timeout=90
@@ -717,7 +717,7 @@ def web_search_groq():
             {"role": "user", "content": groq_prompt}
         ],
         "temperature": 0.5,
-        "max_tokens": 3000,
+        "max_tokens": 12000,
     }
     data_resp, error = groq_request_with_rotation(
         provider["url"], payload, provider["headers"].copy(), timeout=90
@@ -900,7 +900,7 @@ def send():
         "model": model,
         "messages": [{"role": "system", "content": system_prompt}] + contents,
         "temperature": 0.7,
-        "max_tokens": 4000,
+        "max_tokens": 1000000,
     }
 
     data_resp, error = groq_request_with_rotation(
@@ -942,7 +942,7 @@ def send_stream():
         "model": model,
         "messages": [{"role": "system", "content": system_prompt}] + contents,
         "temperature": 0.7,
-        "max_tokens": 4000,
+        "max_tokens": 1000000,
         "stream": True,
     }
 
@@ -1221,7 +1221,7 @@ def handle_command():
             "model": current_model,
             "messages": [{"role": "user", "content": analysis_prompt}],
             "temperature": 0.3,
-            "max_tokens": 1000,
+            "max_tokens": 1000000,
         }
         data_analysis, error = groq_request_with_rotation(
             provider["url"], analysis_payload, provider["headers"].copy(), timeout=60
@@ -1253,7 +1253,7 @@ def handle_command():
             "model": current_model,
             "messages": [{"role": "user", "content": final_prompt}],
             "temperature": 0.5,
-            "max_tokens": 4000,
+            "max_tokens": 1000000,
         }
         data_final, error = groq_request_with_rotation(
             provider["url"], final_payload, provider["headers"].copy(), timeout=90
