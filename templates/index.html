@@ -91,13 +91,13 @@
         </div>
       </a>
 
-      <div class="user-card">
+      <div class="user-card" onclick="openSettings()" role="button" tabindex="0" title="Настройки AI">
         <div class="user-avatar">👤</div>
         <div style="flex: 1;">
           <div class="user-name" id="display-nick">Пользователь</div>
           <div class="user-plan">Базовый план</div>
         </div>
-        <button onclick="logout()" class="logout-btn">Выйти</button>
+        <button onclick="event.stopPropagation(); logout()" class="logout-btn">Выйти</button>
       </div>
     </div>
 
@@ -119,6 +119,9 @@
           <div class="status-dot"></div>
           <span>Online</span>
         </div>
+        <button class="icon-btn" title="Настройки AI" onclick="openSettings()">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-1.7 1.7-.06-.06a1.7 1.7 0 0 0-1.88-.34 1.7 1.7 0 0 0-1 1.55V20h-2.4v-.21a1.7 1.7 0 0 0-1-1.55 1.7 1.7 0 0 0-1.88.34l-.06.06-1.7-1.7.06-.06A1.7 1.7 0 0 0 8.6 15a1.7 1.7 0 0 0-1.55-1H6.8v-2.4h.25a1.7 1.7 0 0 0 1.55-1 1.7 1.7 0 0 0-.34-1.88L8.2 8.66l1.7-1.7.06.06a1.7 1.7 0 0 0 1.88.34 1.7 1.7 0 0 0 1-1.55V5.6h2.4v.21a1.7 1.7 0 0 0 1 1.55 1.7 1.7 0 0 0 1.88-.34l.06-.06 1.7 1.7-.06.06a1.7 1.7 0 0 0-.34 1.88 1.7 1.7 0 0 0 1.55 1h.21V14h-.21a1.7 1.7 0 0 0-1.55 1z"/></svg>
+        </button>
         <button class="icon-btn" title="Очистить" onclick="clearChat()">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4h6v2"/></svg>
         </button>

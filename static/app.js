@@ -662,6 +662,10 @@ function stopRecording() {
 }
 
 // ========== САЙДБАР ==========
+function openSettings() {
+  window.location.href = '/settings';
+}
+
 function setSidebarOffset(offset, animate = false) {
   const app = document.querySelector('.app');
   const sidebar = document.getElementById('sidebar');

@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Настройки AI — Khirad</title>
+  <link rel="stylesheet" href="/static/settings.css">
+</head>
+<body>
+  <div class="settings-shell">
+    <header class="settings-topbar">
+      <a class="back-link" href="/chat" aria-label="Вернуться в чат">←</a>
+      <div>
+        <div class="eyebrow">KHIRAD / AI CONTROL</div>
+        <h1>Настройки AI</h1>
+      </div>
+      <div class="current-pill" id="currentPill">Загрузка…</div>
+    </header>
+
+    <main class="settings-content">
+      <section class="hero-card">
+        <div>
+          <div class="eyebrow">ПРОВАЙДЕРЫ И МОДЕЛИ</div>
+          <h2>Выберите движок для чата</h2>
+          <p>Список моделей проверяется напрямую через ключи из <code>.env</code>. Ключи не передаются в браузер и не отображаются на странице.</p>
+        </div>
+        <button class="refresh-btn" id="refreshAll" type="button">↻ Обновить всё</button>
+      </section>
+
+      <section class="provider-grid" id="providerGrid">
+        <div class="loading-card">Загружаю провайдеров…</div>
+      </section>
+
+      <section class="catalog-section">
+        <div class="catalog-heading">
+          <div>
+            <div class="eyebrow">CATALOG</div>
+            <h2>Доступные модели</h2>
+            <p id="catalogStatus">Выберите провайдера</p>
+          </div>
+          <button class="outline-btn" id="refreshModels" type="button">↻ Обновить список</button>
+        </div>
+
+        <div class="filters" aria-label="Фильтры моделей">
+          <label class="search-field"><span>⌕</span><input id="modelSearch" type="search" placeholder="Поиск модели…"></label>
+          <select id="priceFilter" aria-label="Цена"><option value="all">Цена: все</option><option value="free">Только бесплатные</option><option value="paid">Только платные</option></select>
+          <select id="sortFilter" aria-label="Сортировка"><option value="recommended">Сначала рекомендуемые</option><option value="context">Большой контекст</option><option value="parameters">Огромные веса</option><option value="free">Сначала бесплатные</option><option value="price">Ниже цена</option><option value="newest">Новые модели</option></select>
+          <select id="modalityFilter" aria-label="Тип модели"><option value="all">Тип: любой</option><option value="text">Текст</option><option value="vision">Текст + изображения</option></select>
+          <select id="contextFilter" aria-label="Контекст"><option value="0">Контекст: любой</option><option value="32000">От 32K токенов</option><option value="100000">От 100K токенов</option><option value="200000">От 200K токенов</option></select>
+        </div>
+
+        <div class="catalog-meta"><span id="modelCount">0 моделей</span><span>Нажмите «Выбрать», чтобы использовать модель в чате</span></div>
+        <div class="model-grid" id="modelGrid"><div class="empty-card">Модели ещё не загружены</div></div>
+      </section>
+
+      <section class="tips-grid">
+        <article><strong>Бесплатные модели</strong><p>OpenRouter помечает бесплатные модели суффиксом <code>:free</code>. Такие модели могут иметь ограничения по скорости.</p></article>
+        <article><strong>Что значит «огромные веса»</strong><p>Размеры вроде 70B или 671B — это количество параметров модели. Больше не всегда означает лучше: учитывайте контекст и задачу.</p></article>
+        <article><strong>Безопасность ключей</strong><p>API-ключи читаются только backend из `.env`. После изменения `.env` перезапустите приложение и нажмите обновление.</p></article>
+      </section>
+    </main>
+  </div>
+  <div class="toast" id="toast" role="status"></div>
+  <script src="/static/settings.js"></script>
+</body>
+</html>

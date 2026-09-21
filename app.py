@@ -1,6 +1,7 @@
 import os
 import sys
 import json
+import re
 import requests
 import subprocess
 import time
@@ -292,6 +293,117 @@ elif os.getenv("OPENROUTER_API_KEY"):
 else:
     current_provider = "openai_compatible"
     current_model = COMPATIBLE_MODEL
+
+MODEL_CACHE = {}
+MODEL_ERRORS = {}
+PROVIDER_LABELS = {
+    "groq": "Groq",
+    "cerebras": "Cerebras",
+    "openrouter": "OpenRouter",
+    "openai_compatible": "OpenAI-compatible / Local",
+}
+
+
+def model_size_billions(model_id, model_name=""):
+    match = re.search(r"(?:^|[-_/ ])(\d+(?:\.\d+)?)(?:b|B)(?:$|[-_/ ])", f"{model_id} {model_name}")
+    return float(match.group(1)) if match else 0
+
+
+def normalize_model(model, provider):
+    model = model or {}
+    model_id = model.get("id", "")
+    name = model.get("name") or model_id
+    pricing = model.get("pricing") or {}
+    prompt_price = str(pricing.get("prompt", model.get("prompt_price", "")))
+    completion_price = str(pricing.get("completion", model.get("completion_price", "")))
+    is_free = ":free" in model_id or (prompt_price in {"0", "0.0", "0.000000"} and completion_price in {"0", "0.0", "0.000000"})
+    context = model.get("context_length") or model.get("context_window") or model.get("max_context_length") or 0
+    architecture = model.get("architecture") or {}
+    modality = architecture.get("modality", "text->text") if isinstance(architecture, dict) else "text->text"
+    return {
+        "id": model_id,
+        "name": name,
+        "provider": provider,
+        "provider_name": PROVIDER_LABELS.get(provider, provider),
+        "context_length": int(context or 0),
+        "parameters_b": model.get("parameter_count") or model_size_billions(model_id, name),
+        "prompt_price": prompt_price,
+        "completion_price": completion_price,
+        "free": is_free,
+        "modality": modality,
+        "created": model.get("created", 0),
+        "description": model.get("description", ""),
+    }
+
+
+def provider_api_headers(provider):
+    if provider == "groq":
+        key = get_groq_key()
+        return {"Authorization": f"Bearer {key}", "Content-Type": "application/json"} if key else None
+    if provider == "openrouter":
+        key = os.getenv("OPENROUTER_API_KEY", "")
+        return {"Authorization": f"Bearer {key}", "Content-Type": "application/json", "HTTP-Referer": "http://localhost:5000", "X-Title": "NovaMind AI"} if key else None
+    if provider == "cerebras":
+        key = os.getenv("CEREBRAS_API_KEY", "")
+        return {"Authorization": f"Bearer {key}", "Content-Type": "application/json"} if key else None
+    return compatible_headers
+
+
+def fetch_available_models(provider, force=False):
+    if not force and provider in MODEL_CACHE:
+        return MODEL_CACHE[provider]
+    if provider == "openrouter":
+        url = "https://openrouter.ai/api/v1/models"
+    elif provider == "groq":
+        url = "https://api.groq.com/openai/v1/models"
+    elif provider == "cerebras":
+        url = "https://api.cerebras.ai/v1/models"
+    else:
+        return [normalize_model(model, provider) for model in PROVIDERS[provider]["models"]]
+    headers = provider_api_headers(provider)
+    if not headers:
+        return []
+    try:
+        response = requests.get(url, headers=headers, timeout=20)
+        response.raise_for_status()
+        raw_models = response.json().get("data", [])
+        models = [normalize_model(model, provider) for model in raw_models if model.get("id")]
+        MODEL_CACHE[provider] = models
+        MODEL_ERRORS.pop(provider, None)
+        return models
+    except (requests.RequestException, ValueError, TypeError) as exc:
+        print(f"Model catalog error ({provider}): {exc}")
+        MODEL_ERRORS[provider] = str(exc)
+        return []
+
+
+def provider_status():
+    return {
+        "groq": bool(GROQ_KEYS),
+        "cerebras": bool(os.getenv("CEREBRAS_API_KEY")),
+        "openrouter": bool(os.getenv("OPENROUTER_API_KEY")),
+        "openai_compatible": True,
+    }
+
+def save_selected_model(provider, model):
+    settings_path = os.path.join(os.path.dirname(__file__), "runtime_settings.json")
+    try:
+        with open(settings_path, "w", encoding="utf-8") as settings_file:
+            json.dump({"provider": provider, "model": model}, settings_file, ensure_ascii=False, indent=2)
+    except OSError as exc:
+        print(f"Could not save model settings: {exc}")
+
+try:
+    settings_path = os.path.join(os.path.dirname(__file__), "runtime_settings.json")
+    with open(settings_path, "r", encoding="utf-8") as settings_file:
+        saved_settings = json.load(settings_file)
+    saved_provider = saved_settings.get("provider")
+    saved_model = saved_settings.get("model")
+    if saved_provider in PROVIDERS and saved_model and provider_status().get(saved_provider, False):
+        current_provider = saved_provider
+        current_model = saved_model
+except (OSError, ValueError, TypeError):
+    pass
 
 system_prompt = """ Ты — продвинутый AI ассистент NovaMind, ориентированный на практическую пользу.
 
@@ -631,6 +743,55 @@ def index():
 @app.route('/chat')
 def chat_page():
     return render_template('index.html')
+
+@app.route('/settings')
+def settings_page():
+    return render_template('settings.html')
+
+@app.route('/api/settings/providers')
+def settings_providers():
+    statuses = provider_status()
+    return jsonify({
+        "providers": [
+            {
+                "id": provider,
+                "name": PROVIDER_LABELS.get(provider, provider),
+                "configured": statuses.get(provider, False),
+                "url": data.get("configured_url") or data.get("url", "").split("/chat/completions")[0],
+            }
+            for provider, data in PROVIDERS.items()
+        ],
+        "current_provider": current_provider,
+        "current_model": current_model,
+    })
+
+@app.route('/api/settings/models')
+def settings_models():
+    provider = request.args.get("provider", current_provider)
+    force = request.args.get("refresh", "0") == "1"
+    if provider not in PROVIDERS:
+        return jsonify({"error": "Неизвестный провайдер"}), 400
+    if not provider_status().get(provider, False):
+        return jsonify({"provider": provider, "models": [], "configured": False, "error": "API ключ провайдера не найден в .env"})
+    models = fetch_available_models(provider, force=force)
+    error = None if models else (MODEL_ERRORS.get(provider) or "Не удалось получить каталог моделей. Проверьте API ключ и доступ к интернету.")
+    return jsonify({"provider": provider, "models": models, "configured": True, "error": error, "current_model": current_model if provider == current_provider else None})
+
+@app.route('/api/settings/select', methods=['POST'])
+def settings_select():
+    global current_provider, current_model
+    data = request.get_json() or {}
+    provider = data.get("provider", "")
+    model = data.get("model", "").strip()
+    if provider not in PROVIDERS or not model:
+        return jsonify({"error": "Укажите провайдера и модель"}), 400
+    models = fetch_available_models(provider)
+    if not any(item["id"] == model for item in models):
+        return jsonify({"error": "Модель не найдена в доступном каталоге провайдера. Обновите список моделей."}), 400
+    current_provider = provider
+    current_model = model
+    save_selected_model(current_provider, current_model)
+    return jsonify({"success": True, "provider": current_provider, "model": current_model, "message": f"Выбрано: {model}"})
 
 @app.route('/admin/login')
 def admin_login_page():
