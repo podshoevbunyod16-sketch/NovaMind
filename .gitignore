@@ -2,6 +2,7 @@ __pycache__/
 *.pyc
 .env
 runtime_settings.json
+generated_media/
 venv/
 *.log
 .DS_Store

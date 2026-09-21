@@ -186,7 +186,10 @@
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
             Файл
           </button>
+          <button class="toolbar-btn" onclick="attachAudio()">🎧 Аудио</button>
+          <button class="toolbar-btn" onclick="attachVideo()">🎬 Видео</button>
         </div>
+        <button class="toolbar-btn" onclick="openMediaStudio()">🎨 Медиа</button>
       </div>
         <!-- Кнопка авто поиска -->
 <button id="btn-auto-search" class="toolbar-btn" onclick="toggleAutoSearch()" title="Авто поиск">
@@ -223,6 +226,26 @@
     </div>
 
   </main>
+</div>
+<div class="media-modal" id="mediaModal" aria-hidden="true">
+  <div class="media-dialog">
+    <button class="media-close" onclick="closeMediaStudio()" aria-label="Закрыть">×</button>
+    <div class="eyebrow">MEDIA STUDIO</div>
+    <h2>Генерация медиа</h2>
+    <p class="media-help">Изображение, аудио и видео используют провайдеры из <code>.env</code>.</p>
+    <div class="media-tabs">
+      <button class="media-tab active" data-media-kind="image" onclick="setMediaKind('image')">🖼 Изображение</button>
+      <button class="media-tab" data-media-kind="audio" onclick="setMediaKind('audio')">🔊 Аудио</button>
+      <button class="media-tab" data-media-kind="video" onclick="setMediaKind('video')">🎬 Видео</button>
+    </div>
+    <textarea id="mediaPrompt" placeholder="Опишите, что создать…" rows="4"></textarea>
+    <div class="media-options" id="mediaOptions">
+      <select id="mediaVoice"><option value="alloy">Голос Alloy</option><option value="nova">Голос Nova</option><option value="shimmer">Голос Shimmer</option></select>
+      <select id="mediaDuration"><option value="5">5 секунд</option><option value="10">10 секунд</option><option value="15">15 секунд</option></select>
+    </div>
+    <button class="media-generate-btn" id="mediaGenerateBtn" onclick="generateMedia()">Создать изображение</button>
+    <div class="media-result" id="mediaResult"></div>
+  </div>
 </div>
 <script>
   function openComposio() {

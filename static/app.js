@@ -256,6 +256,113 @@ function attachDocument() {
   el.click();
 }
 
+function pickMediaFile(accept, callback) {
+  document.getElementById('attachDropdown').classList.remove('open');
+  const el = document.createElement('input');
+  el.type = 'file';
+  el.accept = accept;
+  el.onchange = () => { if (el.files[0]) callback(el.files[0]); };
+  el.click();
+}
+
+function attachAudio() {
+  pickMediaFile('audio/*', (file) => {
+    appendMessage('user', `🎧 ${file.name}`);
+    const data = new FormData();
+    data.append('file', file);
+    showTyping();
+    fetch('/api/media/transcribe', {method: 'POST', body: data})
+      .then((response) => response.json())
+      .then((result) => {
+        removeTyping();
+        if (result.error) appendMessage('ai', '❌ ' + result.error);
+        else {
+          input.value = result.text || '';
+          autoResize(input);
+          sendBtn.disabled = !input.value.trim();
+          appendMessage('ai', `🎧 **Расшифровка ${file.name}:**\n\n${result.text || 'Текст не распознан.'}`);
+        }
+      })
+      .catch(() => { removeTyping(); appendMessage('ai', '❌ Ошибка загрузки аудио'); });
+  });
+}
+
+function appendMediaMessage(kind, url, title) {
+  const wrap = document.createElement('div');
+  wrap.className = 'message ai';
+  const media = kind === 'audio'
+    ? `<audio controls src="${url}"></audio>`
+    : kind === 'video'
+      ? `<video controls playsinline preload="metadata" src="${url}"></video>`
+      : `<img src="${url}" alt="${escapeHtml(title)}">`;
+  wrap.innerHTML = `<div class="msg-avatar">✦</div><div class="msg-body"><div class="msg-name">NovaMind</div><div class="msg-bubble media-bubble"><div>${escapeHtml(title)}</div>${media}<a href="${url}" target="_blank" rel="noopener">Открыть файл</a></div></div>`;
+  chatContainer.appendChild(wrap);
+  scrollToBottom();
+}
+
+function attachVideo() {
+  pickMediaFile('video/*', (file) => {
+    appendMessage('user', `🎬 ${file.name}`);
+    const data = new FormData();
+    data.append('file', file);
+    showTyping();
+    fetch('/api/media/upload', {method: 'POST', body: data})
+      .then((response) => response.json())
+      .then((result) => {
+        removeTyping();
+        if (result.error) appendMessage('ai', '❌ ' + result.error);
+        else appendMediaMessage('video', result.url, `Видео: ${file.name}`);
+      })
+      .catch(() => { removeTyping(); appendMessage('ai', '❌ Ошибка загрузки видео'); });
+  });
+}
+
+let mediaKind = 'image';
+function openMediaStudio() {
+  const modal = document.getElementById('mediaModal');
+  modal.classList.add('open');
+  modal.setAttribute('aria-hidden', 'false');
+  document.getElementById('mediaPrompt').focus();
+}
+function closeMediaStudio() {
+  const modal = document.getElementById('mediaModal');
+  modal.classList.remove('open');
+  modal.setAttribute('aria-hidden', 'true');
+}
+function setMediaKind(kind) {
+  mediaKind = kind;
+  document.querySelectorAll('.media-tab').forEach((tab) => tab.classList.toggle('active', tab.dataset.mediaKind === kind));
+  document.getElementById('mediaGenerateBtn').textContent = kind === 'image' ? 'Создать изображение' : kind === 'audio' ? 'Создать аудио' : 'Создать видео';
+  document.getElementById('mediaOptions').classList.toggle('video-options', kind === 'video');
+  document.getElementById('mediaVoice').style.display = kind === 'audio' ? '' : 'none';
+  document.getElementById('mediaDuration').style.display = kind === 'video' ? '' : 'none';
+}
+async function generateMedia() {
+  const prompt = document.getElementById('mediaPrompt').value.trim();
+  if (!prompt) { showNotification('Введите описание для генерации', 'warn'); return; }
+  const button = document.getElementById('mediaGenerateBtn');
+  const resultBox = document.getElementById('mediaResult');
+  button.disabled = true;
+  resultBox.textContent = 'Генерация…';
+  const endpoint = mediaKind === 'image' ? '/api/media/image' : mediaKind === 'audio' ? '/api/media/tts' : '/api/media/video';
+  const body = mediaKind === 'audio' ? {text: prompt, voice: document.getElementById('mediaVoice').value} : mediaKind === 'video' ? {prompt, duration: Number(document.getElementById('mediaDuration').value)} : {prompt};
+  try {
+    const response = await fetch(endpoint, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)});
+    const data = await response.json();
+    if (!response.ok || data.error) throw new Error(data.error || 'Провайдер не вернул результат');
+    if (data.url) {
+      appendMediaMessage(mediaKind, data.url, mediaKind === 'image' ? 'Сгенерированное изображение' : mediaKind === 'audio' ? 'Сгенерированное аудио' : 'Сгенерированное видео');
+      resultBox.textContent = 'Готово';
+    } else {
+      resultBox.textContent = data.job_id ? `Задача запущена: ${data.job_id}` : 'Провайдер принял запрос, но ещё не вернул файл.';
+    }
+  } catch (error) {
+    resultBox.textContent = error.message;
+    showNotification(error.message, 'warn');
+  } finally { button.disabled = false; }
+}
+setMediaKind('image');
+
 
 // ========== РЕЖИМЫ КОМАНД ==========
 function activateMode(mode) {
