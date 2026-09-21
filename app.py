@@ -253,7 +253,7 @@ COMPATIBLE_BASE_URL = (
     or os.getenv("OPENAI_API_BASE")
     or os.getenv("AI_BASE_URL")
     or os.getenv("LOCAL_LLM_URL")
-    or ("https://api.openai.com/v1" if os.getenv("OPENAI_API_KEY") else "http://127.0.0.1:11434/v1")
+    or ("https://api.openai.com/v1" if os.getenv("OPENAI_API_KEY") else "http://127.0.0.1:8080")
 ).rstrip("/")
 COMPATIBLE_API_KEY = (
     os.getenv("OPENAI_API_KEY")
