@@ -5,3 +5,4 @@ runtime_settings.json
 venv/
 *.log
 .DS_Store
+ai_settings.json
