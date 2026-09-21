@@ -2,6 +2,8 @@ import os
 import sys
 import json
 import re
+import uuid
+import mimetypes
 import requests
 import subprocess
 import time
@@ -1520,6 +1522,132 @@ def upload_file():
 ```'''
         })
 
+
+# ========== МУЛЬТИМЕДИА ==========
+MEDIA_DIR = os.path.join(os.path.dirname(__file__), "generated_media")
+os.makedirs(MEDIA_DIR, exist_ok=True)
+
+@app.route('/media/<path:filename>')
+def media_file(filename):
+    safe_name = os.path.basename(filename)
+    filepath = os.path.join(MEDIA_DIR, safe_name)
+    if not os.path.isfile(filepath):
+        return jsonify({"error": "Медиафайл не найден"}), 404
+    return send_file(filepath, mimetype=mimetypes.guess_type(filepath)[0] or "application/octet-stream")
+
+@app.route('/api/media/upload', methods=['POST'])
+def media_upload():
+    media = request.files.get('file')
+    if not media or not media.filename:
+        return jsonify({"error": "Файл не выбран"}), 400
+    content_type = media.mimetype or mimetypes.guess_type(media.filename)[0] or "application/octet-stream"
+    if not (content_type.startswith("audio/") or content_type.startswith("video/") or content_type.startswith("image/")):
+        return jsonify({"error": "Поддерживаются только аудио, видео и изображения"}), 415
+    extension = os.path.splitext(media.filename)[1].lower() or mimetypes.guess_extension(content_type) or ""
+    saved_name = f"upload_{uuid.uuid4().hex}{extension}"
+    media.save(os.path.join(MEDIA_DIR, saved_name))
+    return jsonify({"success": True, "filename": media.filename, "type": content_type, "url": f"/media/{saved_name}"})
+
+@app.route('/api/media/transcribe', methods=['POST'])
+def media_transcribe():
+    media = request.files.get('file')
+    if not media or not media.filename:
+        return jsonify({"error": "Аудиофайл не выбран"}), 400
+    endpoint = os.getenv("AUDIO_TRANSCRIPTION_URL", "")
+    api_key = os.getenv("AUDIO_API_KEY", "")
+    if not endpoint:
+        if os.getenv("GROQ_API_KEY") or GROQ_KEYS:
+            endpoint = "https://api.groq.com/openai/v1/audio/transcriptions"
+            api_key = api_key or get_groq_key()
+        elif os.getenv("OPENAI_API_KEY"):
+            endpoint = "https://api.openai.com/v1/audio/transcriptions"
+            api_key = api_key or os.getenv("OPENAI_API_KEY", "")
+    if not endpoint:
+        return jsonify({"error": "Настройте AUDIO_TRANSCRIPTION_URL и AUDIO_API_KEY либо добавьте GROQ_API_KEY/OPENAI_API_KEY в .env"}), 503
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+    try:
+        response = requests.post(endpoint, headers=headers, files={"file": (media.filename, media.stream, media.mimetype)}, data={"model": os.getenv("AUDIO_TRANSCRIPTION_MODEL", "whisper-large-v3-turbo"), "language": request.form.get("language", "ru")}, timeout=180)
+        response.raise_for_status()
+        result = response.json()
+        return jsonify({"success": True, "text": result.get("text", ""), "language": result.get("language")})
+    except (requests.RequestException, ValueError) as exc:
+        return jsonify({"error": f"Ошибка расшифровки аудио: {exc}"}), 502
+
+@app.route('/api/media/tts', methods=['POST'])
+def media_tts():
+    data = request.get_json() or {}
+    text = data.get("text", "").strip()
+    if not text:
+        return jsonify({"error": "Введите текст для озвучивания"}), 400
+    endpoint = os.getenv("AUDIO_TTS_URL", "")
+    api_key = os.getenv("AUDIO_API_KEY", "")
+    model = os.getenv("AUDIO_TTS_MODEL", "tts-1")
+    if not endpoint and os.getenv("OPENAI_API_KEY"):
+        endpoint, api_key = "https://api.openai.com/v1/audio/speech", api_key or os.getenv("OPENAI_API_KEY", "")
+    if not endpoint:
+        return jsonify({"error": "Настройте AUDIO_TTS_URL и AUDIO_API_KEY либо добавьте OPENAI_API_KEY в .env"}), 503
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"} if api_key else {"Content-Type": "application/json"}
+    try:
+        response = requests.post(endpoint, headers=headers, json={"model": model, "input": text, "voice": data.get("voice", "alloy"), "response_format": "mp3"}, timeout=180)
+        response.raise_for_status()
+        filename = f"speech_{uuid.uuid4().hex}.mp3"
+        with open(os.path.join(MEDIA_DIR, filename), "wb") as audio_file:
+            audio_file.write(response.content)
+        return jsonify({"success": True, "url": f"/media/{filename}", "filename": filename})
+    except requests.RequestException as exc:
+        return jsonify({"error": f"Ошибка генерации аудио: {exc}"}), 502
+
+@app.route('/api/media/image', methods=['POST'])
+def media_image():
+    data = request.get_json() or {}
+    prompt = data.get("prompt", "").strip()
+    if not prompt:
+        return jsonify({"error": "Введите описание изображения"}), 400
+    endpoint = os.getenv("IMAGE_GENERATION_URL", "")
+    api_key = os.getenv("IMAGE_API_KEY", "") or os.getenv("OPENAI_API_KEY", "")
+    if not endpoint and os.getenv("OPENAI_API_KEY"):
+        endpoint = "https://api.openai.com/v1/images/generations"
+    if not endpoint:
+        from urllib.parse import quote
+        width, height = int(data.get("width", 1024)), int(data.get("height", 1024))
+        url = f"https://image.pollinations.ai/prompt/{quote(prompt)}?width={width}&height={height}&nologo=True"
+        return jsonify({"success": True, "url": url, "provider": "pollinations"})
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"} if api_key else {"Content-Type": "application/json"}
+    try:
+        response = requests.post(endpoint, headers=headers, json={"model": os.getenv("IMAGE_MODEL", "gpt-image-1"), "prompt": prompt, "size": data.get("size", "1024x1024"), "n": 1}, timeout=240)
+        response.raise_for_status()
+        result = response.json().get("data", [{}])[0]
+        if result.get("url"):
+            return jsonify({"success": True, "url": result["url"], "provider": "configured"})
+        if result.get("b64_json"):
+            import base64
+            filename = f"image_{uuid.uuid4().hex}.png"
+            with open(os.path.join(MEDIA_DIR, filename), "wb") as image_file:
+                image_file.write(base64.b64decode(result["b64_json"]))
+            return jsonify({"success": True, "url": f"/media/{filename}", "provider": "configured"})
+        return jsonify({"error": "Провайдер не вернул изображение"}), 502
+    except (requests.RequestException, ValueError, IndexError) as exc:
+        return jsonify({"error": f"Ошибка генерации изображения: {exc}"}), 502
+
+@app.route('/api/media/video', methods=['POST'])
+def media_video():
+    data = request.get_json() or {}
+    prompt = data.get("prompt", "").strip()
+    endpoint = os.getenv("VIDEO_API_URL", "")
+    if not prompt:
+        return jsonify({"error": "Введите описание видео"}), 400
+    if not endpoint:
+        return jsonify({"error": "Для видео укажите VIDEO_API_URL, VIDEO_API_KEY и VIDEO_MODEL в .env. У видео-провайдеров разные API, поэтому endpoint настраивается явно."}), 503
+    api_key = os.getenv("VIDEO_API_KEY", "") or os.getenv("OPENAI_API_KEY", "")
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"} if api_key else {"Content-Type": "application/json"}
+    payload = {"model": os.getenv("VIDEO_MODEL", ""), "prompt": prompt, "duration": data.get("duration", 5), "aspect_ratio": data.get("aspect_ratio", "16:9")}
+    try:
+        response = requests.post(endpoint, headers=headers, json=payload, timeout=240)
+        response.raise_for_status()
+        result = response.json()
+        return jsonify({"success": True, "url": result.get("video_url") or result.get("url"), "job_id": result.get("id") or result.get("job_id"), "status_url": result.get("status_url"), "raw": result})
+    except (requests.RequestException, ValueError) as exc:
+        return jsonify({"error": f"Ошибка генерации видео: {exc}"}), 502
 
 # ========== МОДЕЛИ ==========
 
