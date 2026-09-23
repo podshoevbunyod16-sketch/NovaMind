@@ -1031,9 +1031,17 @@ def send_stream():
     # Для Groq делаем несколько попыток с ротацией ключей.
     upstream = None
     last_error = None
+    if "generativelanguage.googleapis.com" in provider["url"]:
+        upstream, gemini_error = gemini_stream_request(model, payload, timeout=90)
+        if upstream is None:
+            if contents and contents[-1]["role"] == "user":
+                contents.pop()
+            return jsonify({"error": f"Ошибка подключения к AI: {gemini_error}"}), 502
+    else:
+        upstream = None
     max_attempts = max(1, min(len(GROQ_KEYS), 9)) if "api.groq.com" in provider["url"] else 1
 
-    for _ in range(max_attempts):
+    for _ in range(0 if upstream is not None else max_attempts):
         headers = provider["headers"].copy()
         if "api.groq.com" in provider["url"]:
             key = get_groq_key()
@@ -1084,6 +1092,15 @@ def send_stream():
                 except (TypeError, json.JSONDecodeError):
                     continue
 
+                if "generativelanguage.googleapis.com" in provider["url"]:
+                    for candidate in chunk.get("candidates", []):
+                        for part in (candidate.get("content") or {}).get("parts", []):
+                            token = part.get("text") or ""
+                            if token:
+                                full_reply += token
+                                yield json.dumps({"token": token}, ensure_ascii=False) + "\n"
+                    continue
+
                 choice = (chunk.get("choices") or [{}])[0]
                 delta = choice.get("delta") or {}
                 token = delta.get("content") or choice.get("text") or ""
@@ -1102,7 +1119,8 @@ def send_stream():
         except Exception as exc:
             yield json.dumps({"error": f"Ошибка потокового ответа: {exc}"}, ensure_ascii=False) + "\n"
         finally:
-            upstream.close()
+            if upstream is not None:
+                upstream.close()
 
     return Response(
         generate(),
