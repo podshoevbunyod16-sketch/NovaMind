@@ -148,11 +148,69 @@ def openai_compatible_request(url, payload, headers, timeout=90, max_retries=2):
     return None, "OpenAI-compatible сервер недоступен"
 
 
+def gemini_messages_from_openai(messages):
+    contents_out=[]; system_text=""
+    for message in messages or []:
+        role=message.get("role","user"); content=message.get("content","")
+        if isinstance(content,list):
+            content="\n".join(str(p.get("text","")) for p in content if isinstance(p,dict) and p.get("text"))
+        content=str(content or "")
+        if not content: continue
+        if role=="system": system_text=(system_text+"\n\n"+content).strip()
+        else: contents_out.append({"role":"model" if role=="assistant" else "user","parts":[{"text":content}]})
+    return system_text,contents_out
+
+def gemini_request(model,payload,timeout=90,max_retries=2):
+    key=os.getenv("GEMINI_API_KEY","").strip()
+    if not key: return None,"Google AI Studio: GEMINI_API_KEY не найден в .env"
+    model_id=str(model or "").strip().removeprefix("models/")
+    system_text,contents_out=gemini_messages_from_openai(payload.get("messages",[]))
+    if not contents_out: return None,"Google AI Studio: отсутствует сообщение"
+    body={"contents":contents_out,"generationConfig":{"temperature":float(payload.get("temperature",0.7)),"maxOutputTokens":min(int(payload.get("max_tokens",65536)),65536)}}
+    if system_text: body["systemInstruction"]={"parts":[{"text":system_text}]}
+    url=f"https://generativelanguage.googleapis.com/v1beta/models/{model_id}:generateContent"
+    headers={"Content-Type":"application/json","x-goog-api-key":key}
+    for attempt in range(max_retries):
+        try:
+            r=requests.post(url,json=body,headers=headers,timeout=timeout)
+            if r.status_code==429 and attempt<max_retries-1: time.sleep(2**attempt); continue
+            if r.status_code==401: return None,"Google AI Studio: API ключ отклонён (401)"
+            if r.status_code==403: return None,"Google AI Studio: доступ запрещён (403)"
+            r.raise_for_status(); data=r.json(); parts=[]
+            for candidate in data.get("candidates",[]):
+                for part in (candidate.get("content") or {}).get("parts",[]):
+                    if part.get("text"): parts.append(part["text"])
+            if not parts: return None,"Google AI Studio не вернул текст"
+            return {"choices":[{"message":{"role":"assistant","content":"".join(parts)}}]},None
+        except requests.exceptions.Timeout:
+            if attempt<max_retries-1: continue
+            return None,"Google AI Studio: таймаут"
+        except requests.exceptions.RequestException as exc:
+            if attempt<max_retries-1 and "429" in str(exc): time.sleep(2**attempt); continue
+            return None,f"Google AI Studio: {exc}"
+        except (ValueError,TypeError): return None,"Google AI Studio вернул некорректный JSON"
+    return None,"Google AI Studio: запрос не выполнен"
+
+def gemini_stream_request(model,payload,timeout=90):
+    key=os.getenv("GEMINI_API_KEY","").strip()
+    if not key: return None,"Google AI Studio: GEMINI_API_KEY не найден в .env"
+    model_id=str(model or "").strip().removeprefix("models/")
+    system_text,contents_out=gemini_messages_from_openai(payload.get("messages",[]))
+    body={"contents":contents_out,"generationConfig":{"temperature":float(payload.get("temperature",0.7)),"maxOutputTokens":min(int(payload.get("max_tokens",65536)),65536)}}
+    if system_text: body["systemInstruction"]={"parts":[{"text":system_text}]}
+    url=f"https://generativelanguage.googleapis.com/v1beta/models/{model_id}:streamGenerateContent?alt=sse"
+    try:
+        r=requests.post(url,json=body,headers={"Content-Type":"application/json","x-goog-api-key":key},timeout=timeout,stream=True)
+        r.raise_for_status(); r.encoding="utf-8"; return r,None
+    except requests.exceptions.RequestException as exc: return None,f"Google AI Studio: {exc}"
+
 def groq_request_with_rotation(url, payload, headers, timeout=90, max_retries=3):
     """
     Выполняет запрос к Groq с автоматической ротацией ключей при rate limit.
     Возвращает (response_data, None) или (None, error_message).
     """
+    if "generativelanguage.googleapis.com" in url:
+        return gemini_request(payload.get("model"),payload,timeout=timeout,max_retries=max_retries)
     # Cerebras, OpenRouter и локальные серверы используют обычный OpenAI-compatible протокол.
     if "api.groq.com" not in url:
         return openai_compatible_request(url, payload, headers, timeout=timeout, max_retries=max_retries)
@@ -245,6 +303,11 @@ PROVIDERS = {
             {"id": "google/gemini-2.0-flash-001", "name": "Gemini 2.0 Flash (Free)"},
             {"id": "deepseek/deepseek-chat-v3-0324", "name": "DeepSeek R1 (Free)"},
         ]
+    },
+    "google_ai_studio": {
+        "url":"https://generativelanguage.googleapis.com/v1beta",
+        "headers":{"Content-Type":"application/json"},
+        "models":[]
     }
 }
 
@@ -292,6 +355,9 @@ elif os.getenv("CEREBRAS_API_KEY"):
 elif os.getenv("OPENROUTER_API_KEY"):
     current_provider = "openrouter"
     current_model = os.getenv("AI_MODEL") or "google/gemini-2.0-flash-001"
+elif os.getenv("GEMINI_API_KEY"):
+    current_provider = "google_ai_studio"
+    current_model = os.getenv("GEMINI_MODEL") or "gemini-3.8-flash"
 else:
     current_provider = "openai_compatible"
     current_model = COMPATIBLE_MODEL
@@ -302,6 +368,7 @@ PROVIDER_LABELS = {
     "groq": "Groq",
     "cerebras": "Cerebras",
     "openrouter": "OpenRouter",
+    "google_ai_studio": "Google AI Studio",
     "openai_compatible": "OpenAI-compatible / Local",
 }
 
@@ -348,6 +415,9 @@ def provider_api_headers(provider):
     if provider == "cerebras":
         key = os.getenv("CEREBRAS_API_KEY", "")
         return {"Authorization": f"Bearer {key}", "Content-Type": "application/json"} if key else None
+    if provider == "google_ai_studio":
+        key=os.getenv("GEMINI_API_KEY","")
+        return {"x-goog-api-key":key,"Content-Type":"application/json"} if key else None
     return compatible_headers
 
 
@@ -356,6 +426,10 @@ def fetch_available_models(provider, force=False):
         return MODEL_CACHE[provider]
     if provider == "openrouter":
         url = "https://openrouter.ai/api/v1/models"
+    elif provider == "google_ai_studio":
+        if not os.getenv("GEMINI_API_KEY","").strip():
+            MODEL_ERRORS[provider]="GEMINI_API_KEY не найден в .env"; return []
+        url="https://generativelanguage.googleapis.com/v1beta/models"
     elif provider == "groq":
         url = "https://api.groq.com/openai/v1/models"
     elif provider == "cerebras":
@@ -368,8 +442,15 @@ def fetch_available_models(provider, force=False):
     try:
         response = requests.get(url, headers=headers, timeout=20)
         response.raise_for_status()
-        raw_models = response.json().get("data", [])
-        models = [normalize_model(model, provider) for model in raw_models if model.get("id")]
+        if provider == "google_ai_studio":
+            raw_models=response.json().get("models",[]); models=[]
+            for model in raw_models:
+                model_id=str(model.get("name","")).removeprefix("models/")
+                if model_id and "generateContent" in (model.get("supportedGenerationMethods") or []):
+                    models.append(normalize_model({"id":model_id,"name":model.get("displayName") or model_id,"description":model.get("description",""),"context_length":model.get("inputTokenLimit",0),"pricing":{"prompt":"0","completion":"0"}},provider))
+        else:
+            raw_models=response.json().get("data",[])
+            models=[normalize_model(model,provider) for model in raw_models if model.get("id")]
         MODEL_CACHE[provider] = models
         MODEL_ERRORS.pop(provider, None)
         return models
@@ -384,6 +465,7 @@ def provider_status():
         "groq": bool(GROQ_KEYS),
         "cerebras": bool(os.getenv("CEREBRAS_API_KEY")),
         "openrouter": bool(os.getenv("OPENROUTER_API_KEY")),
+        "google_ai_studio": bool(os.getenv("GEMINI_API_KEY")),
         "openai_compatible": True,
     }
 
