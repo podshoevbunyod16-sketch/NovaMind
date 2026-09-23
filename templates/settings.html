@@ -22,7 +22,7 @@
         <div>
           <div class="eyebrow">ПРОВАЙДЕРЫ И МОДЕЛИ</div>
           <h2>Выберите движок для чата</h2>
-          <p>Список моделей проверяется напрямую через ключи из <code>.env</code>. Ключи не передаются в браузер и не отображаются на странице.</p>
+          <p>Список моделей проверяется напрямую через API провайдера. Ключи остаются только на backend и не передаются в браузер.</p>
         </div>
         <button class="refresh-btn" id="refreshAll" type="button">↻ Обновить всё</button>
       </section>
@@ -56,7 +56,8 @@
       <section class="tips-grid">
         <article><strong>Бесплатные модели</strong><p>OpenRouter помечает бесплатные модели суффиксом <code>:free</code>. Такие модели могут иметь ограничения по скорости.</p></article>
         <article><strong>Что значит «огромные веса»</strong><p>Размеры вроде 70B или 671B — это количество параметров модели. Больше не всегда означает лучше: учитывайте контекст и задачу.</p></article>
-        <article><strong>Безопасность ключей</strong><p>API-ключи читаются только backend из `.env`. После изменения `.env` перезапустите приложение и нажмите обновление.</p></article>
+        <article><strong>Google AI Studio</strong><p>Добавьте <code>GEMINI_API_KEY</code> в <code>.env</code>, перезапустите сервер и нажмите «Обновить всё». NovaMind загрузит реальные доступные Gemini-модели через Google API.</p></article>
+        <article><strong>Безопасность ключей</strong><p>API-ключи читаются только backend из <code>.env</code> и не отправляются в браузер.</p></article>
       </section>
     </main>
   </div>
