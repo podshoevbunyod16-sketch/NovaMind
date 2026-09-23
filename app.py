@@ -192,17 +192,55 @@ def gemini_request(model,payload,timeout=90,max_retries=2):
     return None,"Google AI Studio: запрос не выполнен"
 
 def gemini_stream_request(model,payload,timeout=90):
+    """Открывает нативный Gemini SSE-поток и возвращает подробную ошибку API."""
     key=os.getenv("GEMINI_API_KEY","").strip()
-    if not key: return None,"Google AI Studio: GEMINI_API_KEY не найден в .env"
+    if not key:
+        return None,"Google AI Studio: GEMINI_API_KEY не найден в .env"
+
     model_id=str(model or "").strip().removeprefix("models/")
     system_text,contents_out=gemini_messages_from_openai(payload.get("messages",[]))
-    body={"contents":contents_out,"generationConfig":{"temperature":float(payload.get("temperature",0.7)),"maxOutputTokens":min(int(payload.get("max_tokens",65536)),65536)}}
-    if system_text: body["systemInstruction"]={"parts":[{"text":system_text}]}
-    url=f"https://generativelanguage.googleapis.com/v1beta/models/{model_id}:streamGenerateContent?alt=sse"
+    if not contents_out:
+        return None,"Google AI Studio: отсутствует сообщение"
+
+    body={
+        "contents": contents_out,
+        "generationConfig":{
+            "temperature":float(payload.get("temperature",0.7)),
+            "maxOutputTokens":min(int(payload.get("max_tokens",65536)),65536)
+        }
+    }
+    if system_text:
+        body["systemInstruction"]={"parts":[{"text":system_text}]}
+
+    url=f"https://generativelanguage.googleapis.com/v1beta/models/{model_id}:streamGenerateContent"
+    headers={
+        "Content-Type":"application/json",
+        "Accept":"text/event-stream",
+        "x-goog-api-key":key
+    }
+
     try:
-        r=requests.post(url,json=body,headers={"Content-Type":"application/json","x-goog-api-key":key},timeout=timeout,stream=True)
-        r.raise_for_status(); r.encoding="utf-8"; return r,None
-    except requests.exceptions.RequestException as exc: return None,f"Google AI Studio: {exc}"
+        r=requests.post(
+            url,
+            params={"alt":"sse"},
+            json=body,
+            headers=headers,
+            timeout=(15, timeout),
+            stream=True
+        )
+        if r.status_code >= 400:
+            try:
+                detail=r.json()
+                detail_text=json.dumps(detail,ensure_ascii=False)
+            except ValueError:
+                detail_text=(r.text or "").strip()
+            return None,f"Google AI Studio HTTP {r.status_code}: {detail_text[:1200]}"
+        r.encoding="utf-8"
+        return r,None
+    except requests.exceptions.Timeout:
+        return None,"Google AI Studio: таймаут при подключении к streamGenerateContent"
+    except requests.exceptions.RequestException as exc:
+        return None,f"Google AI Studio: {exc}"
 
 def groq_request_with_rotation(url, payload, headers, timeout=90, max_retries=3):
     """
@@ -1031,12 +1069,40 @@ def send_stream():
     # Для Groq делаем несколько попыток с ротацией ключей.
     upstream = None
     last_error = None
-    if "generativelanguage.googleapis.com" in provider["url"]:
+    is_gemini = provider.get("url","").startswith("https://generativelanguage.googleapis.com")
+    if is_gemini:
         upstream, gemini_error = gemini_stream_request(model, payload, timeout=90)
+
+        # Некоторые сети/прокси могут блокировать SSE, хотя обычный generateContent
+        # работает. В таком случае не отдаём 502: выполняем обычный Gemini-запрос
+        # и возвращаем его как один потоковый token.
         if upstream is None:
+            print(f"[Gemini stream] {gemini_error}")
+            fallback_data, fallback_error = gemini_request(model, payload, timeout=90, max_retries=2)
+            if fallback_error:
+                if contents and contents[-1]["role"] == "user":
+                    contents.pop()
+                return jsonify({
+                    "error": f"{gemini_error}. Fallback generateContent: {fallback_error}"
+                }), 502
+
+            fallback_reply=((fallback_data.get("choices") or [{}])[0].get("message") or {}).get("content","")
             if contents and contents[-1]["role"] == "user":
                 contents.pop()
-            return jsonify({"error": f"Ошибка подключения к AI: {gemini_error}"}), 502
+
+            def generate_fallback():
+                if fallback_reply:
+                    yield json.dumps({"token": fallback_reply}, ensure_ascii=False) + "\n"
+                    contents.append({"role":"assistant","content":fallback_reply})
+                    if len(contents) > 20:
+                        del contents[:-20]
+                yield json.dumps({"done":True}, ensure_ascii=False) + "\n"
+
+            return Response(
+                generate_fallback(),
+                mimetype="application/x-ndjson",
+                headers={"Cache-Control":"no-cache","X-Accel-Buffering":"no-cache"}
+            )
     else:
         upstream = None
     max_attempts = max(1, min(len(GROQ_KEYS), 9)) if "api.groq.com" in provider["url"] else 1
@@ -1092,7 +1158,7 @@ def send_stream():
                 except (TypeError, json.JSONDecodeError):
                     continue
 
-                if "generativelanguage.googleapis.com" in provider["url"]:
+                if is_gemini:
                     for candidate in chunk.get("candidates", []):
                         for part in (candidate.get("content") or {}).get("parts", []):
                             token = part.get("text") or ""
