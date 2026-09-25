@@ -7,6 +7,8 @@ import mimetypes
 import requests
 import subprocess
 import time
+import sqlite3
+import threading
 from datetime import datetime
 from flask import Flask, request, jsonify, render_template, send_file, session, send_from_directory, redirect, Response, stream_with_context
 
@@ -44,6 +46,7 @@ if not GROQ_KEYS:
         GROQ_KEYS.append({"key": main_key, "index": 0, "exhausted_at": None})
 
 groq_key_index = 0  # Текущий активный ключ
+_groq_lock = threading.Lock()  # FIX: защита от race condition
 
 # Cooldown: 1 день + 1 час = 90000 секунд
 GROQ_KEY_COOLDOWN = 90000
@@ -56,47 +59,50 @@ def get_groq_key():
     if not GROQ_KEYS:
         return ""
 
-    # Проверяем, не истёк ли cooldown у предыдущих ключей
-    now = time.time()
-    for key_info in GROQ_KEYS:
-        if key_info["exhausted_at"] and (now - key_info["exhausted_at"]) >= GROQ_KEY_COOLDOWN:
-            key_info["exhausted_at"] = None
-            print(f"[Groq Key] Ключ #{key_info['index']} восстановлен (cooldown истёк)")
+    with _groq_lock:  # FIX: thread-safe
+        now = time.time()
+        for key_info in GROQ_KEYS:
+            if key_info["exhausted_at"] and (now - key_info["exhausted_at"]) >= GROQ_KEY_COOLDOWN:
+                key_info["exhausted_at"] = None
+                print(f"[Groq Key] Ключ #{key_info['index']} восстановлен (cooldown истёк)")
 
-    # Ищем первый неисчерпанный ключ
-    for i in range(len(GROQ_KEYS)):
-        idx = (groq_key_index + i) % len(GROQ_KEYS)
-        if GROQ_KEYS[idx]["exhausted_at"] is None:
-            groq_key_index = idx
-            return GROQ_KEYS[idx]["key"]
+        for i in range(len(GROQ_KEYS)):
+            idx = (groq_key_index + i) % len(GROQ_KEYS)
+            if GROQ_KEYS[idx]["exhausted_at"] is None:
+                groq_key_index = idx
+                return GROQ_KEYS[idx]["key"]
 
-    # Все ключи на cooldown
-    return GROQ_KEYS[groq_key_index]["key"]
+        return GROQ_KEYS[groq_key_index]["key"]
 
 
-def mark_groq_key_exhausted():
-    """Помечает текущий ключ как исчерпанный и переключается на следующий"""
+def mark_groq_key_exhausted(permanent=False):
+    """Помечает текущий ключ как исчерпанный. permanent=True для 401 (неверный ключ)."""
     global groq_key_index, GROQ_KEYS
 
     if not GROQ_KEYS:
         return
 
-    current_key = GROQ_KEYS[groq_key_index]
-    current_key["exhausted_at"] = time.time()
-    print(f"[Groq Key] Ключ #{current_key['index']} исчерпан, cooldown на 25 часов")
+    with _groq_lock:  # FIX: thread-safe
+        current_key = GROQ_KEYS[groq_key_index]
+        if permanent:
+            # FIX: 401 = неверный ключ навсегда, cooldown не поможет
+            current_key["exhausted_at"] = float('inf')
+            print(f"[Groq Key] Ключ #{current_key['index']} неверный (401), отключён навсегда")
+        else:
+            current_key["exhausted_at"] = time.time()
+            print(f"[Groq Key] Ключ #{current_key['index']} исчерпан, cooldown на 25 часов")
 
-    # Ищем следующий доступный ключ
-    found = False
-    for i in range(1, len(GROQ_KEYS)):
-        idx = (groq_key_index + i) % len(GROQ_KEYS)
-        if GROQ_KEYS[idx]["exhausted_at"] is None:
-            groq_key_index = idx
-            found = True
-            print(f"[Groq Key] Переключение на ключ #{GROQ_KEYS[idx]['index']}")
-            break
+        found = False
+        for i in range(1, len(GROQ_KEYS)):
+            idx = (groq_key_index + i) % len(GROQ_KEYS)
+            if GROQ_KEYS[idx]["exhausted_at"] is None:
+                groq_key_index = idx
+                found = True
+                print(f"[Groq Key] Переключение на ключ #{GROQ_KEYS[idx]['index']}")
+                break
 
-    if not found:
-        print("[Groq Key] ВСЕ ключи исчерпаны! Ожидание восстановления...")
+        if not found:
+            print("[Groq Key] ВСЕ ключи исчерпаны! Ожидание восстановления...")
 
 
 def get_groq_key_status():
@@ -275,8 +281,8 @@ def groq_request_with_rotation(url, payload, headers, timeout=90, max_retries=3)
                     continue
 
             if resp.status_code == 401:
-                print(f"[Groq Key] 401 Unauthorized, ротируем...")
-                mark_groq_key_exhausted()
+                print(f"[Groq Key] 401 Unauthorized, ключ неверный навсегда")
+                mark_groq_key_exhausted(permanent=True)  # FIX: 401 != временный лимит
                 continue
 
             resp.raise_for_status()
@@ -575,13 +581,133 @@ system_prompt = """ Ты — продвинутый AI ассистент NovaMi
 7. Всегда:
 - думай как инженер
 - отвечай как эксперт. """
-contents = []
+contents = []  # In-memory fallback (используется только если DB недоступна)
+
+# ============================================================
+# ========== СИСТЕМА ПАМЯТИ ЧАТОВ (SQLite) ===================
+# ============================================================
+
+DB_PATH = os.path.join(os.path.dirname(__file__), "novamind_chats.db")
+_db_lock = threading.Lock()
+
+def get_db():
+    """Возвращает подключение к SQLite (thread-local)."""
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+def init_db():
+    """Создаёт таблицы если не существуют."""
+    with get_db() as conn:
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS chats (
+                id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id TEXT NOT NULL,
+                role TEXT NOT NULL,
+                content TEXT NOT NULL,
+                created_at REAL NOT NULL,
+                FOREIGN KEY (chat_id) REFERENCES chats(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_messages_chat ON messages(chat_id);
+            CREATE INDEX IF NOT EXISTS idx_chats_updated ON chats(updated_at DESC);
+        """)
+    print("[DB] База данных чатов инициализирована:", DB_PATH)
+
+init_db()
+
+def create_chat(title="Новый чат"):
+    """Создаёт новый чат, возвращает его id."""
+    chat_id = str(uuid.uuid4())
+    now = time.time()
+    with _db_lock:
+        with get_db() as conn:
+            conn.execute(
+                "INSERT INTO chats (id, title, created_at, updated_at) VALUES (?, ?, ?, ?)",
+                (chat_id, title, now, now)
+            )
+    return chat_id
+
+def get_chat_history(chat_id, limit=50):
+    """Возвращает историю сообщений чата."""
+    with get_db() as conn:
+        rows = conn.execute(
+            "SELECT role, content FROM messages WHERE chat_id=? ORDER BY created_at ASC LIMIT ?",
+            (chat_id, limit)
+        ).fetchall()
+    return [{"role": r["role"], "content": r["content"]} for r in rows]
+
+def add_message(chat_id, role, content):
+    """Добавляет сообщение в историю чата."""
+    now = time.time()
+    with _db_lock:
+        with get_db() as conn:
+            conn.execute(
+                "INSERT INTO messages (chat_id, role, content, created_at) VALUES (?, ?, ?, ?)",
+                (chat_id, role, content, now)
+            )
+            conn.execute(
+                "UPDATE chats SET updated_at=? WHERE id=?",
+                (now, chat_id)
+            )
+            # Авто-заголовок: первое сообщение пользователя
+            row = conn.execute(
+                "SELECT title FROM chats WHERE id=?", (chat_id,)
+            ).fetchone()
+            if row and row["title"] == "Новый чат" and role == "user":
+                title = content[:60].replace("\n", " ").strip()
+                conn.execute("UPDATE chats SET title=? WHERE id=?", (title, chat_id))
+
+def list_chats(limit=50):
+    """Возвращает список чатов (новые сначала)."""
+    with get_db() as conn:
+        rows = conn.execute(
+            """SELECT c.id, c.title, c.created_at, c.updated_at,
+               COUNT(m.id) as msg_count
+               FROM chats c LEFT JOIN messages m ON c.id=m.chat_id
+               GROUP BY c.id ORDER BY c.updated_at DESC LIMIT ?""",
+            (limit,)
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+def delete_chat(chat_id):
+    """Удаляет чат и все его сообщения."""
+    with _db_lock:
+        with get_db() as conn:
+            conn.execute("DELETE FROM messages WHERE chat_id=?", (chat_id,))
+            conn.execute("DELETE FROM chats WHERE id=?", (chat_id,))
+
+def get_or_create_session_chat():
+    """Получает или создаёт chat_id для текущей Flask-сессии."""
+    if "chat_id" not in session:
+        session["chat_id"] = create_chat()
+    return session["chat_id"]
+
+def trim_messages(chat_id, max_messages=100):
+    """Оставляет только последние max_messages в чате."""
+    with _db_lock:
+        with get_db() as conn:
+            total = conn.execute(
+                "SELECT COUNT(*) FROM messages WHERE chat_id=?", (chat_id,)
+            ).fetchone()[0]
+            if total > max_messages:
+                conn.execute("""
+                    DELETE FROM messages WHERE chat_id=? AND id NOT IN (
+                        SELECT id FROM messages WHERE chat_id=?
+                        ORDER BY created_at DESC LIMIT ?
+                    )
+                """, (chat_id, chat_id, max_messages))
 
 # ---------- Админ ----------
 ADMIN_CREDENTIALS = {
     "admin": os.getenv("ADMIN_CODE", "007"),
 }
-ADMIN_SESSION_KEY = os.getenv("SESSION_SECRET", "nova-secret-key")
+ADMIN_SESSION_KEY = os.getenv("SESSION_SECRET") or os.urandom(24).hex()  # FIX: безопасный секрет
 
 # ---------- Кастомные алиасы ----------
 CUSTOM_COMMANDS_FILE = os.path.join(os.path.dirname(__file__), "custom_commands.json")
@@ -998,16 +1124,19 @@ def admin_check():
 # ========== ЧАТ ==========
 @app.route('/send', methods=['POST'])
 def send():
-    """Отправка сообщения к ИИ"""
+    """Отправка сообщения к ИИ с сохранением в БД"""
     global contents
     data = request.get_json()
     message = data.get('message', '').strip()
     reasoning = data.get('reasoning', False)
+    chat_id = data.get('chat_id') or get_or_create_session_chat()
 
     if not message:
         return jsonify({'error': 'Пустое сообщение'})
 
-    contents.append({"role": "user", "content": message})
+    # FIX: загружаем историю из БД
+    history = get_chat_history(chat_id, limit=50)
+    add_message(chat_id, "user", message)
 
     if reasoning and os.getenv("CEREBRAS_API_KEY"):
         provider = PROVIDERS["cerebras"]
@@ -1018,7 +1147,7 @@ def send():
 
     payload = {
         "model": model,
-        "messages": [{"role": "system", "content": system_prompt}] + contents,
+        "messages": [{"role": "system", "content": system_prompt}] + history + [{"role": "user", "content": message}],
         "temperature": 0.7,
         "max_tokens": 1000000,
     }
@@ -1027,15 +1156,16 @@ def send():
         provider["url"], payload, provider["headers"].copy(), timeout=90
     )
     if error:
-        if contents and contents[-1]["role"] == "user":
-            contents.pop()
         return jsonify({'error': error})
 
     reply = data_resp["choices"][0]["message"]["content"]
-    contents.append({"role": "assistant", "content": reply})
-    if len(contents) > 20:
-        contents = contents[-20:]
-    return jsonify({'reply': reply})
+    add_message(chat_id, "assistant", reply)
+    trim_messages(chat_id, max_messages=100)
+
+    # Совместимость: обновляем contents для других endpoint'ов
+    contents = get_chat_history(chat_id, limit=20)
+
+    return jsonify({'reply': reply, 'chat_id': chat_id})
 
 
 @app.route('/send_stream', methods=['POST'])
@@ -2061,6 +2191,60 @@ def composio_actions():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
+
+# ========== API ЧАТОВ (ПАМЯТЬ) ==========
+
+@app.route('/api/chats', methods=['GET'])
+def api_list_chats():
+    """Список всех чатов пользователя."""
+    chats = list_chats(limit=100)
+    return jsonify({'chats': chats})
+
+@app.route('/api/chats', methods=['POST'])
+def api_create_chat():
+    """Создать новый чат."""
+    data = request.get_json() or {}
+    title = data.get('title', 'Новый чат')
+    chat_id = create_chat(title)
+    session['chat_id'] = chat_id
+    return jsonify({'chat_id': chat_id, 'title': title})
+
+@app.route('/api/chats/<chat_id>', methods=['GET'])
+def api_get_chat(chat_id):
+    """Получить историю сообщений чата."""
+    messages = get_chat_history(chat_id, limit=200)
+    return jsonify({'chat_id': chat_id, 'messages': messages})
+
+@app.route('/api/chats/<chat_id>', methods=['DELETE'])
+def api_delete_chat(chat_id):
+    """Удалить чат."""
+    delete_chat(chat_id)
+    if session.get('chat_id') == chat_id:
+        session.pop('chat_id', None)
+    return jsonify({'success': True})
+
+@app.route('/api/chats/<chat_id>/switch', methods=['POST'])
+def api_switch_chat(chat_id):
+    """Переключиться на другой чат."""
+    global contents
+    session['chat_id'] = chat_id
+    contents = get_chat_history(chat_id, limit=20)
+    return jsonify({'success': True, 'chat_id': chat_id})
+
+@app.route('/api/chats/current', methods=['GET'])
+def api_current_chat():
+    """Текущий активный чат и его история."""
+    chat_id = get_or_create_session_chat()
+    messages = get_chat_history(chat_id, limit=200)
+    return jsonify({'chat_id': chat_id, 'messages': messages})
+
+@app.route('/api/chats/clear', methods=['POST'])
+def api_clear_current_chat():
+    """Очистить текущий чат (создаёт новый)."""
+    global contents
+    session['chat_id'] = create_chat()
+    contents = []
+    return jsonify({'success': True, 'new_chat_id': session['chat_id']})
 
 # ========== ЗАПУСК ==========
 
