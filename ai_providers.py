@@ -243,60 +243,125 @@ def provider_api_headers(provider):
     key = os.getenv("OPENAI_COMPATIBLE_KEY") or os.getenv("OPENAI_API_KEY") or "ollama"
     return {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
 
+def _local_model_fallback():
+    """Резервный каталог для локального OpenAI-compatible сервера.
+    Эти записи не являются отдельными облачными моделями: они представляют
+    загруженную локально модель, когда /v1/models временно недоступен.
+    """
+    return [
+        normalize_model({
+            "id": os.getenv("LOCAL_MODEL_ID", "local-llama"),
+            "name": os.getenv("LOCAL_MODEL_NAME", "Local Llama (llama.cpp)"),
+            "description": "Локальная модель через llama-server / OpenAI-compatible API.",
+            "context_length": int(os.getenv("LOCAL_MODEL_CONTEXT", "4096")),
+            "pricing": {"prompt": "0", "completion": "0"},
+        }, "openai_compatible"),
+        normalize_model({
+            "id": "llama.cpp",
+            "name": "Llama.cpp Local",
+            "description": "Резервная запись для локального llama-server.",
+            "context_length": 4096,
+            "pricing": {"prompt": "0", "completion": "0"},
+        }, "openai_compatible"),
+    ]
+
+def _local_catalog_urls():
+    """Возвращает возможные /models endpoints для llama-server и совместимых API."""
+    configured = (
+        os.getenv("OPENAI_COMPATIBLE_URL")
+        or os.getenv("OPENAI_BASE_URL")
+        or "http://127.0.0.1:8080/v1"
+    ).rstrip("/")
+    candidates = []
+    for suffix in ("/models", "/v1/models"):
+        if configured.endswith("/chat/completions"):
+            base = configured[:-len("/chat/completions")].rstrip("/")
+            candidates.append(base + suffix if suffix != "/models" else base + "/models")
+        elif configured.endswith("/models"):
+            candidates.append(configured)
+        else:
+            candidates.append(configured + suffix)
+    # Deduplicate while preserving order.
+    return list(dict.fromkeys(candidates))
+
 def fetch_available_models(provider, force=False):
     from config import PROVIDERS, MODEL_CACHE
     if not force and provider in MODEL_CACHE:
         return MODEL_CACHE[provider]
+
     if provider == "openrouter":
-        url = "https://openrouter.ai/api/v1/models"
+        urls = ["https://openrouter.ai/api/v1/models"]
     elif provider == "google_ai_studio":
         if not (os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_AI_STUDIO_KEY")):
-            MODEL_ERRORS[provider] = "GEMINI_API_KEY не найден в .env"; return []
-        url = "https://generativelanguage.googleapis.com/v1beta/models"
+            MODEL_ERRORS[provider] = "GEMINI_API_KEY не найден в .env"
+            return []
+        urls = ["https://generativelanguage.googleapis.com/v1beta/models"]
     elif provider == "groq":
-        url = "https://api.groq.com/openai/v1/models"
+        urls = ["https://api.groq.com/openai/v1/models"]
     elif provider == "cerebras":
-        url = "https://api.cerebras.ai/v1/models"
+        urls = ["https://api.cerebras.ai/v1/models"]
     elif provider == "openai_compatible":
-        # llama-server, Ollama, LM Studio, vLLM, LocalAI and other
-        # OpenAI-compatible runtimes expose their model catalog at /v1/models.
-        base_url = PROVIDERS[provider].get("url", "")
-        url = base_url.replace("/chat/completions", "/models").rstrip("/")
-        if not url.endswith("/models"):
-            url = url.rstrip("/") + "/v1/models"
+        # llama-server, Ollama, LM Studio, vLLM, LocalAI и другие
+        # OpenAI-compatible runtimes обычно отдают каталог через /v1/models.
+        urls = _local_catalog_urls()
     else:
         return [normalize_model(m, provider) for m in PROVIDERS[provider]["models"]]
+
     headers = provider_api_headers(provider)
     if not headers:
         return []
-    try:
-        resp = requests.get(url, headers=headers, timeout=20)
-        resp.raise_for_status()
-        if provider == "google_ai_studio":
-            raw = resp.json().get("models", []); models = []
-            for m in raw:
-                mid = str(m.get("name","")).removeprefix("models/")
-                if mid and "generateContent" in (m.get("supportedGenerationMethods") or []):
-                    models.append(normalize_model({"id": mid, "name": m.get("displayName") or mid,
-                        "description": m.get("description",""), "context_length": m.get("inputTokenLimit",0),
-                        "pricing": {"prompt":"0","completion":"0"}}, provider))
-        else:
-            raw = resp.json().get("data", [])
-            models = [normalize_model(m, provider) for m in raw if m.get("id")]
-        MODEL_CACHE[provider] = models
-        MODEL_ERRORS.pop(provider, None)
-        return models
-    except (requests.RequestException, ValueError, TypeError) as exc:
-        # Keep the settings page usable when a provider's catalog endpoint is
-        # temporarily unavailable. The configured built-in models are still
-        # valid choices and the error remains visible in MODEL_ERRORS.
-        print(f"[ai_providers] Model catalog error ({provider}): {exc}")
-        MODEL_ERRORS[provider] = str(exc)
-        fallback = [normalize_model(m, provider) for m in PROVIDERS.get(provider, {}).get("models", []) if m.get("id")]
-        if fallback:
-            MODEL_CACHE[provider] = fallback
-            return fallback
-        return []
+
+    last_error = None
+    for url in urls:
+        try:
+            resp = requests.get(url, headers=headers, timeout=8)
+            resp.raise_for_status()
+            if provider == "google_ai_studio":
+                raw = resp.json().get("models", [])
+                models = []
+                for m in raw:
+                    mid = str(m.get("name", "")).removeprefix("models/")
+                    if mid and "generateContent" in (m.get("supportedGenerationMethods") or []):
+                        models.append(normalize_model({
+                            "id": mid,
+                            "name": m.get("displayName") or mid,
+                            "description": m.get("description", ""),
+                            "context_length": m.get("inputTokenLimit", 0),
+                            "pricing": {"prompt": "0", "completion": "0"},
+                        }, provider))
+            else:
+                raw = resp.json().get("data", [])
+                models = [normalize_model(m, provider) for m in raw if m.get("id")]
+
+            if models:
+                MODEL_CACHE[provider] = models
+                MODEL_ERRORS.pop(provider, None)
+                return models
+
+            last_error = f"{url}: каталог пуст"
+        except (requests.RequestException, ValueError, TypeError) as exc:
+            last_error = f"{url}: {exc}"
+            if provider != "openai_compatible":
+                break
+
+    print(f"[ai_providers] Model catalog error ({provider}): {last_error}")
+    MODEL_ERRORS[provider] = last_error or "Каталог моделей недоступен"
+
+    # Local provider must remain selectable even if its catalog endpoint
+    # is unavailable. The selected model is sent to the same chat endpoint.
+    if provider == "openai_compatible":
+        fallback = _local_model_fallback()
+    else:
+        fallback = [
+            normalize_model(m, provider)
+            for m in PROVIDERS.get(provider, {}).get("models", [])
+            if m.get("id")
+        ]
+
+    if fallback:
+        MODEL_CACHE[provider] = fallback
+        return fallback
+    return []
 
 def provider_status():
     from groq_rotation import GROQ_KEYS
