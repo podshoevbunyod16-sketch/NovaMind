@@ -1,12 +1,17 @@
 """
 routes/media.py — Загрузка файлов, изображений, TTS, STT, видео
 """
-from flask import Blueprint, request, jsonify, send_from_directory, session
+from flask import Blueprint, request, jsonify, send_from_directory, send_file, session
 import os
 import uuid
 import mimetypes
+import base64
+import zipfile
+import xml.etree.ElementTree as ET
+import requests
 from ai_providers import groq_request_with_rotation
 from groq_rotation import get_groq_key
+import config
 
 media_bp = Blueprint("media", __name__)
 
@@ -27,242 +32,225 @@ def generated_image():
 
 # ========== ЗАГРУЗКА ФАЙЛОВ ==========
 
+
 @media_bp.route('/upload_image', methods=['POST'])
 def upload_image():
-    """Загрузка и анализ изображения через Groq Vision"""
-    global contents
-
-    if 'image' not in request.files:
-        return jsonify({'error': 'Нет файла'}), 400
-
-    file = request.files['image']
-    if file.filename == '':
-        return jsonify({'error': 'Файл не выбран'}), 400
-
-    user_desc = request.form.get('description', '').strip()
-    if not user_desc:
-        user_desc = 'Подробно опиши что изображено на картинке. Опиши объекты, цвета, текст если есть, настроение и все детали.'
-
-    upload_dir = os.path.join(os.path.dirname(__file__), "uploads")
-    os.makedirs(upload_dir, exist_ok=True)
-
-    import base64 as b64
-    filename = file.filename
-    filepath = os.path.join(upload_dir, filename)
-    file.save(filepath)
-
-    try:
-        with open(filepath, "rb") as f:
-            image_data = b64.b64encode(f.read()).decode('utf-8')
-
-        mime_type = "image/jpeg"
-        if filename.lower().endswith(".png"):
-            mime_type = "image/png"
-        elif filename.lower().endswith(".webp"):
-            mime_type = "image/webp"
-        elif filename.lower().endswith(".gif"):
-            mime_type = "image/gif"
-
-        data_url = f"data:{mime_type};base64,{image_data}"
-
-        groq_key = os.getenv("GROQ_API_KEY", "")
-        if not groq_key:
-            return jsonify({'error': 'GROQ_API_KEY не задан в .env'})
-
-        headers = {
-            "Authorization": f"Bearer {groq_key}",
-            "Content-Type": "application/json"
-        }
-        payload = {
-            "model": "meta-llama/llama-4-scout-17b-16e-instruct",
-            "messages": [
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": user_desc},
-                        {"type": "image_url", "image_url": {"url": data_url}}
-                    ]
-                }
-            ],
-            "max_tokens": 1500
-        }
-        resp = requests.post(
-            "https://api.groq.com/openai/v1/chat/completions",
-            headers=headers,
-            json=payload,
-            timeout=30
-        )
-        resp.raise_for_status()
-        description = resp.json()["choices"][0]["message"]["content"]
-
-        contents.append({"role": "user", "content": f"[Изображение: {filename}] {user_desc}"})
-        contents.append({"role": "assistant", "content": description})
-        if len(contents) > 20:
-            contents = contents[-20:]
-
-        return jsonify({
-            'result': f'''📷 **Анализ изображения {filename} (Groq Vision):**
-
-{description}'''
-        })
-
-    except Exception as e:
-        print(f"upload_image error: {e}")
-        return jsonify({'error': f'Ошибка анализа изображения: {str(e)}'})
-
+    return analyze_attachment()
 
 @media_bp.route('/upload_file', methods=['POST'])
 def upload_file():
-    """Загрузка файла + анализ через Groq или Cerebras"""
+    return analyze_attachment()
+
+@media_bp.route('/api/attachments/analyze', methods=['POST'])
+def analyze_attachment():
+    """Universal analyzer for images and common documents."""
     global contents
-
-    if 'file' not in request.files:
-        return jsonify({'error': 'Нет файла'}), 400
-
-    file = request.files['file']
-    if file.filename == '':
+    uploaded = request.files.get('file') or request.files.get('image')
+    if not uploaded or not uploaded.filename:
         return jsonify({'error': 'Файл не выбран'}), 400
 
-    user_desc = request.form.get('description', '').strip()
+    filename = os.path.basename(uploaded.filename)
+    ext = os.path.splitext(filename)[1].lower()
+    content_type = uploaded.mimetype or mimetypes.guess_type(filename)[0] or 'application/octet-stream'
+    user_desc = (request.form.get('description') or '').strip()
 
     upload_dir = os.path.join(os.path.dirname(__file__), "uploads")
     os.makedirs(upload_dir, exist_ok=True)
-
-    filename = file.filename
-    filepath = os.path.join(upload_dir, filename)
-    file.save(filepath)
-
-    text_extensions = ['.txt', '.json', '.csv', '.py', '.js', '.html', '.css', '.md', '.xml', '.yaml', '.yml', '.log', '.ini', '.cfg']
-    ext = os.path.splitext(filename)[1].lower()
-
-    if ext not in text_extensions:
-        return jsonify({
-            'result': f'''⚠️ Формат {ext} не поддерживается.
-
-Поддерживаются: txt, json, csv, py, js, html, css, md, xml, yaml, log'''
-        })
+    filepath = os.path.join(upload_dir, f"{uuid.uuid4().hex}_{filename}")
+    uploaded.save(filepath)
 
     try:
-        with open(filepath, "r", encoding="utf-8", errors="ignore") as f:
-            file_content = f.read()[:5000]
-    except Exception as e:
-        return jsonify({'error': f'Ошибка чтения файла: {str(e)}'})
+        if os.path.getsize(filepath) > 25 * 1024 * 1024:
+            return jsonify({'error': 'Файл слишком большой. Максимальный размер анализа — 25 МБ.'}), 413
 
-    if not file_content.strip():
-        return jsonify({'result': f'⚠️ Файл {filename} пустой.'})
+        is_image = content_type.startswith('image/') or ext in {'.jpg','.jpeg','.png','.webp','.gif','.bmp'}
+        if is_image:
+            return _analyze_image_file(filepath, filename, content_type, user_desc)
 
-    if not user_desc:
-        if ext == '.py':
-            user_desc = 'Проанализируй этот Python код: объясни что он делает, найди ошибки и предложи улучшения.'
-        elif ext in ['.js', '.ts']:
-            user_desc = 'Проанализируй этот JavaScript код: объясни структуру, найди проблемы.'
-        elif ext == '.html':
-            user_desc = 'Проанализируй эту HTML страницу: опиши структуру и найди проблемы.'
-        elif ext == '.css':
-            user_desc = 'Проанализируй этот CSS файл: опиши стили и найди проблемы.'
-        elif ext == '.json':
-            user_desc = 'Опиши структуру этого JSON и объясни что в нём хранится.'
-        elif ext == '.csv':
-            user_desc = 'Проанализируй эти CSV данные: опиши колонки и содержимое.'
-        elif ext == '.md':
-            user_desc = 'Сделай резюме этого Markdown документа и выдели главное.'
-        else:
-            user_desc = 'Подробно проанализируй содержимое этого файла и объясни что в нём.'
+        text = _extract_attachment_text(filepath, ext, content_type)
+        if not text.strip():
+            return jsonify({'error': f'Файл {filename} пустой или из него не удалось извлечь текст.'}), 415
 
-    analysis_prompt = f"""Пользователь загрузил файл: {filename}
-
-Задача: {user_desc}
-
-Содержимое файла:
-{file_content}
-
-Отвечай на русском языке. Используй Markdown форматирование."""
-
-    groq_error = None
-    try:
-        provider = PROVIDERS[current_provider]
-        payload = {
-            "model": current_model,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": analysis_prompt}
-            ],
-            "temperature": 0.3,
-            "max_tokens": 3000,
-        }
-        resp = requests.post(
-            provider["url"],
-            json=payload,
-            headers=provider["headers"],
-            timeout=60
+        instruction = user_desc or _default_file_instruction(ext)
+        prompt = (
+            f"Файл: {filename}\n\nЗадача: {instruction}\n\n"
+            f"Содержимое:\n{text[:120000]}\n\n"
+            "Отвечай на русском языке в Markdown. Не выдумывай данные. "
+            "Для кода указывай конкретные ошибки и исправления."
         )
-        resp.raise_for_status()
-        reply = resp.json()["choices"][0]["message"]["content"]
-
-        contents.append({"role": "user", "content": f"[Файл: {filename}] {user_desc}"})
-        contents.append({"role": "assistant", "content": reply})
-        if len(contents) > 20:
-            contents = contents[-20:]
+        reply, error = _call_selected_text_ai(prompt)
+        if error:
+            return jsonify({'error': error}), 502
 
         return jsonify({
-            'result': f'''📁 **Анализ файла {filename}:**
-
-{reply}'''
+            'success': True,
+            'filename': filename,
+            'type': content_type,
+            'result': f'📁 **Анализ файла {filename}:**\n\n{reply}'
         })
+    except Exception as exc:
+        print(f"[attachments] error: {exc}")
+        return jsonify({'error': f'Ошибка обработки файла: {exc}'}), 500
 
-    except Exception as e1:
-        groq_error = str(e1)
-        print(f"Groq upload_file error: {e1}")
 
-    try:
-        cerebras_key = os.getenv("CEREBRAS_API_KEY", "")
-        if not cerebras_key:
-            raise Exception("CEREBRAS_API_KEY не задан")
+def _default_file_instruction(ext):
+    if ext == '.py':
+        return 'Проанализируй Python-код, объясни его работу, найди ошибки и предложи улучшения.'
+    if ext in {'.js','.ts','.jsx','.tsx'}:
+        return 'Проанализируй JavaScript/TypeScript-код, найди ошибки и предложи улучшения.'
+    if ext in {'.html','.css'}:
+        return 'Проанализируй веб-файл, объясни структуру и найди проблемы.'
+    if ext == '.json':
+        return 'Проанализируй структуру JSON и объясни важные данные.'
+    if ext in {'.csv','.tsv'}:
+        return 'Проанализируй таблицу, колонки, данные и важные закономерности.'
+    if ext == '.md':
+        return 'Сделай структурированное резюме документа и выдели главное.'
+    return 'Подробно проанализируй файл и объясни его содержимое.'
 
-        cerebras_headers = {
-            "Authorization": f"Bearer {cerebras_key}",
-            "Content-Type": "application/json"
+
+def _extract_attachment_text(filepath, ext, content_type):
+    text_exts = {
+        '.txt','.json','.csv','.tsv','.py','.js','.ts','.jsx','.tsx','.html','.htm',
+        '.css','.md','.xml','.yaml','.yml','.log','.ini','.cfg','.conf','.sql',
+        '.sh','.bash','.java','.c','.cpp','.h','.hpp','.go','.rs','.php'
+    }
+    if ext in text_exts or content_type.startswith('text/'):
+        with open(filepath, 'r', encoding='utf-8', errors='replace') as f:
+            return f.read()
+
+    if ext == '.pdf':
+        try:
+            from pypdf import PdfReader
+            return '\n\n'.join((page.extract_text() or '') for page in PdfReader(filepath).pages)
+        except ImportError:
+            raise RuntimeError('PDF: зависимость pypdf не установлена.')
+
+    if ext == '.docx':
+        try:
+            from docx import Document
+            doc = Document(filepath)
+            parts = [p.text for p in doc.paragraphs if p.text.strip()]
+            for table in doc.tables:
+                for row in table.rows:
+                    parts.append(' | '.join(cell.text.strip() for cell in row.cells))
+            return '\n'.join(parts)
+        except ImportError:
+            raise RuntimeError('DOCX: зависимость python-docx не установлена.')
+
+    if ext in {'.xlsx','.xlsm'}:
+        try:
+            from openpyxl import load_workbook
+            wb = load_workbook(filepath, read_only=True, data_only=True)
+            parts = []
+            for ws in wb.worksheets:
+                parts.append(f'### Лист: {ws.title}')
+                for row in ws.iter_rows(values_only=True):
+                    values = [str(v) if v is not None else '' for v in row]
+                    if any(values):
+                        parts.append(' | '.join(values))
+            return '\n'.join(parts)
+        except ImportError:
+            raise RuntimeError('XLSX: зависимость openpyxl не установлена.')
+
+    if ext == '.pptx':
+        with zipfile.ZipFile(filepath) as z:
+            parts = []
+            ns = {'a': 'http://schemas.openxmlformats.org/drawingml/2006/main'}
+            for name in sorted(z.namelist()):
+                if name.startswith('ppt/slides/slide') and name.endswith('.xml'):
+                    root = ET.fromstring(z.read(name))
+                    parts.extend(t.text for t in root.findall('.//a:t', ns) if t.text)
+            return '\n'.join(parts)
+
+    raise RuntimeError(
+        f'Формат {ext or content_type} не поддерживается. '
+        'Поддерживаются изображения, TXT/код/JSON/CSV, PDF, DOCX, XLSX/XLSM и PPTX.'
+    )
+
+
+def _analyze_image_file(filepath, filename, content_type, user_desc):
+    instruction = user_desc or 'Подробно опиши изображение: объекты, текст, структуру и важные детали.'
+    with open(filepath, 'rb') as f:
+        encoded = base64.b64encode(f.read()).decode('ascii')
+
+    # Gemini Vision: основной путь.
+    gemini_key = (os.getenv('GEMINI_API_KEY') or os.getenv('GOOGLE_AI_STUDIO_KEY') or '').strip()
+    if gemini_key:
+        model = os.getenv('VISION_MODEL', 'gemini-2.5-flash')
+        body = {
+            'contents': [{'role': 'user', 'parts': [
+                {'text': instruction},
+                {'inline_data': {'mime_type': content_type, 'data': encoded}}
+            ]}],
+            'generationConfig': {'temperature': 0.2, 'maxOutputTokens': 4096}
         }
+        try:
+            r = requests.post(
+                f'https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent',
+                params={'key': gemini_key}, json=body,
+                headers={'Content-Type': 'application/json'}, timeout=120
+            )
+            if r.ok:
+                parts = []
+                for candidate in r.json().get('candidates', []):
+                    for part in (candidate.get('content') or {}).get('parts', []):
+                        if part.get('text'):
+                            parts.append(part['text'])
+                if parts:
+                    return jsonify({'success': True, 'filename': filename,
+                        'result': f'📷 **Анализ изображения {filename} (Google AI Studio):**\n\n{"".join(parts)}'})
+            print(f"[attachments] Gemini Vision HTTP {r.status_code}: {r.text[:500]}")
+        except requests.RequestException as exc:
+            print(f"[attachments] Gemini Vision error: {exc}")
+
+    # Groq Vision fallback.
+    groq_key = get_groq_key()
+    if groq_key:
         payload = {
-            "model": "qwen-3-235b-a22b-instruct-2507",
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": analysis_prompt}
-            ],
-            "temperature": 0.3,
-            "max_tokens": 3000,
+            'model': 'meta-llama/llama-4-scout-17b-16e-instruct',
+            'messages': [{'role':'user','content':[
+                {'type':'text','text':instruction},
+                {'type':'image_url','image_url':{'url':f'data:{content_type};base64,{encoded}'}}
+            ]}],
+            'max_tokens': 4096
         }
-        resp = requests.post(
-            "https://api.cerebras.ai/v1/chat/completions",
-            json=payload,
-            headers=cerebras_headers,
-            timeout=60
-        )
-        resp.raise_for_status()
-        reply = resp.json()["choices"][0]["message"]["content"]
+        try:
+            r = requests.post('https://api.groq.com/openai/v1/chat/completions',
+                headers={'Authorization':f'Bearer {groq_key}','Content-Type':'application/json'},
+                json=payload, timeout=120)
+            r.raise_for_status()
+            reply = r.json()['choices'][0]['message']['content']
+            return jsonify({'success': True, 'filename': filename,
+                'result': f'📷 **Анализ изображения {filename} (Vision):**\n\n{reply}'})
+        except Exception as exc:
+            print(f"[attachments] Groq Vision error: {exc}")
 
-        contents.append({"role": "user", "content": f"[Файл: {filename}] {user_desc}"})
-        contents.append({"role": "assistant", "content": reply})
-        if len(contents) > 20:
-            contents = contents[-20:]
+    return jsonify({'error': 'Нет доступного Vision-провайдера. Добавьте GEMINI_API_KEY/GOOGLE_AI_STUDIO_KEY или GROQ API key.'}), 503
 
-        return jsonify({
-            'result': f'''📁 **Анализ файла {filename} (Cerebras):**
 
-{reply}'''
-        })
-
-    except Exception as e2:
-        print(f"Cerebras upload_file error: {e2}")
-        return jsonify({
-            'result': f'''⚠️ AI недоступен (Groq: {groq_error}, Cerebras: {str(e2)})
-
-**Содержимое файла {filename}:**
-
-```
-{file_content[:2000]}
-```'''
-        })
+def _call_selected_text_ai(prompt):
+    provider = config.PROVIDERS.get(config.current_provider)
+    if not provider:
+        return None, f'Неизвестный AI-провайдер: {config.current_provider}'
+    payload = {
+        'model': config.current_model,
+        'messages': [
+            {'role': 'system', 'content': config.system_prompt},
+            {'role': 'user', 'content': prompt}
+        ],
+        'temperature': 0.3,
+        'max_tokens': min(provider.get('max_tokens', 8192), 8192)
+    }
+    data, error = groq_request_with_rotation(
+        provider.get('url',''), payload, provider.get('headers',{}).copy(), timeout=120
+    )
+    if error:
+        return None, error
+    try:
+        return data['choices'][0]['message']['content'], None
+    except (KeyError, IndexError, TypeError):
+        return None, 'AI вернул неожиданный формат ответа.'
 
 
 # ========== МУЛЬТИМЕДИА ==========
