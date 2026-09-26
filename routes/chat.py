@@ -86,7 +86,7 @@ def send_stream():
         model = "zai-glm-4.7"
     else:
         provider = config.PROVIDERS[config.current_provider]
-        model = current_model
+        model = config.current_model
 
     # FIX: загружаем историю из БД для send_stream тоже
     _chat_id_stream = get_or_create_session_chat()
