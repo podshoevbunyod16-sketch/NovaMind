@@ -118,3 +118,85 @@ $('refreshAll').addEventListener('click', () => loadProviders().catch((error) =>
 $('refreshModels').addEventListener('click', () => loadModels(true).catch((error) => showToast(error.message, 'error')));
 ['modelSearch', 'priceFilter', 'sortFilter', 'modalityFilter', 'contextFilter'].forEach((id) => $(id).addEventListener('input', renderModels));
 loadProviders().catch((error) => { setCatalogStatus(error.message, 'error-text'); showToast(error.message, 'error'); });
+
+/* ========== GENERATIVE MEDIA CATALOG ========== */
+const mediaState = {type:'image', models:[]};
+function mediaPriceLabel(model) {
+  if (model.pricing_status === 'free') return 'FREE';
+  if (model.pricing_status === 'free-tier') return 'FREE TIER';
+  if (model.pricing_status === 'paid') return 'PAID';
+  return model.free ? 'FREE' : 'PRICE UNKNOWN';
+}
+function mediaCard(model) {
+  const configured = model.configured !== false;
+  return `<article class="model-card">
+    <div class="model-card-top">
+      <span class="model-badge ${model.free ? 'free' : 'paid'}">${escapeHtml(mediaPriceLabel(model))}</span>
+      <span class="model-badge vision">${escapeHtml((model.media_types || []).join(', ').toUpperCase())}</span>
+      <span class="model-id">${escapeHtml(model.provider_name || model.provider || '')}</span>
+    </div>
+    <h3>${escapeHtml(model.name || model.id)}</h3>
+    <p><code>${escapeHtml(model.id)}</code></p>
+    <p>${escapeHtml(model.description || '')}</p>
+    <div class="model-stats">
+      <span>Цена <b>${model.free ? 'есть бесплатный тариф' : model.pricing_status === 'paid' ? 'платный' : 'не определена'}</b></span>
+      <span>API <b>${configured ? 'доступен' : 'нужен ключ'}</b></span>
+    </div>
+    <button class="select-model media-test-btn" type="button"
+      data-media-test="${escapeHtml(model.id)}" data-media-provider="${escapeHtml(model.provider)}"
+      data-media-type="${escapeHtml(mediaState.type)}">
+      ${configured ? 'Проверить доступность' : 'Настроить ключ'}
+    </button>
+  </article>`;
+}
+async function loadMediaModels(force=false) {
+  const grid = $('mediaGrid');
+  if (!grid) return;
+  $('mediaStatus').textContent = 'Проверяю актуальный каталог…';
+  grid.innerHTML = '<div class="empty-card loading-card">Проверяю провайдеры и цены…</div>';
+  try {
+    const response = await fetch(`/api/settings/media-models?type=${encodeURIComponent(mediaState.type)}${force ? '&refresh=1' : ''}`);
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || 'Не удалось получить media-каталог');
+    mediaState.models = data.models || [];
+    $('mediaCount').textContent = `${mediaState.models.length} моделей`;
+    $('mediaStatus').textContent = mediaState.models.length
+      ? 'Цены определены по данным провайдера/официального каталога'
+      : 'Для этого типа моделей ничего не найдено';
+    grid.innerHTML = mediaState.models.length
+      ? mediaState.models.map(mediaCard).join('')
+      : '<div class="empty-card">Модели не найдены. Подключите OpenRouter или Google AI Studio.</div>';
+    document.querySelectorAll('[data-media-test]').forEach(btn => btn.addEventListener('click', () => testMediaModel(btn)));
+  } catch (error) {
+    $('mediaStatus').textContent = error.message;
+    grid.innerHTML = `<div class="empty-card error-card">${escapeHtml(error.message)}</div>`;
+  }
+}
+async function testMediaModel(button) {
+  button.disabled = true;
+  const old = button.textContent;
+  button.textContent = 'Проверяю…';
+  try {
+    const qs = new URLSearchParams({type:button.dataset.mediaType, provider:button.dataset.mediaProvider, model:button.dataset.mediaTest});
+    const response = await fetch('/api/settings/media-test?' + qs.toString());
+    const data = await response.json();
+    if (data.ok) showToast(`✓ ${data.model}: API доступен · ${data.pricing === 'paid' ? 'платный' : data.pricing === 'free-tier' ? 'есть бесплатный тариф' : 'бесплатно'}`, 'success');
+    else showToast(data.error || 'Проверка не пройдена', 'error');
+  } catch (error) {
+    showToast('Ошибка проверки: ' + error.message, 'error');
+  } finally {
+    button.disabled = false;
+    button.textContent = old;
+  }
+}
+function initMediaCatalog() {
+  document.querySelectorAll('[data-media-type]').forEach(tab => tab.addEventListener('click', () => {
+    mediaState.type = tab.dataset.mediaType;
+    document.querySelectorAll('[data-media-type]').forEach(x => x.classList.toggle('active', x === tab));
+    loadMediaModels(false);
+  }));
+  $('refreshMedia')?.addEventListener('click', () => loadMediaModels(true));
+  loadMediaModels(false);
+}
+if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', initMediaCatalog);
+else initMediaCatalog();
