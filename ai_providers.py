@@ -240,7 +240,8 @@ def provider_api_headers(provider):
     if provider == "google_ai_studio":
         key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_AI_STUDIO_KEY") or ""
         return {"x-goog-api-key": key, "Content-Type": "application/json"} if key else None
-    return {"Authorization": f"Bearer {os.getenv('OPENAI_COMPATIBLE_KEY','ollama')}", "Content-Type": "application/json"}
+    key = os.getenv("OPENAI_COMPATIBLE_KEY") or os.getenv("OPENAI_API_KEY") or "ollama"
+    return {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
 
 def fetch_available_models(provider, force=False):
     from config import PROVIDERS, MODEL_CACHE
