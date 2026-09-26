@@ -256,6 +256,13 @@ def fetch_available_models(provider, force=False):
         url = "https://api.groq.com/openai/v1/models"
     elif provider == "cerebras":
         url = "https://api.cerebras.ai/v1/models"
+    elif provider == "openai_compatible":
+        # llama-server, Ollama, LM Studio, vLLM, LocalAI and other
+        # OpenAI-compatible runtimes expose their model catalog at /v1/models.
+        base_url = PROVIDERS[provider].get("url", "")
+        url = base_url.replace("/chat/completions", "/models").rstrip("/")
+        if not url.endswith("/models"):
+            url = url.rstrip("/") + "/v1/models"
     else:
         return [normalize_model(m, provider) for m in PROVIDERS[provider]["models"]]
     headers = provider_api_headers(provider)
