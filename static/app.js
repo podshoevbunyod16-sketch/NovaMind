@@ -381,8 +381,17 @@ async function streamMessage(message) {
   });
 
   if (!response.ok) {
+    const raw = await response.text();
     let details = `HTTP ${response.status}`;
-    try { details = (await response.json()).error || details; } catch (_) {}
+    try {
+      const data = JSON.parse(raw);
+      details = data.error || data.message || details;
+    } catch (_) {
+      // Flask/proxy can return an HTML error page. Never let JSON.parse/html
+      // errors hide the real HTTP failure.
+      const plain = raw.replace(/<[^>]*>/g, ' ').replace(/\\s+/g, ' ').trim();
+      if (plain) details = `${details}: ${plain.slice(0, 500)}`;
+    }
     throw new Error(details);
   }
   if (!response.body) throw new Error('Браузер не поддерживает потоковый ответ');
