@@ -9,7 +9,8 @@ from database import (get_chat_history, add_message, trim_messages,
                       get_or_create_session_chat, create_chat,
                       list_chats, delete_chat)
 from ai_providers import gemini_stream_request, gemini_request
-from groq_rotation import groq_request_with_rotation, get_groq_key, GROQ_KEYS
+from ai_providers import groq_request_with_rotation
+from groq_rotation import get_groq_key, GROQ_KEYS
 
 chat_bp = Blueprint("chat", __name__)
 
