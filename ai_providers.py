@@ -1,10 +1,11 @@
 """
 ai_providers.py — Запросы к AI провайдерам (Groq, Gemini, OpenAI-compatible)
 """
+import os
 import json
 import time
 import requests
-from groq_rotation import groq_request_with_rotation, get_groq_key, mark_groq_key_exhausted
+from groq_rotation import get_groq_key, mark_groq_key_exhausted
 
 def openai_compatible_request(url, payload, headers, timeout=90, max_retries=2):
     """Запрос к любому OpenAI-compatible серверу: Ollama, LM Studio, vLLM или облачному endpoint."""
