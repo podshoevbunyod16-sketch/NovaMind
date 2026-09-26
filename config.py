@@ -80,7 +80,7 @@ PROVIDERS = {
         ]
     },
     "openai_compatible": {
-        "url": os.getenv("OPENAI_COMPATIBLE_URL", "http://localhost:11434/v1/chat/completions"),
+        "url": (os.getenv("OPENAI_COMPATIBLE_URL") or os.getenv("OPENAI_BASE_URL") or "http://127.0.0.1:8080/v1/chat/completions"),
         "max_tokens": 8192,
         "headers": {
             "Authorization": f"Bearer {os.getenv('OPENAI_COMPATIBLE_KEY', 'ollama')}",
