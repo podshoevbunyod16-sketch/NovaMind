@@ -46,7 +46,7 @@ def gemini_messages_from_openai(messages):
     return system_text,contents_out
 
 def gemini_request(model,payload,timeout=90,max_retries=2):
-    key=os.getenv("GEMINI_API_KEY","").strip()
+    key=(os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_AI_STUDIO_KEY") or "").strip()
     if not key: return None,"Google AI Studio: GEMINI_API_KEY не найден в .env"
     model_id=str(model or "").strip().removeprefix("models/")
     system_text,contents_out=gemini_messages_from_openai(payload.get("messages",[]))
@@ -238,7 +238,7 @@ def provider_api_headers(provider):
         key = os.getenv("CEREBRAS_API_KEY", "")
         return {"Authorization": f"Bearer {key}", "Content-Type": "application/json"} if key else None
     if provider == "google_ai_studio":
-        key = os.getenv("GEMINI_API_KEY", "")
+        key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_AI_STUDIO_KEY") or ""
         return {"x-goog-api-key": key, "Content-Type": "application/json"} if key else None
     return {"Authorization": f"Bearer {os.getenv('OPENAI_COMPATIBLE_KEY','ollama')}", "Content-Type": "application/json"}
 
@@ -249,7 +249,7 @@ def fetch_available_models(provider, force=False):
     if provider == "openrouter":
         url = "https://openrouter.ai/api/v1/models"
     elif provider == "google_ai_studio":
-        if not os.getenv("GEMINI_API_KEY","").strip():
+        if not (os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_AI_STUDIO_KEY")):
             MODEL_ERRORS[provider] = "GEMINI_API_KEY не найден в .env"; return []
         url = "https://generativelanguage.googleapis.com/v1beta/models"
     elif provider == "groq":
