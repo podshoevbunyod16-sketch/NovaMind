@@ -7,7 +7,8 @@ import os
 import re
 import time
 from database import get_or_create_session_chat, get_chat_history, add_message
-from groq_rotation import groq_request_with_rotation, get_groq_key
+from ai_providers import groq_request_with_rotation
+from groq_rotation import get_groq_key
 
 commands_bp = Blueprint("commands", __name__)
 
