@@ -5,7 +5,8 @@ from flask import Blueprint, request, jsonify, send_from_directory, session
 import os
 import uuid
 import mimetypes
-from groq_rotation import groq_request_with_rotation, get_groq_key
+from ai_providers import groq_request_with_rotation
+from groq_rotation import get_groq_key
 
 media_bp = Blueprint("media", __name__)
 
