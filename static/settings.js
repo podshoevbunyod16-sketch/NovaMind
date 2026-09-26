@@ -42,7 +42,7 @@ function renderProviders() {
   $('providerGrid').innerHTML = state.providers.map((provider) => `
     <button class="provider-card ${provider.id === state.activeProvider ? 'active' : ''} ${provider.configured ? '' : 'disabled'}" data-provider="${escapeHtml(provider.id)}" type="button">
       <span class="provider-mark">${provider.id === 'openrouter' ? '◈' : provider.id === 'groq' ? 'G' : provider.id === 'cerebras' ? 'C' : provider.id === 'google_ai_studio' ? '✦' : '⌘'}</span>
-      <span class="provider-copy"><strong>${escapeHtml(provider.name)}</strong><small>${provider.configured ? 'Ключ найден · каталог доступен' : 'Нет ключа в .env'}</small></span>
+      <span class="provider-copy"><strong>${escapeHtml(provider.name)}</strong><small>${provider.id === 'openai_compatible' ? 'Локальный endpoint · API ключ не обязателен' : (provider.configured ? 'Ключ найден · каталог доступен' : 'Нет ключа в .env')}</small></span>
       <span class="provider-state ${provider.configured ? 'ok' : ''}">${provider.configured ? '●' : '○'}</span>
     </button>`).join('') || '<div class="empty-card">Провайдеры не найдены</div>';
   document.querySelectorAll('.provider-card').forEach((button) => button.addEventListener('click', () => {
@@ -61,7 +61,7 @@ async function loadModels(force) {
   if (data.error) {
     setCatalogStatus(data.error, 'error-text');
     $('modelCount').textContent = '0 моделей';
-    $('modelGrid').innerHTML = `<div class="empty-card error-card">${escapeHtml(data.error)}<br><small>Проверьте ключ в .env и перезапустите сервер.</small></div>`;
+    $('modelGrid').innerHTML = `<div class="empty-card error-card">${escapeHtml(data.error)}<br><small>${state.activeProvider === 'openai_compatible' ? 'Проверьте, что llama-server запущен на 127.0.0.1:8080; резервные локальные модели всё равно доступны для выбора.' : 'Проверьте ключ в .env и перезапустите сервер.'}</small></div>`;
     return;
   }
   setCatalogStatus(`${providerName(state.activeProvider)} · каталог получен`);
