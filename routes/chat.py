@@ -1,16 +1,22 @@
 """
 routes/chat.py — Маршруты чата: /send, /send_stream, /api/chats/*, /api/history/*
 """
-from flask import Blueprint, request, jsonify, session, Response
+from flask import Blueprint, request, jsonify, session, Response, stream_with_context
 import json
 import time
 import os
+import requests
+
 from database import (get_chat_history, add_message, trim_messages,
                       get_or_create_session_chat, create_chat,
                       list_chats, delete_chat)
 from ai_providers import gemini_stream_request, gemini_request
 from ai_providers import groq_request_with_rotation
-from groq_rotation import get_groq_key, GROQ_KEYS
+from groq_rotation import get_groq_key, mark_groq_key_exhausted, GROQ_KEYS
+from config import PROVIDERS, current_provider, current_model, system_prompt
+
+# In-memory compatibility cache. Persistent chat history is stored in the database.
+contents = []
 
 chat_bp = Blueprint("chat", __name__)
 
