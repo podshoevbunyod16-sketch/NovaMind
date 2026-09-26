@@ -5,7 +5,8 @@ from flask import Blueprint, request, jsonify, session
 import requests
 import json
 import os
-from groq_rotation import groq_request_with_rotation, get_groq_key
+from ai_providers import groq_request_with_rotation
+from groq_rotation import get_groq_key
 
 search_bp = Blueprint("search", __name__)
 
