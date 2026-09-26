@@ -171,7 +171,7 @@ async function analyzeAttachment(file, kind) {
   );
   if (userDesc === null) return;
 
-  appendMessage('user', \${kind === 'image' ? '📷' : '📁'} + ' ' + file.name + (userDesc ? '\n💬 ' + userDesc : ''));
+  appendMessage('user', `${kind === 'image' ? '📷' : '📁'} ${file.name}${userDesc ? '\n💬 ' + userDesc : ''}`);
   showTyping();
 
   const formData = new FormData();
