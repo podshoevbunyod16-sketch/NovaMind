@@ -214,6 +214,19 @@ def normalize_model(model, provider):
     context = model.get("context_length") or model.get("context_window") or model.get("max_context_length") or 0
     architecture = model.get("architecture") or {}
     modality = architecture.get("modality", "text->text") if isinstance(architecture, dict) else "text->text"
+    input_modalities = architecture.get("input_modalities") if isinstance(architecture, dict) else None
+    output_modalities = architecture.get("output_modalities") if isinstance(architecture, dict) else None
+    if not input_modalities:
+        input_modalities = [str(modality).split("->")[0]] if "->" in str(modality) else ["text"]
+    if not output_modalities:
+        output_modalities = [str(modality).split("->")[-1]] if "->" in str(modality) else ["text"]
+    in_mods = [str(x).lower() for x in (input_modalities or [])]
+    out_mods = [str(x).lower() for x in (output_modalities or [])]
+    media_types = []
+    if "image" in out_mods: media_types.append("image")
+    if "audio" in out_mods: media_types.append("audio")
+    if "video" in out_mods: media_types.append("video")
+    if not media_types: media_types.append("text")
     return {
         "id": model_id, "name": name, "provider": provider,
         "provider_name": PROVIDER_LABELS.get(provider, provider),
@@ -221,6 +234,9 @@ def normalize_model(model, provider):
         "parameters_b": model.get("parameter_count") or model_size_billions(model_id, name),
         "prompt_price": prompt_price, "completion_price": completion_price,
         "free": is_free, "modality": modality,
+        "input_modalities": in_mods, "output_modalities": out_mods,
+        "media_types": media_types,
+        "pricing_status": "free" if is_free else ("paid" if prompt_price or completion_price else "unknown"),
         "created": model.get("created", 0), "description": model.get("description", ""),
     }
 
@@ -362,6 +378,43 @@ def fetch_available_models(provider, force=False):
         MODEL_CACHE[provider] = fallback
         return fallback
     return []
+
+# ---------- Генеративные media-модели ----------
+GOOGLE_MEDIA_MODELS = [
+    {"id":"gemini-3.1-flash-image","name":"Nano Banana 2","type":"image","free":False,"price":"paid","description":"Генерация и редактирование изображений."},
+    {"id":"gemini-3-pro-image","name":"Nano Banana Pro","type":"image","free":False,"price":"paid","description":"Профессиональная генерация изображений."},
+    {"id":"gemini-3.8-flash-tts","name":"Gemini 3.8 Flash TTS","type":"audio","free":True,"price":"free-tier","description":"Синтез речи из текста; есть бесплатный тариф с лимитами."},
+    {"id":"gemini-3.8-flash-lite-tts","name":"Gemini 3.8 Flash-Lite TTS","type":"audio","free":True,"price":"free-tier","description":"Экономичный TTS; есть бесплатный тариф с лимитами."},
+    {"id":"veo-3.1-generate-preview","name":"Veo 3.1","type":"video","free":False,"price":"paid","description":"Генерация видео с синхронизированным аудио; API — платный тариф."},
+    {"id":"veo-3.1-lite-generate-preview","name":"Veo 3.1 Lite","type":"video","free":False,"price":"paid","description":"Экономичная генерация и редактирование видео."},
+    {"id":"gemini-omni-1.1-flash","name":"Gemini Omni Flash","type":"video","free":False,"price":"paid","description":"Генерация и редактирование видео с нативным аудио."},
+]
+
+def media_models_catalog(media_type="all", provider="all", force=False):
+    """Возвращает модели image/audio/video с понятным статусом цены."""
+    models=[]
+    if provider in ("all", "openrouter"):
+        for m in fetch_available_models("openrouter", force=force):
+            if any(t in (m.get("media_types") or []) for t in ("image","audio","video")):
+                item=dict(m)
+                item["source_type"]="live"
+                models.append(item)
+    if provider in ("all", "google_ai_studio"):
+        configured=bool(os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_AI_STUDIO_KEY"))
+        for m in GOOGLE_MEDIA_MODELS:
+            models.append({
+                "id":m["id"], "name":m["name"], "provider":"google_ai_studio",
+                "provider_name":"Google AI Studio", "media_types":[m["type"]],
+                "free":m["free"], "pricing_status":m["price"],
+                "prompt_price":"","completion_price":"","configured":configured,
+                "description":m["description"], "context_length":0,
+                "parameters_b":0, "source_type":"official-catalog"
+            })
+    if media_type != "all":
+        models=[m for m in models if media_type in (m.get("media_types") or [])]
+    unique={}
+    for m in models: unique[(m.get("provider"),m.get("id"))]=m
+    return list(unique.values())
 
 def provider_status():
     from groq_rotation import GROQ_KEYS
