@@ -89,7 +89,10 @@ PROVIDERS = {
             "Authorization": f"Bearer {(os.getenv('OPENAI_COMPATIBLE_KEY') or os.getenv('OPENAI_API_KEY') or 'ollama')}",
             "Content-Type": "application/json",
         },
-        "models": []
+        "models": [
+            {"id": "local-llama", "name": "Local Llama (llama.cpp)", "context_length": 4096},
+            {"id": "llama.cpp", "name": "Llama.cpp Local", "context_length": 4096}
+        ]
     },
 }
 
