@@ -82,10 +82,10 @@ def send_stream():
     contents.append({"role": "user", "content": message})
 
     if reasoning and os.getenv("CEREBRAS_API_KEY"):
-        provider = PROVIDERS["cerebras"]
+        provider = config.PROVIDERS["cerebras"]
         model = "zai-glm-4.7"
     else:
-        provider = PROVIDERS[current_provider]
+        provider = config.PROVIDERS[config.current_provider]
         model = current_model
 
     # FIX: загружаем историю из БД для send_stream тоже
@@ -97,7 +97,7 @@ def send_stream():
     _provider_max = provider.get("max_tokens", 8192)
     payload = {
         "model": model,
-        "messages": [{"role": "system", "content": system_prompt}] + _history_stream + [{"role": "user", "content": message}],
+        "messages": [{"role": "system", "content": config.system_prompt}] + _history_stream + [{"role": "user", "content": message}],
         "temperature": 0.7,
         "max_tokens": _provider_max,
         "stream": True,
