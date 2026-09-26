@@ -177,11 +177,22 @@ async function testMediaModel(button) {
   const old = button.textContent;
   button.textContent = 'Проверяю…';
   try {
-    const qs = new URLSearchParams({type:button.dataset.mediaType, provider:button.dataset.mediaProvider, model:button.dataset.mediaTest});
-    const response = await fetch('/api/settings/media-test?' + qs.toString());
+    const qs = new URLSearchParams({
+      type: button.dataset.mediaType,
+      provider: button.dataset.mediaProvider,
+      refresh: '1'
+    });
+    const response = await fetch('/api/settings/media-models?' + qs.toString());
     const data = await response.json();
-    if (data.ok) showToast(`✓ ${data.model}: API доступен · ${data.pricing === 'paid' ? 'платный' : data.pricing === 'free-tier' ? 'есть бесплатный тариф' : 'бесплатно'}`, 'success');
-    else showToast(data.error || 'Проверка не пройдена', 'error');
+    const found = (data.models || []).find(m => m.id === button.dataset.mediaTest);
+    if (response.ok && found) {
+      const price = found.pricing_status === 'paid' ? 'платный'
+        : found.pricing_status === 'free-tier' ? 'есть бесплатный тариф'
+        : found.pricing_status === 'free' ? 'бесплатно' : 'цена не определена';
+      showToast(`✓ ${found.id}: каталог/API доступен · ${price}`, 'success');
+    } else {
+      showToast(data.error || 'Модель сейчас недоступна', 'error');
+    }
   } catch (error) {
     showToast('Ошибка проверки: ' + error.message, 'error');
   } finally {
