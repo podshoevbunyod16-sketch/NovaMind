@@ -185,3 +185,110 @@ def groq_request_with_rotation(url, payload, headers, timeout=90, max_retries=3)
 
     return None, "Все Groq ключи исчерпаны или недоступны"
 
+
+import re
+
+# ---------- Метки провайдеров ----------
+MODEL_ERRORS: dict = {}
+PROVIDER_LABELS = {
+    "groq":             "Groq",
+    "cerebras":         "Cerebras",
+    "openrouter":       "OpenRouter",
+    "google_ai_studio": "Google AI Studio",
+    "openai_compatible":"OpenAI-compatible / Local",
+}
+
+# ---------- Вспомогательные функции моделей ----------
+def model_size_billions(model_id, model_name=""):
+    match = re.search(r"(?:^|[-_/ ])(\d+(?:\.\d+)?)(?:b|B)(?:$|[-_/ ])", f"{model_id} {model_name}")
+    return float(match.group(1)) if match else 0
+
+def normalize_model(model, provider):
+    model = model or {}
+    model_id = model.get("id", "")
+    name = model.get("name") or model_id
+    pricing = model.get("pricing") or {}
+    prompt_price = str(pricing.get("prompt", model.get("prompt_price", "")))
+    completion_price = str(pricing.get("completion", model.get("completion_price", "")))
+    is_free = ":free" in model_id or (prompt_price in {"0","0.0","0.000000"} and completion_price in {"0","0.0","0.000000"})
+    context = model.get("context_length") or model.get("context_window") or model.get("max_context_length") or 0
+    architecture = model.get("architecture") or {}
+    modality = architecture.get("modality", "text->text") if isinstance(architecture, dict) else "text->text"
+    return {
+        "id": model_id, "name": name, "provider": provider,
+        "provider_name": PROVIDER_LABELS.get(provider, provider),
+        "context_length": int(context or 0),
+        "parameters_b": model.get("parameter_count") or model_size_billions(model_id, name),
+        "prompt_price": prompt_price, "completion_price": completion_price,
+        "free": is_free, "modality": modality,
+        "created": model.get("created", 0), "description": model.get("description", ""),
+    }
+
+def provider_api_headers(provider):
+    from config import PROVIDERS
+    from groq_rotation import get_groq_key
+    if provider == "groq":
+        key = get_groq_key()
+        return {"Authorization": f"Bearer {key}", "Content-Type": "application/json"} if key else None
+    if provider == "openrouter":
+        key = os.getenv("OPENROUTER_API_KEY", "")
+        return {"Authorization": f"Bearer {key}", "Content-Type": "application/json",
+                "HTTP-Referer": "http://localhost:5000", "X-Title": "NovaMind AI"} if key else None
+    if provider == "cerebras":
+        key = os.getenv("CEREBRAS_API_KEY", "")
+        return {"Authorization": f"Bearer {key}", "Content-Type": "application/json"} if key else None
+    if provider == "google_ai_studio":
+        key = os.getenv("GEMINI_API_KEY", "")
+        return {"x-goog-api-key": key, "Content-Type": "application/json"} if key else None
+    return {"Authorization": f"Bearer {os.getenv('OPENAI_COMPATIBLE_KEY','ollama')}", "Content-Type": "application/json"}
+
+def fetch_available_models(provider, force=False):
+    from config import PROVIDERS, MODEL_CACHE
+    if not force and provider in MODEL_CACHE:
+        return MODEL_CACHE[provider]
+    if provider == "openrouter":
+        url = "https://openrouter.ai/api/v1/models"
+    elif provider == "google_ai_studio":
+        if not os.getenv("GEMINI_API_KEY","").strip():
+            MODEL_ERRORS[provider] = "GEMINI_API_KEY не найден в .env"; return []
+        url = "https://generativelanguage.googleapis.com/v1beta/models"
+    elif provider == "groq":
+        url = "https://api.groq.com/openai/v1/models"
+    elif provider == "cerebras":
+        url = "https://api.cerebras.ai/v1/models"
+    else:
+        return [normalize_model(m, provider) for m in PROVIDERS[provider]["models"]]
+    headers = provider_api_headers(provider)
+    if not headers:
+        return []
+    try:
+        resp = requests.get(url, headers=headers, timeout=20)
+        resp.raise_for_status()
+        if provider == "google_ai_studio":
+            raw = resp.json().get("models", []); models = []
+            for m in raw:
+                mid = str(m.get("name","")).removeprefix("models/")
+                if mid and "generateContent" in (m.get("supportedGenerationMethods") or []):
+                    models.append(normalize_model({"id": mid, "name": m.get("displayName") or mid,
+                        "description": m.get("description",""), "context_length": m.get("inputTokenLimit",0),
+                        "pricing": {"prompt":"0","completion":"0"}}, provider))
+        else:
+            raw = resp.json().get("data", [])
+            models = [normalize_model(m, provider) for m in raw if m.get("id")]
+        MODEL_CACHE[provider] = models
+        MODEL_ERRORS.pop(provider, None)
+        return models
+    except (requests.RequestException, ValueError, TypeError) as exc:
+        print(f"[ai_providers] Model catalog error ({provider}): {exc}")
+        MODEL_ERRORS[provider] = str(exc)
+        return []
+
+def provider_status():
+    from groq_rotation import GROQ_KEYS
+    return {
+        "groq":             bool(GROQ_KEYS),
+        "cerebras":         bool(os.getenv("CEREBRAS_API_KEY")),
+        "openrouter":       bool(os.getenv("OPENROUTER_API_KEY")),
+        "google_ai_studio": bool(os.getenv("GEMINI_API_KEY")),
+        "openai_compatible": True,
+    }
