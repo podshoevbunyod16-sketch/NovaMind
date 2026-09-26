@@ -53,6 +53,24 @@
         <div class="model-grid" id="modelGrid"><div class="empty-card">Модели ещё не загружены</div></div>
       </section>
 
+      <section class="media-section">
+        <div class="catalog-heading">
+          <div>
+            <div class="eyebrow">GENERATIVE MEDIA</div>
+            <h2>Модели для генерации</h2>
+            <p>Живой каталог для изображений, аудио и видео с анализом бесплатного тарифа и стоимости.</p>
+          </div>
+          <button class="outline-btn" id="refreshMedia" type="button">↻ Проверить API</button>
+        </div>
+        <div class="media-tabs" id="mediaTabs">
+          <button type="button" class="media-tab active" data-media-type="image">🖼️ Изображения</button>
+          <button type="button" class="media-tab" data-media-type="audio">🔊 Аудио</button>
+          <button type="button" class="media-tab" data-media-type="video">🎬 Видео</button>
+        </div>
+        <div class="catalog-meta"><span id="mediaCount">0 моделей</span><span id="mediaStatus">Загрузка…</span></div>
+        <div class="model-grid" id="mediaGrid"><div class="empty-card">Загружаю media-модели…</div></div>
+      </section>
+
       <section class="tips-grid">
         <article><strong>Бесплатные модели</strong><p>OpenRouter помечает бесплатные модели суффиксом <code>:free</code>. Такие модели могут иметь ограничения по скорости.</p></article>
         <article><strong>Что значит «огромные веса»</strong><p>Размеры вроде 70B или 671B — это количество параметров модели. Больше не всегда означает лучше: учитывайте контекст и задачу.</p></article>
