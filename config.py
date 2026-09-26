@@ -80,10 +80,13 @@ PROVIDERS = {
         ]
     },
     "openai_compatible": {
-        "url": (os.getenv("OPENAI_COMPATIBLE_URL") or os.getenv("OPENAI_BASE_URL") or "http://127.0.0.1:8080/v1/chat/completions"),
+        "url": (
+            (os.getenv("OPENAI_COMPATIBLE_URL") or os.getenv("OPENAI_BASE_URL") or "http://127.0.0.1:8080/v1")
+            .rstrip("/") + ("" if (os.getenv("OPENAI_COMPATIBLE_URL") or os.getenv("OPENAI_BASE_URL") or "").rstrip("/").endswith("/chat/completions") else "/chat/completions")
+        ),
         "max_tokens": 8192,
         "headers": {
-            "Authorization": f"Bearer {os.getenv('OPENAI_COMPATIBLE_KEY', 'ollama')}",
+            "Authorization": f"Bearer {(os.getenv('OPENAI_COMPATIBLE_KEY') or os.getenv('OPENAI_API_KEY') or 'ollama')}",
             "Content-Type": "application/json",
         },
         "models": []
