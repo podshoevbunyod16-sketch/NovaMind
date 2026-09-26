@@ -1,3 +1,6 @@
 flask>=3.0,<4
 requests>=2.31
 gunicorn>=21
+pypdf>=5,<7
+python-docx>=1.1,<2
+openpyxl>=3.1,<4
