@@ -314,6 +314,7 @@ def groq_request_with_rotation(url, payload, headers, timeout=90, max_retries=3)
 PROVIDERS = {
     "groq": {
         "url": "https://api.groq.com/openai/v1/chat/completions",
+        "max_tokens": 32768,  # Groq hardware limit
         "headers": {
             "Content-Type": "application/json"
         },
@@ -325,6 +326,7 @@ PROVIDERS = {
     },
     "cerebras": {
         "url": "https://api.cerebras.ai/v1/chat/completions",
+        "max_tokens": 16384,  # Cerebras limit
         "headers": {
             "Authorization": f"Bearer {os.getenv('CEREBRAS_API_KEY', '')}",
             "Content-Type": "application/json"
@@ -337,6 +339,7 @@ PROVIDERS = {
     },
     "openrouter": {
         "url": "https://openrouter.ai/api/v1/chat/completions",
+        "max_tokens": 131072,  # OpenRouter поддерживает до 128K у многих моделей
         "headers": {
             "Authorization": f"Bearer {os.getenv('OPENROUTER_API_KEY', '')}",
             "Content-Type": "application/json",
@@ -1145,11 +1148,13 @@ def send():
         provider = PROVIDERS[current_provider]
         model = current_model
 
+    # Берём max_tokens из настроек провайдера (у каждого свой аппаратный лимит)
+    provider_max = provider.get("max_tokens", 8192)
     payload = {
         "model": model,
         "messages": [{"role": "system", "content": system_prompt}] + history + [{"role": "user", "content": message}],
         "temperature": 0.7,
-        "max_tokens": 4096,  # FIX: 1000000 вызывал 400 Bad Request у Groq/OpenRouter
+        "max_tokens": provider_max,
     }
 
     data_resp, error = groq_request_with_rotation(
@@ -1193,11 +1198,13 @@ def send_stream():
     _history_stream = get_chat_history(_chat_id_stream, limit=50)
     add_message(_chat_id_stream, "user", message)
 
+    # Берём max_tokens из настроек провайдера (у каждого свой аппаратный лимит)
+    _provider_max = provider.get("max_tokens", 8192)
     payload = {
         "model": model,
         "messages": [{"role": "system", "content": system_prompt}] + _history_stream + [{"role": "user", "content": message}],
         "temperature": 0.7,
-        "max_tokens": 4096,  # FIX: 1000000 вызывал 400 Bad Request
+        "max_tokens": _provider_max,
         "stream": True,
     }
 
