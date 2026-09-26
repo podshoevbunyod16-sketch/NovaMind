@@ -156,103 +156,70 @@ function toggleAttachMenu() {
 }
 
 
-function attachImage() {
+async function analyzeAttachment(file, kind) {
   document.getElementById('attachDropdown').classList.remove('open');
+
+  const defaultPrompt = kind === 'image'
+    ? 'Подробно опиши изображение, распознай текст на нём и объясни важные детали.'
+    : 'Проанализируй этот файл и объясни главное. Если это код — найди ошибки и предложи исправления.';
+
+  const userDesc = prompt(
+    kind === 'image'
+      ? '📷 Что сделать с изображением?\n\nОставь пустым — AI сам распознает изображение и текст.'
+      : '📁 Что сделать с файлом?\n\nМожно написать: найди ошибки, сделай резюме, объясни код и т.д.',
+    ''
+  );
+  if (userDesc === null) return;
+
+  appendMessage('user', \${kind === 'image' ? '📷' : '📁'} + ' ' + file.name + (userDesc ? '\n💬 ' + userDesc : ''));
+  showTyping();
+
+  const formData = new FormData();
+  formData.append('file', file);
+  formData.append('description', userDesc.trim() || defaultPrompt);
+
+  try {
+    const response = await fetch('/api/attachments/analyze', {
+      method: 'POST',
+      body: formData
+    });
+    const raw = await response.text();
+    let data;
+    try { data = JSON.parse(raw); }
+    catch (_) { throw new Error('Сервер вернул не JSON (HTTP ' + response.status + ')'); }
+
+    if (!response.ok || data.error) {
+      throw new Error(data.error || ('Ошибка обработки файла: HTTP ' + response.status));
+    }
+
+    removeTyping();
+    appendMessage('ai', data.result || 'Анализ завершён, но ответ пустой.');
+  } catch (error) {
+    removeTyping();
+    appendMessage('ai', '❌ ' + (error.message || 'Ошибка анализа вложения'));
+  }
+}
+
+function attachImage() {
   const el = document.createElement('input');
   el.type = 'file';
   el.accept = 'image/*';
-  el.onchange = (e) => {
-    const file = e.target.files[0];
-    if (!file) return;
-
-    // Показываем диалог с описанием
-    const userDesc = prompt(
-      '📷 Что сделать с этим изображением?\n\nОставь пустым — AI сам опишет что видит',
-      ''
-    );
-
-    // Если нажал Отмена
-    if (userDesc === null) return;
-
-    const desc = userDesc.trim() || 'Подробно опиши что изображено на картинке. Опиши объекты, цвета, текст если есть, настроение и детали.';
-
-    appendMessage('user', '📷 ' + file.name + (userDesc ? '\n💬 ' + userDesc : ''));
-
-    const formData = new FormData();
-    formData.append('image', file);
-    formData.append('description', desc);
-
-    showTyping();
-    fetch('/upload_image', {
-      method: 'POST',
-      body: formData
-    })
-    .then(r => r.json())
-    .then(data => {
-      removeTyping();
-      if (data.error) {
-        appendMessage('ai', '❌ Ошибка: ' + data.error);
-      } else if (data.result) {
-        appendMessage('ai', data.result);
-      } else {
-        appendMessage('ai', '⚠️ Изображение сохранено, но анализ не вернул результат.');
-      }
-    })
-    .catch(() => {
-      removeTyping();
-      appendMessage('ai', '❌ Ошибка загрузки изображения');
-    });
-  };
+  el.multiple = false;
+  el.onchange = () => { if (el.files[0]) analyzeAttachment(el.files[0], 'image'); };
   el.click();
 }
 
 function attachDocument() {
-  document.getElementById('attachDropdown').classList.remove('open');
   const el = document.createElement('input');
   el.type = 'file';
-  el.accept = '.txt,.json,.csv,.py,.js,.html,.css,.md,.xml,.yaml,.yml,.log,.ini,.cfg';
-  el.onchange = (e) => {
-    const file = e.target.files[0];
-    if (!file) return;
-
-    // Показываем диалог с описанием
-    const userDesc = prompt(
-      '📁 Что сделать с файлом "' + file.name + '"?\n\nПример: найди ошибки, объясни код, сделай резюме\nОставь пустым — AI сам решит что делать',
-      ''
-    );
-
-    // Если нажал Отмена
-    if (userDesc === null) return;
-
-    const desc = userDesc.trim() || '';
-
-    appendMessage('user', '📁 ' + file.name + (userDesc ? '\n💬 ' + userDesc : ''));
-
-    const formData = new FormData();
-    formData.append('file', file);
-    formData.append('description', desc);
-
-    showTyping();
-    fetch('/upload_file', {
-      method: 'POST',
-      body: formData
-    })
-    .then(r => r.json())
-    .then(data => {
-      removeTyping();
-      if (data.error) {
-        appendMessage('ai', '❌ Ошибка: ' + data.error);
-      } else if (data.result) {
-        appendMessage('ai', data.result);
-      } else {
-        appendMessage('ai', '⚠️ Файл сохранён, но анализ не вернул результат.');
-      }
-    })
-    .catch(() => {
-      removeTyping();
-      appendMessage('ai', '❌ Ошибка загрузки файла');
-    });
-  };
+  el.accept = [
+    '.txt','.json','.csv','.tsv','.py','.js','.ts','.jsx','.tsx','.html','.htm',
+    '.css','.md','.xml','.yaml','.yml','.log','.ini','.cfg','.conf','.sql',
+    '.sh','.bash','.java','.c','.cpp','.h','.hpp','.go','.rs','.php',
+    '.pdf','.docx','.xlsx','.xlsm','.pptx'
+  ].join(',');
+  el.multiple = false;
+  el.onchange = () => { if (el.files[0]) analyzeAttachment(el.files[0], 'document'); };
   el.click();
 }
 
