@@ -171,10 +171,11 @@ def _extract_attachment_text(filepath, ext, content_type):
 
 def _analyze_image_file(filepath, filename, content_type, user_desc):
     instruction = user_desc or 'Подробно опиши изображение: объекты, текст, структуру и важные детали.'
+
     with open(filepath, 'rb') as f:
         encoded = base64.b64encode(f.read()).decode('ascii')
 
-    # Gemini Vision: основной путь.
+    # 1) Google AI Studio / Gemini Vision — универсальный и простой путь.
     gemini_key = (os.getenv('GEMINI_API_KEY') or os.getenv('GOOGLE_AI_STUDIO_KEY') or '').strip()
     if gemini_key:
         model = os.getenv('VISION_MODEL', 'gemini-2.5-flash')
@@ -198,36 +199,74 @@ def _analyze_image_file(filepath, filename, content_type, user_desc):
                         if part.get('text'):
                             parts.append(part['text'])
                 if parts:
-                    return jsonify({'success': True, 'filename': filename,
-                        'result': f'📷 **Анализ изображения {filename} (Google AI Studio):**\n\n{"".join(parts)}'})
+                    return jsonify({
+                        'success': True,
+                        'filename': filename,
+                        'result': f'📷 **Анализ изображения {filename} (Google AI Studio):**\\n\\n{"".join(parts)}'
+                    })
             print(f"[attachments] Gemini Vision HTTP {r.status_code}: {r.text[:500]}")
-        except requests.RequestException as exc:
+        except (requests.RequestException, ValueError) as exc:
             print(f"[attachments] Gemini Vision error: {exc}")
 
-    # Groq Vision fallback.
-    groq_key = get_groq_key()
-    if groq_key:
-        payload = {
-            'model': 'meta-llama/llama-4-scout-17b-16e-instruct',
-            'messages': [{'role':'user','content':[
-                {'type':'text','text':instruction},
-                {'type':'image_url','image_url':{'url':f'data:{content_type};base64,{encoded}'}}
-            ]}],
-            'max_tokens': 4096
-        }
-        try:
-            r = requests.post('https://api.groq.com/openai/v1/chat/completions',
-                headers={'Authorization':f'Bearer {groq_key}','Content-Type':'application/json'},
-                json=payload, timeout=120)
-            r.raise_for_status()
-            reply = r.json()['choices'][0]['message']['content']
-            return jsonify({'success': True, 'filename': filename,
-                'result': f'📷 **Анализ изображения {filename} (Vision):**\n\n{reply}'})
-        except Exception as exc:
-            print(f"[attachments] Groq Vision error: {exc}")
+    # 2) OpenAI-compatible Vision.
+    #    This allows OpenRouter and other compatible providers to work from the
+    #    same attachment button. Set VISION_MODEL if the selected chat model is
+    #    text-only.
+    vision_provider = (os.getenv('VISION_PROVIDER') or config.current_provider or '').strip()
+    vision_model = (os.getenv('VISION_MODEL') or config.current_model or '').strip()
+    provider = config.PROVIDERS.get(vision_provider)
+    if provider and vision_model:
+        url = provider.get('url', '')
+        if url and 'generativelanguage.googleapis.com' not in url:
+            headers = provider.get('headers', {}).copy()
+            if vision_provider == 'openrouter':
+                key = os.getenv('OPENROUTER_API_KEY', '').strip()
+                if key:
+                    headers['Authorization'] = f'Bearer {key}'
+                    headers['HTTP-Referer'] = 'http://localhost:5000'
+                    headers['X-Title'] = 'NovaMind AI'
+            elif vision_provider == 'groq':
+                key = get_groq_key()
+                if key:
+                    headers['Authorization'] = f'Bearer {key}'
+            elif vision_provider == 'cerebras':
+                key = os.getenv('CEREBRAS_API_KEY', '').strip()
+                if key:
+                    headers['Authorization'] = f'Bearer {key}'
 
-    return jsonify({'error': 'Нет доступного Vision-провайдера. Добавьте GEMINI_API_KEY/GOOGLE_AI_STUDIO_KEY или GROQ API key.'}), 503
+            if headers.get('Authorization') or vision_provider == 'openai_compatible':
+                payload = {
+                    'model': vision_model,
+                    'messages': [{
+                        'role': 'user',
+                        'content': [
+                            {'type': 'text', 'text': instruction},
+                            {'type': 'image_url', 'image_url': {
+                                'url': f'data:{content_type};base64,{encoded}'
+                            }}
+                        ]
+                    }],
+                    'temperature': 0.2,
+                    'max_tokens': 4096
+                }
+                try:
+                    r = requests.post(url, headers=headers, json=payload, timeout=120)
+                    if r.ok:
+                        data = r.json()
+                        reply = ((data.get('choices') or [{}])[0].get('message') or {}).get('content')
+                        if reply:
+                            return jsonify({
+                                'success': True,
+                                'filename': filename,
+                                'result': f'📷 **Анализ изображения {filename} ({vision_provider}):**\\n\\n{reply}'
+                            })
+                    print(f"[attachments] {vision_provider} Vision HTTP {r.status_code}: {r.text[:500]}")
+                except (requests.RequestException, ValueError, KeyError, IndexError, TypeError) as exc:
+                    print(f"[attachments] {vision_provider} Vision error: {exc}")
 
+    return jsonify({
+        'error': 'Не удалось распознать изображение. Добавьте GEMINI_API_KEY/GOOGLE_AI_STUDIO_KEY или выберите Vision-модель/настройте VISION_MODEL и VISION_PROVIDER.'
+    }), 503
 
 def _call_selected_text_ai(prompt):
     provider = config.PROVIDERS.get(config.current_provider)
