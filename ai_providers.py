@@ -279,8 +279,15 @@ def fetch_available_models(provider, force=False):
         MODEL_ERRORS.pop(provider, None)
         return models
     except (requests.RequestException, ValueError, TypeError) as exc:
+        # Keep the settings page usable when a provider's catalog endpoint is
+        # temporarily unavailable. The configured built-in models are still
+        # valid choices and the error remains visible in MODEL_ERRORS.
         print(f"[ai_providers] Model catalog error ({provider}): {exc}")
         MODEL_ERRORS[provider] = str(exc)
+        fallback = [normalize_model(m, provider) for m in PROVIDERS.get(provider, {}).get("models", []) if m.get("id")]
+        if fallback:
+            MODEL_CACHE[provider] = fallback
+            return fallback
         return []
 
 def provider_status():
