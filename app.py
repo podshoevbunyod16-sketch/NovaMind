@@ -1149,7 +1149,7 @@ def send():
         "model": model,
         "messages": [{"role": "system", "content": system_prompt}] + history + [{"role": "user", "content": message}],
         "temperature": 0.7,
-        "max_tokens": 1000000,
+        "max_tokens": 4096,  # FIX: 1000000 вызывал 400 Bad Request у Groq/OpenRouter
     }
 
     data_resp, error = groq_request_with_rotation(
@@ -1188,11 +1188,16 @@ def send_stream():
         provider = PROVIDERS[current_provider]
         model = current_model
 
+    # FIX: загружаем историю из БД для send_stream тоже
+    _chat_id_stream = get_or_create_session_chat()
+    _history_stream = get_chat_history(_chat_id_stream, limit=50)
+    add_message(_chat_id_stream, "user", message)
+
     payload = {
         "model": model,
-        "messages": [{"role": "system", "content": system_prompt}] + contents,
+        "messages": [{"role": "system", "content": system_prompt}] + _history_stream + [{"role": "user", "content": message}],
         "temperature": 0.7,
-        "max_tokens": 1000000,
+        "max_tokens": 4096,  # FIX: 1000000 вызывал 400 Bad Request
         "stream": True,
     }
 
@@ -2191,6 +2196,23 @@ def composio_actions():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
+
+
+# ========== LEGACY HISTORY API ==========
+
+@app.route('/api/history/clear', methods=['DELETE', 'POST'])
+def api_history_clear():
+    global contents
+    new_chat_id = create_chat()
+    session['chat_id'] = new_chat_id
+    contents = []
+    return jsonify({'success': True, 'new_chat_id': new_chat_id})
+
+@app.route('/api/history', methods=['GET'])
+def api_history_get():
+    chat_id = get_or_create_session_chat()
+    messages = get_chat_history(chat_id, limit=200)
+    return jsonify({'history': messages, 'chat_id': chat_id})
 
 # ========== API ЧАТОВ (ПАМЯТЬ) ==========
 
