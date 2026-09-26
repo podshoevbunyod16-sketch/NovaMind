@@ -189,7 +189,11 @@ async function testMediaModel(button) {
       const price = found.pricing_status === 'paid' ? 'платный'
         : found.pricing_status === 'free-tier' ? 'есть бесплатный тариф'
         : found.pricing_status === 'free' ? 'бесплатно' : 'цена не определена';
-      showToast(`✓ ${found.id}: каталог/API доступен · ${price}`, 'success');
+      if (found.configured === false) {
+        showToast(`⚠ ${found.id}: модель найдена, но API-ключ провайдера не настроен · ${price}`, 'error');
+      } else {
+        showToast(`✓ ${found.id}: каталог/API доступен · ${price}`, 'success');
+      }
     } else {
       showToast(data.error || 'Модель сейчас недоступна', 'error');
     }
