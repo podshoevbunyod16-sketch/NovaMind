@@ -2,7 +2,7 @@
 routes/settings.py — Настройки провайдеров и моделей
 """
 from flask import Blueprint, request, jsonify, render_template, session
-from ai_providers import fetch_available_models, provider_status, PROVIDER_LABELS, MODEL_ERRORS
+from ai_providers import fetch_available_models, provider_status, PROVIDER_LABELS, MODEL_ERRORS, media_models_catalog
 from config import PROVIDERS, save_selected_model, current_provider, current_model, GOOGLE_CLIENT_ID
 
 settings_bp = Blueprint("settings", __name__)
@@ -51,6 +51,21 @@ def settings_models():
     error = None if models else (MODEL_ERRORS.get(provider) or "Не удалось получить каталог моделей.")
     return jsonify({"provider": provider, "models": models, "configured": True,
                     "error": error, "current_model": config.current_model if provider == config.current_provider else None})
+
+@settings_bp.route('/api/settings/media-models')
+def settings_media_models():
+    media_type = request.args.get("type", "all").strip().lower()
+    provider = request.args.get("provider", "all").strip().lower()
+    force = request.args.get("refresh", "0") == "1"
+    if media_type not in {"all", "image", "audio", "video"}:
+        return jsonify({"error":"Неизвестный тип media-модели"}), 400
+    if provider not in {"all", "openrouter", "google_ai_studio"}:
+        return jsonify({"error":"Неизвестный media-провайдер"}), 400
+    try:
+        models = media_models_catalog(media_type, provider, force=force)
+        return jsonify({"models":models, "type":media_type, "provider":provider, "count":len(models)})
+    except Exception as exc:
+        return jsonify({"models":[], "error":str(exc)}), 500
 
 @settings_bp.route('/api/settings/select', methods=['POST'])
 def settings_select():
