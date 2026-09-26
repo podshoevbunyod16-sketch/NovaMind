@@ -13,7 +13,7 @@ from database import (get_chat_history, add_message, trim_messages,
 from ai_providers import gemini_stream_request, gemini_request
 from ai_providers import groq_request_with_rotation
 from groq_rotation import get_groq_key, mark_groq_key_exhausted, GROQ_KEYS
-from config import PROVIDERS, current_provider, current_model, system_prompt
+import config
 
 # In-memory compatibility cache. Persistent chat history is stored in the database.
 contents = []
@@ -37,17 +37,17 @@ def send():
     add_message(chat_id, "user", message)
 
     if reasoning and os.getenv("CEREBRAS_API_KEY"):
-        provider = PROVIDERS["cerebras"]
+        provider = config.PROVIDERS["cerebras"]
         model = "zai-glm-4.7"
     else:
-        provider = PROVIDERS[current_provider]
-        model = current_model
+        provider = config.PROVIDERS[config.current_provider]
+        model = config.current_model
 
     # Берём max_tokens из настроек провайдера (у каждого свой аппаратный лимит)
     provider_max = provider.get("max_tokens", 8192)
     payload = {
         "model": model,
-        "messages": [{"role": "system", "content": system_prompt}] + history + [{"role": "user", "content": message}],
+        "messages": [{"role": "system", "content": config.system_prompt}] + history + [{"role": "user", "content": message}],
         "temperature": 0.7,
         "max_tokens": provider_max,
     }
