@@ -3,6 +3,8 @@ routes/chat.py — Маршруты чата: /send, /send_stream, /api/chats/*,
 """
 from flask import Blueprint, request, jsonify, session, Response, stream_with_context
 import json
+import queue
+import threading
 import time
 import os
 import requests
@@ -14,11 +16,123 @@ from ai_providers import gemini_stream_request, gemini_request
 from ai_providers import groq_request_with_rotation
 from groq_rotation import get_groq_key, mark_groq_key_exhausted, GROQ_KEYS
 import config
+import media_generation as mg
 
 # In-memory compatibility cache. Persistent chat history is stored in the database.
 contents = []
 
 chat_bp = Blueprint("chat", __name__)
+
+# Маркер медиарезультата в истории: тот же приём, что COMPOSIO_CARDS: в app.js.
+MEDIA_RESULT_PREFIX = "MEDIA_RESULT:"
+
+
+def media_result_marker(result: dict, model: dict) -> str:
+    """Строка для БД, по которой фронтенд снова отрисует медиа."""
+    payload = {
+        "kind": result.get("kind"),
+        "url": result.get("url"),
+        "filename": result.get("filename"),
+        "mime": result.get("mime"),
+        "title": result.get("model_name") or result.get("model"),
+        "provider": result.get("provider_name") or result.get("provider"),
+        "pricing_status": result.get("pricing_status"),
+        "job_id": result.get("job_id"),
+        "state": result.get("state"),
+        "elapsed_ms": result.get("elapsed_ms"),
+        "model": mg.selection_payload(model) if model else None,
+    }
+    return MEDIA_RESULT_PREFIX + json.dumps(payload, ensure_ascii=False)
+
+
+def media_summary_text(result: dict) -> str:
+    """Человекочитаемое описание результата (видно в списке чатов и в логах)."""
+    if result.get("job_id"):
+        return (f"⏳ Задача {result.get('kind')} поставлена в очередь провайдера "
+                f"({result.get('job_id')}).")
+    kind = {"image": "Изображение", "audio": "Аудио", "video": "Видео"}.get(result.get("kind"), "Файл")
+    return f"✅ {kind} готово: {result.get('filename') or result.get('url')}"
+
+
+def media_generation_context(data: dict):
+    """
+    Возвращает (model, confirm, error) если сообщение нужно отправить
+    в медиа-движок, иначе (None, None, None).
+    """
+    if not data.get('media'):
+        return None, None, None
+    return mg.resolve_selection(data.get('provider'), data.get('model'), data.get('confirm'))
+
+
+def _media_stream_response(model, prompt, confirm, options, chat_id):
+    """
+    Потоковый ответ генерации медиа.
+
+    В поток уходят только реальные события: шаги запроса к провайдеру,
+    ответ провайдера, сохранение файла или дословная ошибка.
+    Процентов и выдуманного прогресса здесь нет.
+    """
+    global contents
+    events: "queue.Queue" = queue.Queue()
+    started = time.time()
+
+    def worker():
+        result, error = mg.generate_media(
+            model, prompt, options=options, confirm=confirm,
+            on_status=lambda message: events.put(("status", message)),
+        )
+        events.put(("done", (result, error)))
+
+    thread = threading.Thread(target=worker, name="media-generation", daemon=True)
+
+    def emit(payload: dict) -> str:
+        return json.dumps(payload, ensure_ascii=False) + "\n"
+
+    @stream_with_context
+    def generate():
+        thread.start()
+        yield emit({
+            "status": "started",
+            "message": f"Медиа-модель: {model.get('name')} ({model.get('provider_name')})",
+            "model": mg.selection_payload(model),
+            "elapsed_ms": 0,
+        })
+        result = None
+        error = None
+        while True:
+            kind, payload = events.get()
+            elapsed = int((time.time() - started) * 1000)
+            if kind == "status":
+                yield emit({"status": "progress", "message": payload, "elapsed_ms": elapsed})
+                continue
+            result, error = payload
+            break
+
+        if error:
+            add_message(chat_id, "assistant", f"❌ {error}")
+            yield emit({"error": error, "elapsed_ms": int((time.time() - started) * 1000)})
+            return
+
+        marker = media_result_marker(result, model)
+        add_message(chat_id, "assistant", marker)
+        contents.append({"role": "assistant", "content": marker})
+        if len(contents) > 20:
+            del contents[:-20]
+        yield emit({
+            "status": "done",
+            "media": result,
+            "message": media_summary_text(result),
+            "model": mg.selection_payload(model),
+            "elapsed_ms": result.get("elapsed_ms") or int((time.time() - started) * 1000),
+        })
+        yield emit({"done": True})
+
+    return Response(
+        generate(),
+        mimetype="application/x-ndjson",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", "Connection": "keep-alive"},
+    )
+
 
 @chat_bp.route('/send', methods=['POST'])
 def send():
@@ -35,6 +149,28 @@ def send():
     # FIX: загружаем историю из БД
     history = get_chat_history(chat_id, limit=50)
     add_message(chat_id, "user", message)
+
+    # ===== Генерация медиа выбранной моделью вместо текстового ответа =====
+    model, confirm, error = media_generation_context(data)
+    if error:
+        return jsonify({'error': error}), 400
+    if model is not None:
+        result, error = mg.generate_media(
+            model, message, options=data.get('options') or {}, confirm=confirm
+        )
+        if error:
+            add_message(chat_id, "assistant", f"❌ {error}")
+            return jsonify({'error': error}), 502
+        marker = media_result_marker(result, model)
+        add_message(chat_id, "assistant", marker)
+        trim_messages(chat_id, max_messages=100)
+        contents = get_chat_history(chat_id, limit=20)
+        return jsonify({
+            'reply': media_summary_text(result),
+            'media': result,
+            'model': mg.selection_payload(model),
+            'chat_id': chat_id,
+        })
 
     if reasoning and os.getenv("CEREBRAS_API_KEY"):
         provider = config.PROVIDERS["cerebras"]
@@ -92,6 +228,17 @@ def send_stream():
     _chat_id_stream = get_or_create_session_chat()
     _history_stream = get_chat_history(_chat_id_stream, limit=50)
     add_message(_chat_id_stream, "user", message)
+
+    # ===== Генерация медиа: поток реальных статусов запроса =====
+    model, confirm, media_error = media_generation_context(data)
+    if media_error:
+        if contents and contents[-1]["role"] == "user":
+            contents.pop()
+        return jsonify({'error': media_error}), 400
+    if model is not None:
+        return _media_stream_response(
+            model, message, confirm, data.get('options') or {}, _chat_id_stream
+        )
 
     # Берём max_tokens из настроек провайдера (у каждого свой аппаратный лимит)
     _provider_max = provider.get("max_tokens", 8192)

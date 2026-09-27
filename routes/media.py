@@ -10,8 +10,9 @@ import zipfile
 import xml.etree.ElementTree as ET
 import requests
 from ai_providers import groq_request_with_rotation
-from groq_rotation import get_groq_key
+from groq_rotation import get_groq_key, GROQ_KEYS
 import config
+import media_generation as mg
 
 media_bp = Blueprint("media", __name__)
 
@@ -22,12 +23,12 @@ def generated_image():
     filename = request.args.get("file", "")
     if not filename:
         return jsonify({"error": "No filename"}), 400
-    safe_name = filename.replace("..", "").replace("/", "")
-    img_dir = os.path.join(os.path.dirname(__file__), "generated_images")
+    safe_name = os.path.basename(filename.replace("..", ""))
+    img_dir = mg.IMAGE_DIR
     filepath = os.path.join(img_dir, safe_name)
     if not os.path.exists(filepath):
         return jsonify({"error": "File not found"}), 404
-    return send_file(filepath, mimetype='image/png')
+    return send_file(filepath, mimetype=mimetypes.guess_type(filepath)[0] or 'image/png')
 
 
 # ========== ЗАГРУЗКА ФАЙЛОВ ==========
@@ -293,8 +294,9 @@ def _call_selected_text_ai(prompt):
 
 
 # ========== МУЛЬТИМЕДИА ==========
-MEDIA_DIR = os.path.join(os.path.dirname(__file__), "generated_media")
-os.makedirs(MEDIA_DIR, exist_ok=True)
+# Общий каталог медиафайлов (репозиторий/generated_media, в .gitignore).
+MEDIA_DIR = mg.MEDIA_DIR
+mg.ensure_media_dir()
 
 @media_bp.route('/media/<path:filename>')
 def media_file(filename):
@@ -302,7 +304,13 @@ def media_file(filename):
     filepath = os.path.join(MEDIA_DIR, safe_name)
     if not os.path.isfile(filepath):
         return jsonify({"error": "Медиафайл не найден"}), 404
-    return send_file(filepath, mimetype=mimetypes.guess_type(filepath)[0] or "application/octet-stream")
+    as_attachment = request.args.get("download") == "1"
+    return send_file(
+        filepath,
+        mimetype=mimetypes.guess_type(filepath)[0] or "application/octet-stream",
+        as_attachment=as_attachment,
+        download_name=safe_name if as_attachment else None,
+    )
 
 @media_bp.route('/api/media/upload', methods=['POST'])
 def media_upload():
@@ -342,80 +350,253 @@ def media_transcribe():
     except (requests.RequestException, ValueError) as exc:
         return jsonify({"error": f"Ошибка расшифровки аудио: {exc}"}), 502
 
+
+# ======================================================================
+# ЕДИНЫЙ КАТАЛОГ И ВЫБОР МЕДИА-МОДЕЛЕЙ
+# ======================================================================
+def _resolve_requested_model(data: dict):
+    """
+    Разрешает модель из запроса клиента.
+
+    Клиент может прислать {provider, model} явно либо опустить их —
+    тогда используется выбранная в панели «Медиа» модель.
+    Платные модели и модели с неподтверждённой ценой требуют явного подтверждения.
+    """
+    model, confirm, error = mg.resolve_selection(
+        data.get("provider"), data.get("model"), data.get("confirm")
+    )
+    if error:
+        return None, confirm, error
+    return model, confirm, None
+
+
+@media_bp.route('/api/media/providers', methods=['GET'])
+def media_providers():
+    """Статус подключения медиа-провайдеров."""
+    statuses = mg.provider_statuses()
+    return jsonify({
+        "providers": [
+            {"id": pid, "name": name, "connected": statuses.get(pid, False)}
+            for pid, name in mg.MEDIA_PROVIDERS.items()
+        ],
+        "selection": config.media_selection or None,
+    })
+
+
+@media_bp.route('/api/media/models', methods=['GET'])
+def media_models():
+    """
+    Единый поиск и выбор моделей генерации изображений, аудио и видео.
+
+    ?type=image|audio|video|all  &provider=…  &q=поиск
+    &include_paid=1  &include_unknown=1  &refresh=1
+    """
+    media_type = (request.args.get("type") or "all").strip().lower()
+    provider = (request.args.get("provider") or "all").strip().lower()
+    query = (request.args.get("q") or "").strip()
+    include_paid = request.args.get("include_paid") in {"1", "true", "yes"}
+    include_unknown = request.args.get("include_unknown") in {"1", "true", "yes"}
+    include_trial = request.args.get("include_trial", "1") in {"1", "true", "yes"}
+    refresh = request.args.get("refresh") in {"1", "true", "yes"}
+
+    if media_type not in {"all", *mg.MEDIA_TYPES}:
+        return jsonify({"error": "Неизвестный тип медиа"}), 400
+    if provider != "all" and provider not in mg.MEDIA_PROVIDERS:
+        return jsonify({"error": "Неизвестный провайдер медиа"}), 400
+
+    models = mg.media_catalog(
+        media_type=media_type, provider=provider, query=query,
+        include_paid=include_paid, include_unknown=include_unknown,
+        include_trial=include_trial, refresh=refresh,
+    )
+    counts = {t: 0 for t in mg.MEDIA_TYPES}
+    for item in models:
+        counts[item.get("media_type")] = counts.get(item.get("media_type"), 0) + 1
+    return jsonify({
+        "models": models,
+        "type": media_type,
+        "provider": provider,
+        "query": query,
+        "count": len(models),
+        "counts": counts,
+        "free_count": sum(1 for m in models if m.get("pricing_status") == mg.PRICING_FREE),
+        "trial_count": sum(1 for m in models if m.get("pricing_status") == mg.PRICING_TRIAL),
+        "providers": mg.provider_statuses(),
+        "selection": config.media_selection or None,
+        "pricing_verified_at": mg.PRICING_VERIFIED_AT,
+    })
+
+
+@media_bp.route('/api/media/selection', methods=['GET'])
+def media_selection_get():
+    return jsonify({"selection": config.media_selection or None})
+
+
+@media_bp.route('/api/media/select', methods=['POST'])
+def media_select():
+    """
+    Выбор медиа-модели. Автоматически выбираются только модели
+    с подтверждённым бесплатным API; пробные кредиты и платные модели
+    требуют явного подтверждения пользователя.
+    """
+    data = request.get_json(silent=True) or {}
+    if data.get("clear"):
+        config.save_selected_media_model({})
+        return jsonify({"success": True, "selection": None})
+
+    provider = (data.get("provider") or "").strip()
+    model_id = (data.get("model") or "").strip()
+    confirm = data.get("confirm") or {}
+    model, error = mg.find_media_model(
+        provider, model_id,
+        include_paid=True, include_unknown=True,
+    )
+    if error:
+        return jsonify({"error": error}), 404
+    problem = mg.validate_selection(model, confirm)
+    if problem:
+        return jsonify({"error": problem, "requires": mg.required_confirmations(model),
+                        "model": mg.selection_payload(model)}), 409
+    selection = mg.selection_payload(model)
+    selection["confirmed"] = {
+        "paid": bool(confirm.get("paid")),
+        "trial": bool(confirm.get("trial")),
+        "unknown": bool(confirm.get("unknown")),
+    }
+    config.save_selected_media_model(selection)
+    return jsonify({"success": True, "selection": selection})
+
+
+@media_bp.route('/api/media/generate', methods=['POST'])
+def media_generate():
+    """Генерация по выбранной модели. Статусы — реальные шаги запроса."""
+    data = request.get_json(silent=True) or {}
+    prompt = (data.get("prompt") or "").strip()
+    if not prompt:
+        return jsonify({"error": "Пустой промпт: опишите, что нужно создать."}), 400
+
+    model, confirm, error = _resolve_requested_model(data)
+    if error:
+        return jsonify({"error": error}), 400
+
+    # Платные/пробные модели без явного подтверждения отклоняем до запроса к провайдеру.
+    problem = mg.validate_selection(model, confirm)
+    if problem:
+        return jsonify({"error": problem, "status": "refused",
+                        "requires": mg.required_confirmations(model),
+                        "model": mg.selection_payload(model)}), 400
+
+    events = []
+    result, error = mg.generate_media(
+        model, prompt, options=data.get("options") or {},
+        on_status=lambda message: events.append(message), confirm=confirm,
+    )
+    if error:
+        return jsonify({"error": error, "status": "error", "events": events,
+                        "model": mg.selection_payload(model)}), 502
+    return jsonify({
+        "status": "queued" if result.get("job_id") else "done",
+        "media": result,
+        "model": mg.selection_payload(model),
+        "events": events,
+        "elapsed_ms": result.get("elapsed_ms"),
+    })
+
+
+@media_bp.route('/api/media/jobs/<path:job_id>', methods=['GET'])
+def media_job(job_id):
+    """Реальный статус асинхронной задачи у провайдера (без выдуманного прогресса)."""
+    record = mg.poll_job(job_id)
+    if record is None:
+        return jsonify({"error": "Задача не найдена"}), 404
+    return jsonify(mg.job_public(record))
+
+
+# ======================================================================
+# LEGACY ENDPOINTS (оставлены для совместимости, работают через движок)
+# ======================================================================
+def _legacy_generate(default_backend_model: dict, prompt: str, options: dict):
+    result, error = mg.generate_media(
+        default_backend_model, prompt, options=options,
+        confirm={"paid": True, "trial": True, "unknown": True},
+    )
+    if error:
+        return jsonify({"error": error}), 502
+    return jsonify({"success": True, "url": result.get("url"), "provider": result.get("provider"),
+                    "media": result})
+
+
+def _legacy_model(provider: str, model_id: str, media_type: str, backend: str, options=None):
+    return {
+        "id": model_id, "name": model_id, "provider": provider,
+        "provider_name": mg.MEDIA_PROVIDERS.get(provider, provider),
+        "media_type": media_type, "backend": backend,
+        "pricing_status": mg.PRICING_UNKNOWN, "pricing_label": mg.PRICING_LABELS[mg.PRICING_UNKNOWN],
+        "provider_connected": True, "in_provider_catalog": None,
+        "options": options or {},
+    }
+
+
 @media_bp.route('/api/media/tts', methods=['POST'])
 def media_tts():
-    data = request.get_json() or {}
-    text = data.get("text", "").strip()
+    data = request.get_json(silent=True) or {}
+    text = (data.get("text") or "").strip()
     if not text:
         return jsonify({"error": "Введите текст для озвучивания"}), 400
     endpoint = os.getenv("AUDIO_TTS_URL", "")
-    api_key = os.getenv("AUDIO_API_KEY", "")
-    model = os.getenv("AUDIO_TTS_MODEL", "tts-1")
-    if not endpoint and os.getenv("OPENAI_API_KEY"):
-        endpoint, api_key = "https://api.openai.com/v1/audio/speech", api_key or os.getenv("OPENAI_API_KEY", "")
-    if not endpoint:
-        return jsonify({"error": "Настройте AUDIO_TTS_URL и AUDIO_API_KEY либо добавьте OPENAI_API_KEY в .env"}), 503
-    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"} if api_key else {"Content-Type": "application/json"}
-    try:
-        response = requests.post(endpoint, headers=headers, json={"model": model, "input": text, "voice": data.get("voice", "alloy"), "response_format": "mp3"}, timeout=180)
-        response.raise_for_status()
-        filename = f"speech_{uuid.uuid4().hex}.mp3"
-        with open(os.path.join(MEDIA_DIR, filename), "wb") as audio_file:
-            audio_file.write(response.content)
-        return jsonify({"success": True, "url": f"/media/{filename}", "filename": filename})
-    except requests.RequestException as exc:
-        return jsonify({"error": f"Ошибка генерации аудио: {exc}"}), 502
+    model_id = data.get("model") or os.getenv("AUDIO_TTS_MODEL") or "gemini-3.8-flash-lite-tts"
+    if endpoint:
+        model = _legacy_model("custom", model_id, "audio", "custom_tts")
+    elif mg.provider_connected("google_ai_studio"):
+        model = _legacy_model("google_ai_studio", model_id, "audio", "google_tts",
+                              {"voice": data.get("voice") or "Kore"})
+    elif mg.provider_connected("groq"):
+        model = _legacy_model("groq", "playai-tts", "audio", "groq_tts",
+                              {"voice": data.get("voice") or "Fritz-PlayAI"})
+    else:
+        model = _legacy_model("pollinations", "openai-audio", "audio", "pollinations_audio",
+                              {"voice": data.get("voice") or "nova"})
+    return _legacy_generate(model, text, {"voice": data.get("voice")})
+
 
 @media_bp.route('/api/media/image', methods=['POST'])
 def media_image():
-    data = request.get_json() or {}
-    prompt = data.get("prompt", "").strip()
+    data = request.get_json(silent=True) or {}
+    prompt = (data.get("prompt") or "").strip()
     if not prompt:
         return jsonify({"error": "Введите описание изображения"}), 400
-    endpoint = os.getenv("IMAGE_GENERATION_URL", "")
-    api_key = os.getenv("IMAGE_API_KEY", "") or os.getenv("OPENAI_API_KEY", "")
-    if not endpoint and os.getenv("OPENAI_API_KEY"):
-        endpoint = "https://api.openai.com/v1/images/generations"
-    if not endpoint:
-        from urllib.parse import quote
-        width, height = int(data.get("width", 1024)), int(data.get("height", 1024))
-        url = f"https://image.pollinations.ai/prompt/{quote(prompt)}?width={width}&height={height}&nologo=True"
-        return jsonify({"success": True, "url": url, "provider": "pollinations"})
-    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"} if api_key else {"Content-Type": "application/json"}
-    try:
-        response = requests.post(endpoint, headers=headers, json={"model": os.getenv("IMAGE_MODEL", "gpt-image-1"), "prompt": prompt, "size": data.get("size", "1024x1024"), "n": 1}, timeout=240)
-        response.raise_for_status()
-        result = response.json().get("data", [{}])[0]
-        if result.get("url"):
-            return jsonify({"success": True, "url": result["url"], "provider": "configured"})
-        if result.get("b64_json"):
-            import base64
-            filename = f"image_{uuid.uuid4().hex}.png"
-            with open(os.path.join(MEDIA_DIR, filename), "wb") as image_file:
-                image_file.write(base64.b64decode(result["b64_json"]))
-            return jsonify({"success": True, "url": f"/media/{filename}", "provider": "configured"})
-        return jsonify({"error": "Провайдер не вернул изображение"}), 502
-    except (requests.RequestException, ValueError, IndexError) as exc:
-        return jsonify({"error": f"Ошибка генерации изображения: {exc}"}), 502
+    options = {"width": data.get("width") or 1024, "height": data.get("height") or 1024,
+               "size": data.get("size") or "1024x1024"}
+    if os.getenv("IMAGE_GENERATION_URL"):
+        model = _legacy_model("custom", os.getenv("IMAGE_MODEL", "custom-image"), "image", "custom_image")
+    elif mg.provider_connected("google_ai_studio"):
+        model = _legacy_model("google_ai_studio", "gemini-3.1-flash-image", "image", "google_image")
+    elif mg.provider_connected("openrouter"):
+        model = _legacy_model("openrouter", os.getenv("IMAGE_MODEL", "google/gemini-2.5-flash-image"),
+                              "image", "openrouter_image")
+    else:
+        model = _legacy_model("pollinations", "flux", "image", "pollinations_image")
+    return _legacy_generate(model, prompt, options)
+
 
 @media_bp.route('/api/media/video', methods=['POST'])
 def media_video():
-    data = request.get_json() or {}
-    prompt = data.get("prompt", "").strip()
-    endpoint = os.getenv("VIDEO_API_URL", "")
+    data = request.get_json(silent=True) or {}
+    prompt = (data.get("prompt") or "").strip()
     if not prompt:
         return jsonify({"error": "Введите описание видео"}), 400
-    if not endpoint:
-        return jsonify({"error": "Для видео укажите VIDEO_API_URL, VIDEO_API_KEY и VIDEO_MODEL в .env. У видео-провайдеров разные API, поэтому endpoint настраивается явно."}), 503
-    api_key = os.getenv("VIDEO_API_KEY", "") or os.getenv("OPENAI_API_KEY", "")
-    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"} if api_key else {"Content-Type": "application/json"}
-    payload = {"model": os.getenv("VIDEO_MODEL", ""), "prompt": prompt, "duration": data.get("duration", 5), "aspect_ratio": data.get("aspect_ratio", "16:9")}
-    try:
-        response = requests.post(endpoint, headers=headers, json=payload, timeout=240)
-        response.raise_for_status()
-        result = response.json()
-        return jsonify({"success": True, "url": result.get("video_url") or result.get("url"), "job_id": result.get("id") or result.get("job_id"), "status_url": result.get("status_url"), "raw": result})
-    except (requests.RequestException, ValueError) as exc:
-        return jsonify({"error": f"Ошибка генерации видео: {exc}"}), 502
+    options = {"duration": data.get("duration") or 5, "aspect_ratio": data.get("aspect_ratio") or "16:9"}
+    if os.getenv("VIDEO_API_URL"):
+        model = _legacy_model("custom", os.getenv("VIDEO_MODEL", "custom-video"), "video", "custom_video")
+    elif mg.provider_connected("google_ai_studio"):
+        model = _legacy_model("google_ai_studio", "veo-3.1-generate-preview", "video", "google_video")
+    else:
+        return jsonify({"error": (
+            "Нет подключённого видео-провайдера с подтверждённым бесплатным API. "
+            "Укажите VIDEO_API_URL, VIDEO_API_KEY и VIDEO_MODEL в .env "
+            "или подключите GEMINI_API_KEY (Veo — платный тариф)."
+        )}), 503
+    return _legacy_generate(model, prompt, options)
 
 # ========== МОДЕЛИ ==========
+

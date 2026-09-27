@@ -6,16 +6,32 @@ import json
 import os
 import re
 import time
-from database import get_or_create_session_chat, get_chat_history, add_message
+import requests
+from datetime import datetime
+from database import (get_or_create_session_chat, get_chat_history, add_message,
+                      create_chat)
 from ai_providers import groq_request_with_rotation
 from groq_rotation import get_groq_key
+from routes.search import search_web
+from config import PROVIDERS, plugins, save_custom_commands
+import config
+import media_generation as mg
+
+# Кастомные алиасы живут в config.CUSTOM_ALIASES: обращаемся к тому же словарю,
+# чтобы /alias add/remove сохраняли изменения.
+custom_commands = config.CUSTOM_ALIASES
 
 commands_bp = Blueprint("commands", __name__)
+
+
+def _chat_contents(limit=50):
+    """История текущего чата в формате messages (заменяет удалённый global contents)."""
+    chat_id = get_or_create_session_chat()
+    return chat_id, get_chat_history(chat_id, limit=limit)
 
 @commands_bp.route('/command', methods=['POST'])
 def handle_command():
     """Обработка команд (/search, /code, /image, плагины, алиасы)"""
-    global contents
     data = request.get_json()
     cmd_line = data.get('command', '').strip()
     if not cmd_line.startswith('/'):
@@ -33,38 +49,32 @@ def handle_command():
         results = search_web(query)
         return jsonify({'result': results or 'Ничего не найдено'})
 
-    # Генерация изображений (Pollinations.ai)
+    # Генерация изображений через единый медиа-движок
     if cmd == "image":
         prompt = " ".join(args)
         if not prompt:
             return jsonify({'error': 'Укажите описание изображения'})
 
-        import base64 as b64
-        import urllib.parse
-
-        encoded_prompt = urllib.parse.quote(prompt)
-        img_url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=1024&height=1024&nologo=true"
-
-        try:
-            img_resp = requests.get(img_url, timeout=30)
-            img_resp.raise_for_status()
-
-            img_dir = os.path.join(os.path.dirname(__file__), "generated_images")
-            os.makedirs(img_dir, exist_ok=True)
-
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"image_{timestamp}.png"
-            filepath = os.path.join(img_dir, filename)
-
-            with open(filepath, "wb") as f:
-                f.write(img_resp.content)
-
-            image_url = f"/generated_image?file={filename}"
-            return jsonify({
-                'result': f'✅ Изображение сгенерировано:\n\n![Image]({image_url})'
-            })
-        except Exception as e:
-            return jsonify({'error': f'Ошибка генерации: {e}'})
+        # Приоритет: выбранная в панели «Медиа» image-модель,
+        # иначе бесплатная модель без ключа (Pollinations Flux).
+        selection = mg.current_selection()
+        model, error = (None, None)
+        if selection.get("media_type") == "image":
+            model, error = mg.find_media_model(selection.get("provider"), selection.get("model"),
+                                               include_paid=True, include_unknown=True)
+        if model is None:
+            model = {
+                "id": "flux", "name": "Pollinations Flux", "provider": "pollinations",
+                "provider_name": mg.MEDIA_PROVIDERS["pollinations"], "media_type": "image",
+                "backend": "pollinations_image", "pricing_status": mg.PRICING_FREE,
+                "pricing_label": mg.PRICING_LABELS[mg.PRICING_FREE],
+                "provider_connected": True, "in_provider_catalog": None,
+            }
+        result, error = mg.generate_media(model, prompt, confirm={"paid": True, "trial": True,
+                                                                  "unknown": True})
+        if error:
+            return jsonify({'error': f'Ошибка генерации: {error}'}), 502
+        return jsonify({'result': f'✅ Изображение сгенерировано:\n\n![Image]({result["url"]})'})
 
     # Плагины
     if cmd in plugins:
@@ -89,11 +99,13 @@ def handle_command():
             prompt_template = cc.get("prompt", "{query}")
             query = " ".join(args) if args else ""
             rendered_prompt = prompt_template.replace("{query}", query)
-            contents.append({"role": "user", "content": rendered_prompt})
-            provider = PROVIDERS[current_provider]
+            chat_id, history = _chat_contents()
+            add_message(chat_id, "user", rendered_prompt)
+            provider = PROVIDERS[config.current_provider]
             payload = {
-                "model": current_model,
-                "messages": [{"role": "system", "content": system_prompt}] + contents,
+                "model": config.current_model,
+                "messages": [{"role": "system", "content": config.system_prompt}] + history +
+                          [{"role": "user", "content": rendered_prompt}],
                 "temperature": 0.7,
                 "max_tokens": 3000,
             }
@@ -103,18 +115,19 @@ def handle_command():
             if error:
                 return jsonify({'error': error})
             reply = data_resp["choices"][0]["message"]["content"]
-            contents.append({"role": "assistant", "content": reply})
+            add_message(chat_id, "assistant", reply)
             return jsonify({'result': reply})
 
     # Встроенные команды
     if cmd == "clear":
-        contents.clear()
+        session['chat_id'] = create_chat()
         return jsonify({'result': 'История очищена'})
 
     if cmd == "history":
-        if not contents:
+        _chat_id, history = _chat_contents()
+        if not history:
             return jsonify({'result': 'История пуста'})
-        hist = "\n\n".join([f"**{msg['role']}**: {msg['content']}" for msg in contents])
+        hist = "\n\n".join([f"**{msg['role']}**: {msg['content']}" for msg in history])
         return jsonify({'result': hist})
 
     if cmd == "code":
@@ -122,9 +135,9 @@ def handle_command():
         if not query:
             return jsonify({'error': 'Укажите, какой код создать'})
 
-        provider = PROVIDERS[current_provider]
+        provider = PROVIDERS[config.current_provider]
         payload = {
-            "model": current_model,
+            "model": config.current_model,
             "messages": [
                 {"role": "system", "content": "Ты программист. Пиши чистый код с комментариями."},
                 {"role": "user", "content": f"Напиши код: {query}"}
@@ -187,7 +200,7 @@ def handle_command():
         if not search_result:
             search_result = "Информация не найдена в интернете."
 
-        provider = PROVIDERS[current_provider]
+        provider = PROVIDERS[config.current_provider]
         analysis_prompt = f"""Проанализируй следующую информацию и выдели 3-5 ключевых фактов по вопросу: "{query}"
 
 Информация из интернета:
@@ -196,7 +209,7 @@ def handle_command():
 Выдели только ключевые факты, коротко."""
 
         analysis_payload = {
-            "model": current_model,
+            "model": config.current_model,
             "messages": [{"role": "user", "content": analysis_prompt}],
             "temperature": 0.3,
             "max_tokens": 1000000,
@@ -228,7 +241,7 @@ def handle_command():
 | Вес | 10 кг |"""
 
         final_payload = {
-            "model": current_model,
+            "model": config.current_model,
             "messages": [{"role": "user", "content": final_prompt}],
             "temperature": 0.5,
             "max_tokens": 1000000,

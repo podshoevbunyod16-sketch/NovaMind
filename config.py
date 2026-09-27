@@ -101,6 +101,11 @@ current_provider = "groq"
 current_model    = "llama-3.3-70b-versatile"
 system_prompt    = os.getenv("SYSTEM_PROMPT", "Ты — NovaMind, умный AI-ассистент. Отвечай чётко и по делу.")
 
+# Выбранная медиа-модель (изображение / аудио / видео).
+# Пустой словарь — генерация медиа выключена, чат работает как обычный текстовый.
+# Заполняется только явным выбором пользователя в панели «Медиа».
+media_selection: dict = {}
+
 # ---------- Кеш моделей ----------
 MODEL_CACHE: dict = {}
 MODEL_CACHE_TTL = 3600  # 1 час
@@ -110,7 +115,7 @@ RUNTIME_SETTINGS_FILE = os.path.join(os.path.dirname(__file__), "runtime_setting
 
 def load_runtime_settings():
     """Загружает сохранённый провайдер/модель между перезапусками."""
-    global current_provider, current_model, system_prompt
+    global current_provider, current_model, system_prompt, media_selection
     if os.path.exists(RUNTIME_SETTINGS_FILE):
         try:
             with open(RUNTIME_SETTINGS_FILE, "r", encoding="utf-8") as f:
@@ -118,8 +123,19 @@ def load_runtime_settings():
             current_provider = s.get("provider", current_provider)
             current_model    = s.get("model",    current_model)
             system_prompt    = s.get("system_prompt", system_prompt)
+            saved_media = s.get("media_selection")
+            media_selection = saved_media if isinstance(saved_media, dict) else {}
         except Exception as e:
             print(f"[config] Ошибка чтения runtime_settings: {e}")
+
+def _write_runtime_settings():
+    with open(RUNTIME_SETTINGS_FILE, "w", encoding="utf-8") as f:
+        json.dump({
+            "provider": current_provider,
+            "model": current_model,
+            "system_prompt": system_prompt,
+            "media_selection": media_selection,
+        }, f, ensure_ascii=False, indent=2)
 
 def save_selected_model(provider, model):
     """Сохраняет выбранный провайдер/модель в файл."""
@@ -127,14 +143,20 @@ def save_selected_model(provider, model):
     current_provider = provider
     current_model    = model
     try:
-        with open(RUNTIME_SETTINGS_FILE, "w", encoding="utf-8") as f:
-            json.dump({
-                "provider": provider,
-                "model": model,
-                "system_prompt": system_prompt,
-            }, f, ensure_ascii=False, indent=2)
+        _write_runtime_settings()
     except Exception as e:
         print(f"[config] Ошибка сохранения: {e}")
+
+def save_selected_media_model(selection):
+    """Сохраняет выбранную медиа-модель (или очищает выбор, если selection пустое)."""
+    global media_selection
+    media_selection = dict(selection or {})
+    try:
+        _write_runtime_settings()
+    except Exception as e:
+        print(f"[config] Ошибка сохранения медиа-модели: {e}")
+    return media_selection
+
 
 load_runtime_settings()
 
