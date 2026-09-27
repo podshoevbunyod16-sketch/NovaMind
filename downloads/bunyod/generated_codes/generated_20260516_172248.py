@@ -1,1 +1,0 @@
-Ошибка LLM: HTTPSConnectionPool(host='openrouter.ai', port=443): Max retries exceeded with url: /api/v1/chat/completions (Caused by NameResolutionError("HTTPSConnection(host='openrouter.ai', port=443): Failed to resolve 'openrouter.ai' ([Errno 7] No address associated with hostname)"))
