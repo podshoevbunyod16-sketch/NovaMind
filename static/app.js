@@ -793,44 +793,15 @@ async function sendMessage(text) {
     return;
   }
 
-  // Если включён АВТО ПОИСК — сначала проверяем нужен ли поиск
+  // Если включён АВТО ПОИСК — SSE с реальными шагами в чате
   if (autoSearchOn) {
     try {
-      const resp = await fetch('/api/auto_search', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: finalMsg })
-      });
-      const data = await resp.json();
-
-      if (data.error) {
-        removeTyping();
-        appendMessage('ai', '❌ Ошибка: ' + data.error);
-        return;
-      }
-
-      // Если поиск нужен — показываем индикатор поиска и результат
-      if (data.needs_search) {
-        // Обновляем индикатор
-        const typingEl = document.getElementById('typingIndicator');
-        if (typingEl) {
-          typingEl.querySelector('.msg-bubble').innerHTML = 
-            `<div style="display:flex;align-items:center;gap:8px;font-size:13px;color:#10b981;">
-              <span style="animation:spin 1s linear infinite;display:inline-block;">🔍</span>
-              Ищу в интернете: "${escapeHtml(data.search_query || finalMsg)}"...
-             </div>`;
-        }
-
-        // Ждём немного для эффекта
-        await new Promise(r => setTimeout(r, 800));
-        removeTyping();
-        appendMessage('ai', data.reply);
-        return;
-      }
-      // Если поиск НЕ нужен — продолжаем обычную отправку (ниже)
+      const done = await autoSearchSSE(finalMsg);
+      if (done) return;
+      // done=false значит поиск не нужен, продолжаем обычный путь
     } catch (e) {
-      console.error('Auto search error:', e);
-      // При ошибке авто поиска — продолжаем обычную отправку
+      console.error('Auto search SSE error:', e);
+      // При ошибке — продолжаем обычную отправку
     }
   }
 
@@ -884,6 +855,108 @@ async function sendMessage(text) {
 }
 
 function sendSuggestion(text) { sendMessage(text); }
+// ========== АВТО-ПОИСК С РЕАЛЬНЫМИ ШАГАМИ (SSE) ==========
+async function autoSearchSSE(message) {
+  // Создаём пузырь "поиска" в чате
+  const searchWrap = document.createElement('div');
+  searchWrap.className = 'message ai';
+  searchWrap.id = 'searchProgressMsg';
+  searchWrap.innerHTML = `
+    <div class="msg-avatar">🔍</div>
+    <div class="msg-body">
+      <div class="msg-name">Поиск</div>
+      <div class="msg-bubble search-progress-bubble">
+        <div id="searchSteps" style="display:flex;flex-direction:column;gap:6px;font-size:13px;"></div>
+      </div>
+    </div>`;
+  messages.appendChild(searchWrap);
+  messages.scrollTop = messages.scrollHeight;
+
+  const stepsEl = document.getElementById('searchSteps');
+
+  function addStep(icon, text) {
+    const el = document.createElement('div');
+    el.style.cssText = 'display:flex;align-items:center;gap:8px;padding:4px 0;border-bottom:1px solid rgba(255,255,255,.06);';
+    el.innerHTML = `<span style="font-size:16px;min-width:20px">${icon}</span><span style="color:var(--text-secondary,#aaa)">${escapeHtml(text)}</span>`;
+    stepsEl.appendChild(el);
+    messages.scrollTop = messages.scrollHeight;
+  }
+
+  return new Promise((resolve) => {
+    const evtSource = new EventSource('/api/auto_search_stream?' + new URLSearchParams({message}));
+    // Используем POST через fetch+ReadableStream т.к. EventSource не поддерживает POST
+    evtSource.close();
+
+    // Используем fetch + ReadableStream для SSE с POST
+    fetch('/api/auto_search_stream', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({message})
+    }).then(async resp => {
+      const reader = resp.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      while (true) {
+        const {done, value} = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, {stream: true});
+        const lines = buffer.split('\n');
+        buffer = lines.pop();
+
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          let eventType = 'message', data = '';
+          if (line.startsWith('event: ')) {
+            eventType = line.slice(7).trim();
+          } else if (line.startsWith('data: ')) {
+            data = line.slice(6);
+            try {
+              const payload = JSON.parse(data);
+              if (eventType === 'step') {
+                addStep(payload.icon || '•', payload.text || '');
+              } else if (eventType === 'result') {
+                // Убираем прогресс, показываем результат
+                searchWrap.remove();
+                removeTyping();
+                if (payload.reply) {
+                  appendMessage('ai', payload.reply);
+                  // Показываем источники если есть
+                  if (payload.sources && payload.sources.length > 0) {
+                    const srcHtml = payload.sources.map((s, i) =>
+                      `<a href="${escapeHtml(s.url)}" target="_blank" rel="noopener" style="color:#10b981;font-size:12px;display:block;margin-top:4px">` +
+                      `[${i+1}] ${escapeHtml(s.title || s.url)}</a>`
+                    ).join('');
+                    const srcWrap = document.createElement('div');
+                    srcWrap.className = 'message ai';
+                    srcWrap.innerHTML = `<div class="msg-avatar">🔗</div><div class="msg-body"><div class="msg-bubble" style="background:rgba(16,185,129,.08);padding:10px 14px">${srcHtml}</div></div>`;
+                    messages.appendChild(srcWrap);
+                    messages.scrollTop = messages.scrollHeight;
+                  }
+                }
+                resolve(true);
+              } else if (eventType === 'error') {
+                addStep('❌', payload.text || 'Ошибка');
+              } else if (eventType === 'done') {
+                if (document.getElementById('searchProgressMsg')) {
+                  searchWrap.remove();
+                  removeTyping();
+                }
+                resolve(payload.searched === false ? false : true);
+              }
+            } catch(e) { /* ignore parse errors */ }
+          }
+        }
+      }
+      resolve(false);
+    }).catch(e => {
+      searchWrap.remove();
+      console.error('SSE fetch error:', e);
+      resolve(false);
+    });
+  });
+}
+
 function hideWelcome() { if (welcomeScreen) welcomeScreen.style.display = 'none'; }
 
 // ========== СООБЩЕНИЯ (С ПОДДЕРЖКОЙ ИЗОБРАЖЕНИЙ) ==========
