@@ -7,3 +7,4 @@ venv/
 *.log
 .DS_Store
 ai_settings.json
+novamind_chats.db
