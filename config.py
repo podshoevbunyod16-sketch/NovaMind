@@ -79,6 +79,15 @@ PROVIDERS = {
             {"id": "gemini-1.5-pro",        "name": "Gemini 1.5 Pro"},
         ]
     },
+    "pollinations": {
+        "url": "https://gen.pollinations.ai/v1/chat/completions",
+        "base_url": "https://gen.pollinations.ai/v1",
+        "max_tokens": 131072,
+        "headers": {
+            "Content-Type": "application/json"
+        },
+        "models": []
+    },
     "openai_compatible": {
         "url": (
             (os.getenv("OPENAI_COMPATIBLE_URL") or os.getenv("OPENAI_BASE_URL") or "http://127.0.0.1:8080/v1")
