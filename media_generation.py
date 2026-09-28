@@ -358,8 +358,23 @@ def _pollinations_media_entries(force=False) -> list:
             resp = requests.get(endpoint, timeout=12)
             resp.raise_for_status()
             payload = resp.json()
-            raw = payload.get("data", payload.get("models", payload if isinstance(payload, list) else []))
+
+            # Pollinations returns the rich media catalogs as a JSON LIST.
+            # Some compatible endpoints may instead return OpenAI-style
+            # {"data": [...]} or {"models": [...]}. Handle all three safely.
+            if isinstance(payload, list):
+                raw = payload
+            elif isinstance(payload, dict):
+                raw = payload.get("data")
+                if raw is None:
+                    raw = payload.get("models")
+                if raw is None:
+                    raw = []
+            else:
+                raw = []
+
             if not isinstance(raw, list):
+                print(f"[media] Pollinations {media_type}: unexpected catalog shape {type(payload).__name__}")
                 continue
             for item in raw:
                 if isinstance(item, str):
