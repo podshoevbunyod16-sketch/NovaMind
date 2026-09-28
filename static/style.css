@@ -595,6 +595,9 @@ button, input, select, textarea {
 }
 .media-model-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
+/* FIX: CSS display не должен перебивать HTML hidden атрибут */
+[hidden] { display: none !important; }
+
 .media-active {
   display: flex; align-items: center; gap: 8px;
   margin: 4px 0 8px; padding: 7px 12px;
