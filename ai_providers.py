@@ -196,6 +196,7 @@ PROVIDER_LABELS = {
     "openrouter":       "OpenRouter",
     "google_ai_studio": "Google AI Studio",
     "openai_compatible":"OpenAI-compatible / Local",
+    "pollinations":       "Pollinations.ai",
 }
 
 # ---------- Вспомогательные функции моделей ----------
@@ -256,6 +257,12 @@ def provider_api_headers(provider):
     if provider == "google_ai_studio":
         key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_AI_STUDIO_KEY") or ""
         return {"x-goog-api-key": key, "Content-Type": "application/json"} if key else None
+    if provider == "pollinations":
+        key = (os.getenv("POLLINATIONS_API_KEY") or os.getenv("POLLINATIONS_KEY") or os.getenv("POLLINATIONS_TOKEN") or "").strip()
+        headers = {"Content-Type": "application/json"}
+        if key:
+            headers["Authorization"] = f"Bearer {key}"
+        return headers
     key = os.getenv("OPENAI_COMPATIBLE_KEY") or os.getenv("OPENAI_API_KEY") or "ollama"
     return {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
 
@@ -316,6 +323,9 @@ def fetch_available_models(provider, force=False):
         urls = ["https://api.groq.com/openai/v1/models"]
     elif provider == "cerebras":
         urls = ["https://api.cerebras.ai/v1/models"]
+    elif provider == "pollinations":
+        # Публичный каталог Pollinations не требует ключа.
+        urls = ["https://gen.pollinations.ai/v1/models"]
     elif provider == "openai_compatible":
         # llama-server, Ollama, LM Studio, vLLM, LocalAI и другие
         # OpenAI-compatible runtimes обычно отдают каталог через /v1/models.
@@ -324,7 +334,7 @@ def fetch_available_models(provider, force=False):
         return [normalize_model(m, provider) for m in PROVIDERS[provider]["models"]]
 
     headers = provider_api_headers(provider)
-    if not headers:
+    if headers is None:
         return []
 
     last_error = None
@@ -346,8 +356,8 @@ def fetch_available_models(provider, force=False):
                             "pricing": {"prompt": "0", "completion": "0"},
                         }, provider))
             else:
-                raw = resp.json().get("data", [])
-                models = [normalize_model(m, provider) for m in raw if m.get("id")]
+                raw = resp.json().get("data", resp.json().get("models", []))
+                models = [normalize_model(m, provider) for m in raw if m.get("id") or m.get("name")]
 
             if models:
                 MODEL_CACHE[provider] = models
@@ -422,6 +432,7 @@ def provider_status():
         "groq":             bool(GROQ_KEYS),
         "cerebras":         bool(os.getenv("CEREBRAS_API_KEY")),
         "openrouter":       bool(os.getenv("OPENROUTER_API_KEY")),
-        "google_ai_studio": bool(os.getenv("GEMINI_API_KEY")),
+        "google_ai_studio": bool(os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_AI_STUDIO_KEY")),
+        "pollinations":     bool(os.getenv("POLLINATIONS_API_KEY") or os.getenv("POLLINATIONS_KEY") or os.getenv("POLLINATIONS_TOKEN")),
         "openai_compatible": True,
     }
