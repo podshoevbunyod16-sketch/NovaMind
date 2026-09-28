@@ -27,7 +27,7 @@ _HEADERS = {
 
 # ═══ Groq compound-beta — встроенный поиск (бесплатно!) ═══
 
-def groq_web_search(query, max_tokens=8192):
+def provider_web_search(query, max_tokens=8192):
     """
     Использует Groq compound-beta-mini с встроенным web search.
     Возвращает (answer, sources_list) или (None, error).
@@ -83,6 +83,63 @@ def groq_web_search(query, max_tokens=8192):
             return None, f"Groq compound error: {resp.status_code} {resp.text[:100]}"
     except Exception as e:
         return None, str(e)
+
+def pollinations_web_search(query, max_tokens=8192):
+    """Web-search через Pollinations-модель с заявленной capability web_search."""
+    provider = config.PROVIDERS.get("pollinations")
+    key = (os.getenv("POLLINATIONS_API_KEY")
+           or os.getenv("POLLINATIONS_KEY")
+           or os.getenv("POLLINATIONS_TOKEN") or "").strip()
+    if not provider or not key:
+        return None, "Pollinations: API key не настроен"
+    model = config.current_model
+    try:
+        resp = requests.post(
+            provider["url"],
+            headers={
+                "Authorization": f"Bearer {key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": model,
+                "messages": [
+                    {"role": "system", "content":
+                     "Ты поисковый ассистент NovaMind. Отвечай подробно на русском, "
+                     "используй web search и указывай источники."},
+                    {"role": "user", "content": query},
+                ],
+                "max_tokens": min(int(max_tokens), 32768),
+                "temperature": 0.2,
+                "tools": [{"type": "web_search_preview"}],
+            },
+            timeout=60,
+        )
+        if resp.status_code >= 400:
+            return None, f"Pollinations web search HTTP {resp.status_code}: {resp.text[:500]}"
+        data = resp.json()
+        choice = (data.get("choices") or [{}])[0]
+        answer = (choice.get("message") or {}).get("content") or ""
+        sources = []
+        for tool_call in (choice.get("message") or {}).get("tool_calls") or []:
+            if not isinstance(tool_call, dict):
+                continue
+            args = (tool_call.get("function") or {}).get("arguments") or "{}"
+            try:
+                parsed = json.loads(args)
+                if parsed.get("url"):
+                    sources.append({"title": parsed.get("query") or parsed["url"], "url": parsed["url"]})
+            except (TypeError, ValueError):
+                continue
+        return answer, sources
+    except (requests.RequestException, ValueError, TypeError) as exc:
+        return None, f"Pollinations web search: {exc}"
+
+
+def provider_web_search(query, max_tokens=8192):
+    if config.current_provider == "pollinations":
+        return pollinations_web_search(query, max_tokens=max_tokens)
+    return groq_web_search(query, max_tokens=max_tokens)
+
 
 # ═══ SearXNG — поиск без ключа ═══
 
