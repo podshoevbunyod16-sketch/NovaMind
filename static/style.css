@@ -230,7 +230,59 @@ html, body {
 .msg-name { font-size: 11px; color: var(--text-muted); font-weight: 600; padding: 0 4px; }
 .message.user .msg-name { text-align: right; }
 
-.msg-bubble { padding: 11px 15px; border-radius: var(--radius); font-size: 13.5px; line-height: 1.6; }
+.msg-bubble {
+  padding: 11px 15px;
+  border-radius: var(--radius);
+  font-size: 13.5px;
+  line-height: 1.6;
+  overflow: hidden;       /* не выходит за рамки */
+  word-break: break-word;
+  max-width: 100%;
+}
+/* Таблица внутри пузыря — скроллится горизонтально */
+.msg-bubble .tbl-wrap {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  margin: 8px -4px;
+  border-radius: 8px;
+  border: 1px solid rgba(255,255,255,0.1);
+}
+.msg-bubble .tbl-wrap::-webkit-scrollbar { height: 4px; }
+.msg-bubble .tbl-wrap::-webkit-scrollbar-track { background: rgba(255,255,255,0.05); }
+.msg-bubble .tbl-wrap::-webkit-scrollbar-thumb { background: var(--accent); border-radius: 2px; }
+.msg-bubble table {
+  width: max-content;
+  min-width: 100%;
+  border-collapse: collapse;
+  font-size: 12.5px;
+}
+.msg-bubble th {
+  background: rgba(139,92,246,0.2);
+  color: var(--text-primary);
+  font-weight: 600;
+  padding: 8px 14px;
+  text-align: left;
+  border-bottom: 2px solid rgba(139,92,246,0.4);
+  white-space: nowrap;
+}
+.msg-bubble td {
+  padding: 7px 14px;
+  border-bottom: 1px solid rgba(255,255,255,0.06);
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+.msg-bubble tr:last-child td { border-bottom: none; }
+.msg-bubble tr:hover td { background: rgba(255,255,255,0.03); }
+/* Подсказка скролла */
+.tbl-scroll-hint {
+  font-size: 10px;
+  color: var(--text-muted);
+  text-align: right;
+  padding: 2px 4px 0;
+  opacity: 0.7;
+  display: none;
+}
+.tbl-scroll-hint.show { display: block; }
 .message.ai .msg-bubble { background: var(--bg-card); border: 1px solid var(--border-soft); border-top-left-radius: 4px; color: var(--text-primary); }
 .message.user .msg-bubble {
   background: linear-gradient(135deg,var(--accent),#5b21b6); color: #fff;
