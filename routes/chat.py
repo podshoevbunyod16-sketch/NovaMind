@@ -14,6 +14,7 @@ from database import (get_chat_history, add_message, trim_messages,
                       list_chats, delete_chat)
 from ai_providers import gemini_stream_request, gemini_request
 from ai_providers import groq_request_with_rotation
+from ai_providers import chat_completion, chat_stream, resolve_target
 from groq_rotation import get_groq_key, mark_groq_key_exhausted, GROQ_KEYS
 import config
 import media_generation as mg
@@ -172,29 +173,17 @@ def send():
             'chat_id': chat_id,
         })
 
-    if reasoning and os.getenv("CEREBRAS_API_KEY"):
-        provider = config.PROVIDERS["cerebras"]
-        model = "zai-glm-4.7"
-    else:
-        provider = config.PROVIDERS[config.current_provider]
-        model = config.current_model
-
-    # Берём max_tokens из настроек провайдера (у каждого свой аппаратный лимит)
-    provider_max = provider.get("max_tokens", 8192)
-    payload = {
-        "model": model,
-        "messages": [{"role": "system", "content": config.system_prompt}] + history + [{"role": "user", "content": message}],
-        "temperature": 0.7,
-        "max_tokens": provider_max,
-    }
-
-    data_resp, error = groq_request_with_rotation(
-        provider["url"], payload, provider["headers"].copy(), timeout=90
+    # Единый слой провайдеров: сам выбирает рабочий транспорт
+    # (Groq / Gemini / OpenRouter / локальный llama-server / офлайн-модель).
+    reply, meta = chat_completion(
+        history + [{"role": "user", "content": message}],
+        system=config.system_prompt,
+        temperature=0.7,
+        timeout=120,
     )
-    if error:
-        return jsonify({'error': error})
+    if reply is None:
+        return jsonify({'error': meta}), 502
 
-    reply = data_resp["choices"][0]["message"]["content"]
     add_message(chat_id, "assistant", reply)
     trim_messages(chat_id, max_messages=100)
 
@@ -217,160 +206,75 @@ def send_stream():
 
     contents.append({"role": "user", "content": message})
 
-    if reasoning and os.getenv("CEREBRAS_API_KEY"):
-        provider = config.PROVIDERS["cerebras"]
-        model = "zai-glm-4.7"
-    else:
-        provider = config.PROVIDERS[config.current_provider]
-        model = config.current_model
-
     # FIX: загружаем историю из БД для send_stream тоже
     _chat_id_stream = get_or_create_session_chat()
     _history_stream = get_chat_history(_chat_id_stream, limit=50)
     add_message(_chat_id_stream, "user", message)
 
     # ===== Генерация медиа: поток реальных статусов запроса =====
-    model, confirm, media_error = media_generation_context(data)
+    media_model, confirm, media_error = media_generation_context(data)
     if media_error:
         if contents and contents[-1]["role"] == "user":
             contents.pop()
         return jsonify({'error': media_error}), 400
-    if model is not None:
+    if media_model is not None:
         return _media_stream_response(
-            model, message, confirm, data.get('options') or {}, _chat_id_stream
+            media_model, message, confirm, data.get('options') or {}, _chat_id_stream
         )
 
-    # Берём max_tokens из настроек провайдера (у каждого свой аппаратный лимит)
-    _provider_max = provider.get("max_tokens", 8192)
-    payload = {
-        "model": model,
-        "messages": [{"role": "system", "content": config.system_prompt}] + _history_stream + [{"role": "user", "content": message}],
-        "temperature": 0.7,
-        "max_tokens": _provider_max,
-        "stream": True,
-    }
+    # Единый слой провайдеров: Groq / Gemini / OpenRouter / локальный llama-server /
+    # встроенная офлайн-модель. Потоком идут и токены ответа, и ход рассуждений.
+    provider, model, provider_cfg = resolve_target()
+    history_for_prompt = [m for m in _history_stream if m.get("content")]
 
-    # Для Groq делаем несколько попыток с ротацией ключей.
-    upstream = None
-    last_error = None
-    is_gemini = provider.get("url","").startswith("https://generativelanguage.googleapis.com")
-    if is_gemini:
-        upstream, gemini_error = gemini_stream_request(model, payload, timeout=90)
-
-        # Некоторые сети/прокси могут блокировать SSE, хотя обычный generateContent
-        # работает. В таком случае не отдаём 502: выполняем обычный Gemini-запрос
-        # и возвращаем его как один потоковый token.
-        if upstream is None:
-            print(f"[Gemini stream] {gemini_error}")
-            fallback_data, fallback_error = gemini_request(model, payload, timeout=90, max_retries=2)
-            if fallback_error:
-                if contents and contents[-1]["role"] == "user":
-                    contents.pop()
-                return jsonify({
-                    "error": f"{gemini_error}. Fallback generateContent: {fallback_error}"
-                }), 502
-
-            fallback_reply=((fallback_data.get("choices") or [{}])[0].get("message") or {}).get("content","")
-            if contents and contents[-1]["role"] == "user":
-                contents.pop()
-
-            def generate_fallback():
-                if fallback_reply:
-                    yield json.dumps({"token": fallback_reply}, ensure_ascii=False) + "\n"
-                    contents.append({"role":"assistant","content":fallback_reply})
-                    if len(contents) > 20:
-                        del contents[:-20]
-                yield json.dumps({"done":True}, ensure_ascii=False) + "\n"
-
-            return Response(
-                generate_fallback(),
-                mimetype="application/x-ndjson",
-                headers={"Cache-Control":"no-cache","X-Accel-Buffering":"no-cache"}
-            )
-    else:
-        upstream = None
-    max_attempts = max(1, min(len(GROQ_KEYS), 9)) if "api.groq.com" in provider["url"] else 1
-
-    for _ in range(0 if upstream is not None else max_attempts):
-        headers = provider["headers"].copy()
-        if "api.groq.com" in provider["url"]:
-            key = get_groq_key()
-            if not key:
-                last_error = "Нет доступных Groq API ключей"
-                break
-            headers["Authorization"] = f"Bearer {key}"
-
-        try:
-            candidate = requests.post(
-                provider["url"], json=payload, headers=headers, timeout=90, stream=True
-            )
-            if candidate.status_code in (401, 429) and "api.groq.com" in provider["url"]:
-                last_error = f"Groq HTTP {candidate.status_code}"
-                mark_groq_key_exhausted()
-                candidate.close()
-                continue
-            candidate.raise_for_status()
-            candidate.encoding = "utf-8"
-            upstream = candidate
-            break
-        except requests.exceptions.RequestException as exc:
-            last_error = str(exc)
-            if "api.groq.com" in provider["url"]:
-                mark_groq_key_exhausted()
-                continue
-            break
-
-    if upstream is None:
-        if contents and contents[-1]["role"] == "user":
-            contents.pop()
-        return jsonify({'error': f'Ошибка подключения к AI: {last_error or "неизвестная ошибка"}'}), 502
+    def emit(payload: dict) -> str:
+        return json.dumps(payload, ensure_ascii=False) + "\n"
 
     @stream_with_context
     def generate():
         full_reply = ""
+        reasoning_text = ""
         try:
-            for raw_line in upstream.iter_lines(decode_unicode=True):
-                if not raw_line:
-                    continue
-                line = raw_line.strip()
-                if line.startswith("data:"):
-                    line = line[5:].strip()
-                if line == "[DONE]":
+            for kind, chunk in chat_stream(
+                history_for_prompt + [{"role": "user", "content": message}],
+                provider=provider,
+                model=model,
+                system=config.system_prompt,
+                temperature=0.7,
+                max_tokens=provider_cfg.get("max_tokens", 8192),
+                timeout=120,
+                reasoning=bool(reasoning),
+            ):
+                if kind == "reasoning":
+                    reasoning_text += chunk
+                    yield emit({"reasoning": chunk})
+                elif kind == "token":
+                    full_reply += chunk
+                    yield emit({"token": chunk})
+                elif kind == "error":
+                    yield emit({"error": chunk})
+                elif kind == "done":
                     break
-                try:
-                    chunk = json.loads(line)
-                except (TypeError, json.JSONDecodeError):
-                    continue
-
-                if is_gemini:
-                    for candidate in chunk.get("candidates", []):
-                        for part in (candidate.get("content") or {}).get("parts", []):
-                            token = part.get("text") or ""
-                            if token:
-                                full_reply += token
-                                yield json.dumps({"token": token}, ensure_ascii=False) + "\n"
-                    continue
-
-                choice = (chunk.get("choices") or [{}])[0]
-                delta = choice.get("delta") or {}
-                token = delta.get("content") or choice.get("text") or ""
-
-                # GPT-OSS может отдавать reasoning отдельно; пользователю нужен content.
-                if token:
-                    full_reply += token
-                    yield json.dumps({"token": token}, ensure_ascii=False) + "\n"
 
             if full_reply:
+                add_message(_chat_id_stream, "assistant", full_reply)
+                trim_messages(_chat_id_stream, max_messages=100)
                 contents.append({"role": "assistant", "content": full_reply})
                 if len(contents) > 20:
                     del contents[:-20]
 
-            yield json.dumps({"done": True}, ensure_ascii=False) + "\n"
+            yield emit({
+                "done": True,
+                "model": model,
+                "provider": provider,
+                "offline": provider == "local_demo",
+                "has_reply": bool(full_reply),
+                "reasoning_chars": len(reasoning_text),
+            })
+        except GeneratorExit:
+            raise
         except Exception as exc:
-            yield json.dumps({"error": f"Ошибка потокового ответа: {exc}"}, ensure_ascii=False) + "\n"
-        finally:
-            if upstream is not None:
-                upstream.close()
+            yield emit({"error": f"Ошибка потокового ответа: {exc}"})
 
     return Response(
         generate(),
@@ -381,6 +285,7 @@ def send_stream():
             "Connection": "keep-alive",
         },
     )
+
 
 # ========== КОМАНДЫ ==========
 

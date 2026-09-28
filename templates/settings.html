@@ -1,12 +1,16 @@
 <!DOCTYPE html>
-<html lang="ru">
+<html lang="ru" data-glass-theme="aurora">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#070713">
   <title>Настройки AI — Khirad</title>
+  <link rel="stylesheet" href="/static/liquid-glass.css">
   <link rel="stylesheet" href="/static/settings.css">
 </head>
 <body>
+<div class="lg-grain" aria-hidden="true"></div>
+<div class="lg-vignette" aria-hidden="true"></div>
   <div class="settings-shell">
     <header class="settings-topbar">
       <a class="back-link" href="/chat" aria-label="Вернуться в чат">←</a>
@@ -14,6 +18,7 @@
         <div class="eyebrow">KHIRAD / AI CONTROL</div>
         <h1>Настройки AI</h1>
       </div>
+      <button class="outline-btn" id="themeBtn" type="button" title="Сменить тему стекла">🎭 Тема</button>
       <div class="current-pill" id="currentPill">Загрузка…</div>
     </header>
 
@@ -71,8 +76,21 @@
         <div class="model-grid" id="mediaGrid"><div class="empty-card">Загружаю media-модели…</div></div>
       </section>
 
+      <section class="health-card">
+        <div class="catalog-heading">
+          <div>
+            <div class="eyebrow">WEB SEARCH DIAGNOSTICS</div>
+            <h2>Поиск в интернете</h2>
+            <p id="healthStatus">Проверяю поисковые бэкенды…</p>
+          </div>
+          <button class="outline-btn" id="refreshHealth" type="button">↻ Проверить</button>
+        </div>
+        <div class="health-grid" id="healthGrid"><div class="empty-card loading-card">Проверка бэкендов…</div></div>
+      </section>
+
       <section class="tips-grid">
         <article><strong>Бесплатные модели</strong><p>OpenRouter помечает бесплатные модели суффиксом <code>:free</code>. Такие модели могут иметь ограничения по скорости.</p></article>
+        <article><strong>Офлайн-модель</strong><p>Провайдер <code>local_demo</code> работает без интернета и ключей. Он не ищет в сети, но чат никогда не остаётся без ответа.</p></article>
         <article><strong>Что значит «огромные веса»</strong><p>Размеры вроде 70B или 671B — это количество параметров модели. Больше не всегда означает лучше: учитывайте контекст и задачу.</p></article>
       </section>
     </main>

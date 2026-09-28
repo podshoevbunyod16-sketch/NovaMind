@@ -5,287 +5,208 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=yes">
     <title>Khirad — Вход</title>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+    <link rel="stylesheet" href="/static/liquid-glass.css">
     <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-        html { height: 100%; }
+        /* ═══ ОКНО ВХОДА · LIQUID GLASS ═══ */
         body {
-            height: 100%;
-            font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
-            background: linear-gradient(135deg, #0d0d14 0%, #1a1a2e 50%, #12121f 100%);
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            overflow: hidden;
+            min-height: 100vh;
+            display: flex; align-items: center; justify-content: center;
+            padding: 20px;
         }
 
         .bg-mesh {
-            position: fixed; inset: 0; z-index: 0;
+            position: fixed; inset: 0; z-index: -1; pointer-events: none;
             background:
-                radial-gradient(ellipse 80% 50% at 20% 40%, rgba(123,47,247,0.15) 0%, transparent 60%),
-                radial-gradient(ellipse 60% 40% at 80% 60%, rgba(168,85,247,0.1) 0%, transparent 55%);
-            pointer-events: none;
+                radial-gradient(45vmax 45vmax at 15% 20%, color-mix(in srgb, var(--accent) 40%, transparent), transparent 65%),
+                radial-gradient(40vmax 40vmax at 85% 25%, color-mix(in srgb, var(--accent-2) 34%, transparent), transparent 62%),
+                radial-gradient(46vmax 46vmax at 70% 85%, color-mix(in srgb, var(--accent-3) 30%, transparent), transparent 64%);
+            animation: mesh-drift 34s var(--ease) infinite alternate;
+        }
+        @keyframes mesh-drift {
+            from { transform: translate3d(0,0,0) scale(1.02); }
+            to   { transform: translate3d(-2%, 3%, 0) scale(1.1); }
         }
 
-        .auth-modal {
-            position: relative;
-            z-index: 1;
-            width: 440px;
-            max-width: 92vw;
-        }
+        .auth-modal { width: 100%; max-width: 430px; }
 
         .auth-modal__container {
             position: relative;
-            background: #fff;
-            border-radius: 20px;
-            width: 100%;
-            max-height: 90vh;
-            overflow-y: auto;
-            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+            padding: 30px 26px;
+            border-radius: var(--r-xl);
+            background: linear-gradient(158deg, var(--glass-fill-strong), var(--glass-fill) 62%, rgba(255,255,255,.02));
+            -webkit-backdrop-filter: blur(var(--glass-blur-lg)) saturate(190%);
+            backdrop-filter: blur(var(--glass-blur-lg)) saturate(190%);
+            border: 1px solid var(--glass-border);
+            box-shadow: var(--glass-shadow-lg), var(--glass-inset);
+            overflow: hidden;
+            animation: card-in .7s var(--ease-out) both;
+        }
+        @keyframes card-in {
+            from { opacity: 0; transform: translateY(26px) scale(.96); }
+            to   { opacity: 1; transform: none; }
+        }
+        /* Бегущий блик по стеклу карточки */
+        .auth-modal__container::after {
+            content: "";
+            position: absolute; top: -60%; left: -70%;
+            width: 55%; height: 220%;
+            background: linear-gradient(100deg, transparent, rgba(255,255,255,.14), transparent);
+            transform: skewX(-18deg);
+            animation: glass-sheen 7s var(--ease) infinite;
+            pointer-events: none;
+        }
+        @keyframes glass-sheen {
+            0%, 62% { left: -70%; }
+            100%    { left: 140%; }
         }
 
-        .auth-form {
-            padding: 30px 28px;
-        }
+        .auth-form { display: none; position: relative; z-index: 1; }
+        .auth-form.active { display: block; animation: lg-fade-in .45s var(--ease-out) both; }
 
-        .auth-form__header {
-            text-align: center;
-            margin-bottom: 24px;
-        }
-
+        .auth-form__header { text-align: center; margin-bottom: 22px; }
         .auth-form__logo {
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            gap: 8px;
-            margin-bottom: 16px;
-            font-size: 18px;
-            font-weight: 800;
-            color: #1a1a2e;
-        }
-
-        .auth-form__logo-icon {
-            background: #7c3aed;
-            color: #fff;
-            padding: 4px 8px;
-            border-radius: 6px;
-            font-size: 14px;
-            font-weight: 900;
-        }
-
-        .auth-form__header h2 {
-            font-size: 22px;
-            font-weight: 800;
-            color: #1a1a2e;
-            margin: 0 0 6px;
-        }
-
-        .auth-form__header p {
-            font-size: 13px;
-            color: #999;
-            margin: 0;
-        }
-
-        .auth-form__body {
-            margin-bottom: 20px;
-        }
-
-        .auth-form__group {
+            display: inline-flex; align-items: center; gap: 10px;
             margin-bottom: 14px;
+            font-size: 17px; font-weight: 800; letter-spacing: -.02em;
         }
+        .auth-form__logo-icon {
+            width: 44px; height: 44px; border-radius: 14px;
+            display: grid; place-items: center;
+            font-size: 15px; font-weight: 900; color: #fff;
+            background: radial-gradient(circle at 32% 28%, rgba(255,255,255,.85), transparent 46%),
+                        linear-gradient(140deg, var(--accent), var(--accent-2));
+            box-shadow: 0 10px 26px -10px var(--accent-glow), inset 0 1px 0 rgba(255,255,255,.5);
+            animation: orb-breathe 5s var(--ease) infinite;
+        }
+        @keyframes orb-breathe {
+            0%, 100% { transform: scale(1); }
+            50%      { transform: scale(1.05); }
+        }
+        .auth-form__header h2 { font-size: 21px; letter-spacing: -.03em; margin-bottom: 6px; }
+        .auth-form__header p { font-size: 12.5px; color: var(--text-3); line-height: 1.6; }
 
+        .auth-form__group { margin-bottom: 14px; }
         .auth-form__group label {
-            display: block;
-            font-size: 13px;
-            font-weight: 600;
-            color: #333;
-            margin-bottom: 6px;
+            display: block; margin-bottom: 6px;
+            font-size: 10.5px; font-weight: 800; letter-spacing: .1em; text-transform: uppercase;
+            color: var(--text-4);
         }
-
-        .auth-form__group input {
-            width: 100%;
-            padding: 12px 14px;
-            border: 2px solid #e0e0e0;
-            border-radius: 10px;
-            font-size: 15px;
-            font-family: 'Segoe UI', system-ui, sans-serif;
-            outline: none;
-            transition: 0.2s;
-            background: #fff;
-        }
-
-        .auth-form__group input:focus {
-            border-color: #7c3aed;
-            box-shadow: 0 0 0 3px rgba(124, 58, 237, 0.1);
-        }
-
-        .auth-form__input-wrap {
-            position: relative;
-            display: flex;
-            align-items: center;
-        }
-
+        .auth-form__input-wrap { position: relative; display: flex; align-items: center; }
         .auth-form__input-wrap i {
-            position: absolute;
-            left: 14px;
-            color: #999;
-            font-size: 16px;
-            z-index: 1;
+            position: absolute; left: 14px; font-size: 13px; color: var(--text-4);
+            font-style: normal; pointer-events: none;
         }
-
-        .auth-form__input-wrap input {
-            padding-left: 40px;
+        .auth-form__input-wrap input,
+        .auth-form__group > input {
+            width: 100%;
+            padding: 13px 15px 13px 40px;
+            font: 500 13.5px/1.4 inherit;
+            color: var(--text-1);
+            background: linear-gradient(160deg, var(--glass-fill), rgba(255,255,255,.02));
+            border: 1px solid var(--glass-border-soft);
+            border-radius: var(--r-sm);
+            outline: none;
+            box-shadow: inset 0 1px 2px rgba(0,0,0,.16);
+            transition: border-color var(--t) var(--ease), box-shadow var(--t) var(--ease);
         }
+        .auth-form__group > input { padding-left: 15px; }
+        .auth-form__input-wrap input:focus,
+        .auth-form__group > input:focus {
+            border-color: color-mix(in srgb, var(--accent) 60%, transparent);
+            box-shadow: 0 0 0 3px var(--accent-soft), inset 0 1px 2px rgba(0,0,0,.12);
+        }
+        .auth-form__input-wrap input::placeholder,
+        .auth-form__group > input::placeholder { color: var(--text-4); }
 
         .auth-form__toggle-password {
-            position: absolute;
-            right: 10px;
-            top: 50%;
-            transform: translateY(-50%);
-            background: none;
-            border: none;
-            color: #999;
-            cursor: pointer;
-            font-size: 16px;
-            padding: 6px;
+            position: absolute; right: 8px;
+            width: 30px; height: 30px; border-radius: 50%;
+            display: grid; place-items: center;
+            background: transparent; border: none; cursor: pointer;
+            color: var(--text-4); font-size: 13px;
+            transition: color var(--t) var(--ease), background var(--t) var(--ease);
         }
+        .auth-form__toggle-password:hover { color: var(--text-1); background: var(--glass-fill); }
 
-        .auth-form__toggle-password:hover {
-            color: #7c3aed;
-        }
-
-        .auth-form__row {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            margin-bottom: 16px;
-        }
-
+        .auth-form__row { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; }
         .auth-form__checkbox {
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            font-size: 13px;
-            cursor: pointer;
-            color: #333;
+            display: inline-flex; align-items: center; gap: 8px;
+            font-size: 12px; color: var(--text-2); cursor: pointer;
         }
-
         .auth-form__checkbox input {
-            width: 16px;
-            height: 16px;
+            width: 16px; height: 16px; accent-color: var(--accent); cursor: pointer;
         }
 
         .auth-form__submit {
-            width: 100%;
-            padding: 14px;
-            background: #7c3aed;
-            color: #fff;
-            border: none;
-            border-radius: 10px;
-            font-size: 16px;
-            font-weight: 700;
-            cursor: pointer;
-            transition: 0.2s;
-            margin-top: 8px;
+            width: 100%; padding: 14px;
+            font: 800 13.5px/1 inherit; letter-spacing: .02em;
+            color: var(--on-accent); cursor: pointer;
+            background: linear-gradient(150deg, var(--accent), var(--accent-2));
+            border: 1px solid color-mix(in srgb, var(--accent) 45%, rgba(255,255,255,.2));
+            border-radius: var(--r-sm);
+            box-shadow: 0 16px 34px -16px var(--accent-glow), inset 0 1px 0 rgba(255,255,255,.4);
+            transition: transform var(--t-fast) var(--ease-spring), filter var(--t) var(--ease);
         }
+        .auth-form__submit:hover { filter: brightness(1.08); transform: translateY(-1px); }
+        .auth-form__submit:active { transform: scale(.985); }
 
-        .auth-form__submit:hover {
-            background: #6d28d9;
-        }
-
-        .auth-form__submit:active {
-            transform: scale(0.97);
-        }
+        .auth-error { min-height: 16px; margin: 10px 0 0; font-size: 11.5px; color: var(--err); text-align: center; }
 
         .auth-form__divider {
-            text-align: center;
-            margin: 16px 0;
-            color: #ccc;
-            font-size: 13px;
-            position: relative;
+            display: flex; align-items: center; gap: 12px;
+            margin: 18px 0 14px; color: var(--text-4); font-size: 11px;
+        }
+        .auth-form__divider::before, .auth-form__divider::after {
+            content: ""; flex: 1; height: 1px; background: var(--glass-border-soft);
         }
 
-        .auth-form__divider::before,
-        .auth-form__divider::after {
-            content: '';
-            position: absolute;
-            top: 50%;
-            width: 35%;
-            height: 1px;
-            background: #e0e0e0;
-        }
-
-        .auth-form__divider::before { left: 0; }
-        .auth-form__divider::after { right: 0; }
-
-        .auth-form__social {
-            display: flex;
-            gap: 10px;
-        }
-
+        .auth-form__social { display: flex; gap: 10px; align-items: center; }
         .auth-form__social-btn {
-            flex: 1;
-            padding: 10px;
-            border: 2px solid #e0e0e0;
-            border-radius: 10px;
-            background: #fff;
-            cursor: pointer;
-            font-size: 13px;
-            font-weight: 600;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            gap: 6px;
-            transition: 0.2s;
-            text-decoration: none;
-            color: inherit;
+            flex: 1; display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+            padding: 12px 14px; font: 700 12.5px/1 inherit; cursor: pointer;
+            color: var(--text-1);
+            background: var(--glass-fill);
+            border: 1px solid var(--glass-border-soft);
+            border-radius: var(--r-sm);
+            transition: background var(--t) var(--ease), transform var(--t-fast) var(--ease-spring);
         }
-
-        .auth-form__social-btn:hover {
-            border-color: #7c3aed;
-            background: #f5f0ff;
-        }
+        .auth-form__social-btn:hover { background: var(--glass-fill-2); transform: translateY(-1px); }
 
         .auth-form__footer {
-            text-align: center;
-            font-size: 13px;
-            color: #999;
+            margin-top: 18px; padding-top: 14px;
+            border-top: 1px solid var(--glass-border-soft);
+            text-align: center; font-size: 12px; color: var(--text-3);
         }
-
         .auth-form__footer a {
-            color: #7c3aed;
-            text-decoration: none;
-            font-weight: 600;
-            cursor: pointer;
+            color: color-mix(in srgb, var(--accent) 60%, white);
+            font-weight: 700; cursor: pointer; text-decoration: none;
         }
+        html[data-glass-theme="light"] .auth-form__footer a { color: var(--accent); }
+        .auth-form__footer a:hover { text-decoration: underline; }
 
-        .auth-error {
-            color: #ef4444;
-            font-size: 12px;
-            text-align: center;
-            margin-top: 8px;
-            min-height: 18px;
+        .auth-theme-row { display: flex; justify-content: center; gap: 6px; margin-top: 16px; }
+        .auth-theme-row button {
+            width: 26px; height: 26px; border-radius: 50%; cursor: pointer;
+            border: 1px solid var(--glass-border-soft);
+            background: var(--glass-fill);
+            transition: transform var(--t-fast) var(--ease-spring), border-color var(--t) var(--ease);
         }
+        .auth-theme-row button:hover { transform: scale(1.12); border-color: var(--glass-border); }
+        .auth-theme-row button.t-aurora   { background: linear-gradient(140deg, #7c3aed, #22d3ee); }
+        .auth-theme-row button.t-midnight { background: linear-gradient(140deg, #0ea5e9, #2dd4bf); }
+        .auth-theme-row button.t-sunset   { background: linear-gradient(140deg, #fb7185, #fbbf24); }
+        .auth-theme-row button.t-light    { background: linear-gradient(140deg, #e2e8f0, #a78bfa); }
 
-        @media (max-width: 480px) {
-            .auth-modal__container {
-                position: fixed;
-                bottom: 0;
-                left: 0;
-                right: 0;
-                top: auto;
-                width: 100%;
-                max-width: 100%;
-                border-radius: 20px 20px 0 0;
-                max-height: 90vh;
-            }
-            .auth-form {
-                padding: 24px 20px;
-            }
+        @media (max-width: 460px) {
+            .auth-modal__container { padding: 24px 18px; }
+            .auth-form__header h2 { font-size: 19px; }
         }
     </style>
 </head>
 <body>
     <div class="bg-mesh"></div>
+    <div class="lg-grain" aria-hidden="true"></div>
+    <div class="lg-vignette" aria-hidden="true"></div>
 
     <div class="auth-modal">
         <div class="auth-modal__container">
@@ -391,6 +312,13 @@
                 </div>
             </div>
 
+            <div class="auth-theme-row" aria-label="Тема оформления">
+                <button type="button" class="t-aurora" title="Aurora" onclick="setAuthTheme('aurora')"></button>
+                <button type="button" class="t-midnight" title="Midnight" onclick="setAuthTheme('midnight')"></button>
+                <button type="button" class="t-sunset" title="Sunset" onclick="setAuthTheme('sunset')"></button>
+                <button type="button" class="t-light" title="Light glass" onclick="setAuthTheme('light')"></button>
+            </div>
+
         </div>
     </div>
 
@@ -445,9 +373,20 @@
         }
 
         function showForm(form) {
-            document.getElementById('loginForm').style.display = form === 'login' ? 'block' : 'none';
-            document.getElementById('registerForm').style.display = form === 'register' ? 'block' : 'none';
+            const login = document.getElementById('loginForm');
+            const register = document.getElementById('registerForm');
+            login.classList.toggle('active', form === 'login');
+            register.classList.toggle('active', form === 'register');
+            login.style.display = form === 'login' ? 'block' : 'none';
+            register.style.display = form === 'register' ? 'block' : 'none';
         }
+
+        // ── Тема стекла (сохраняется и применяется во всём приложении) ──
+        function setAuthTheme(theme) {
+            document.documentElement.setAttribute('data-glass-theme', theme);
+            localStorage.setItem('nova_theme', theme);
+        }
+        setAuthTheme(localStorage.getItem('nova_theme') || 'aurora');
 
         function togglePassword(inputId, btn) {
             const input = document.getElementById(inputId);
