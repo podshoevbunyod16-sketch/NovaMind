@@ -199,7 +199,11 @@ _JOBS_LOCK = threading.Lock()
 def provider_connected(provider: str) -> bool:
     """Подключён ли провайдер (есть ключ или ключ не нужен)."""
     if provider == "pollinations":
-        return True
+        return bool(
+            (os.getenv("POLLINATIONS_API_KEY")
+             or os.getenv("POLLINATIONS_KEY")
+             or os.getenv("POLLINATIONS_TOKEN") or "").strip()
+        )
     if provider == "custom":
         return bool(
             os.getenv("IMAGE_GENERATION_URL")
@@ -335,6 +339,71 @@ def _openrouter_media_entries(live: dict) -> list:
     return entries
 
 
+def _pollinations_key() -> str:
+    return (os.getenv("POLLINATIONS_API_KEY")
+            or os.getenv("POLLINATIONS_KEY")
+            or os.getenv("POLLINATIONS_TOKEN") or "").strip()
+
+
+def _pollinations_media_entries(force=False) -> list:
+    """Получает актуальные image/audio/video модели из публичного каталога Pollinations."""
+    endpoints = {
+        "image": "https://gen.pollinations.ai/image/models",
+        "audio": "https://gen.pollinations.ai/audio/models",
+        "video": "https://gen.pollinations.ai/video/models",
+    }
+    entries = []
+    for media_type, endpoint in endpoints.items():
+        try:
+            resp = requests.get(endpoint, timeout=12)
+            resp.raise_for_status()
+            payload = resp.json()
+            raw = payload.get("data", payload.get("models", payload if isinstance(payload, list) else []))
+            if not isinstance(raw, list):
+                continue
+            for item in raw:
+                if isinstance(item, str):
+                    item = {"id": item}
+                model_id = str(item.get("id") or item.get("name") or "").strip()
+                if not model_id:
+                    continue
+                pricing = item.get("pricing") or {}
+                values = [v for v in pricing.values() if v not in (None, "")]
+                try:
+                    zero_price = bool(values) and all(float(str(v)) == 0.0 for v in values)
+                except (TypeError, ValueError):
+                    zero_price = False
+                free_flag = item.get("free") is True or item.get("free_tier") is True
+                status = PRICING_FREE if (free_flag or zero_price) else PRICING_UNKNOWN
+                backend = {
+                    "image": "pollinations_image",
+                    "audio": "pollinations_audio",
+                    "video": "pollinations_video",
+                }[media_type]
+                entries.append({
+                    "id": model_id,
+                    "name": item.get("name") or item.get("display_name") or model_id,
+                    "provider": "pollinations",
+                    "media_type": media_type,
+                    "pricing_status": status,
+                    "pricing_note": (
+                        "Цена и доступность получены из live-каталога Pollinations."
+                        if status == PRICING_FREE else
+                        "Pollinations не сообщил нулевую цену для этой модели; требуется проверить доступ."
+                    ),
+                    "pricing_source": "https://gen.pollinations.ai/models",
+                    "pricing_verified_at": "live",
+                    "description": item.get("description") or "",
+                    "backend": backend,
+                    "keyless": False,
+                    "checks_provider_catalog": True,
+                    "in_provider_catalog": True,
+                })
+        except (requests.RequestException, ValueError, TypeError) as exc:
+            print(f"[media] Pollinations {media_type} catalog unavailable: {exc}")
+    return entries
+
+
 def _custom_endpoint_entries() -> list:
     """Модели, которые пользователь подключил сам через .env (оплачивает сам)."""
     entries = []
@@ -384,7 +453,13 @@ def media_catalog(media_type="all", provider="all", query="", include_paid=False
     """
     live = {} if skip_live else _live_provider_catalog("all", force=refresh)
 
-    entries = [dict(item) for item in MEDIA_MODEL_REGISTRY]
+    # Pollinations меняет каталог динамически, поэтому live-модели имеют приоритет
+    # над устаревшими статическими записями.
+    entries = [
+        dict(item) for item in MEDIA_MODEL_REGISTRY
+        if item.get("provider") != "pollinations"
+    ]
+    entries.extend(_pollinations_media_entries(force=refresh))
     entries.extend(_openrouter_media_entries(live))
     entries.extend(_custom_endpoint_entries())
 
@@ -817,13 +892,14 @@ def generate_pollinations_image(model: dict, prompt: str, options=None, on_statu
     params = f"width={width}&height={height}&nologo=true&model={quote(str(model['id']))}"
     if options.get("seed") is not None:
         params += f"&seed={int(options['seed'])}"
-    token = os.getenv(options.get("token_env", ""), "").strip()
-    if token:
-        params += f"&token={quote(token)}"
-    url = f"https://image.pollinations.ai/prompt/{quote(prompt)}?{params}"
+    key = _pollinations_key()
+    headers = {"Authorization": f"Bearer {key}"} if key else {}
+    url = f"https://gen.pollinations.ai/image/{quote(prompt)}?{params}"
     _report(on_status, f"Отправка запроса к Pollinations ({model['id']})")
+    if not key:
+        return None, "Pollinations: нужен POLLINATIONS_API_KEY/POLLINATIONS_KEY для генерации."
     try:
-        resp = requests.get(url, timeout=180)
+        resp = requests.get(url, headers=headers, timeout=240)
     except requests.exceptions.Timeout:
         return None, "Pollinations: таймаут генерации изображения"
     except requests.exceptions.RequestException as exc:
@@ -832,32 +908,63 @@ def generate_pollinations_image(model: dict, prompt: str, options=None, on_statu
         return None, _provider_error(resp)
     content_type = resp.headers.get("Content-Type", "")
     if not content_type.startswith("image/"):
-        return None, (f"Pollinations вернул не изображение (Content-Type: {content_type or 'нет'}). "
-                      f"Возможно, сервис перегружен или модель требует кредиты Pollen.")
-    _report(on_status, "Pollinations вернул изображение, сохраняю файл")
+        return None, f"Pollinations вернул не изображение (Content-Type: {content_type or 'нет'})."
     return save_media("image", resp.content, content_type, prefix="pollinations"), None
 
 
 def generate_pollinations_audio(model: dict, prompt: str, options=None, on_status=None):
-    from urllib.parse import quote
     options = {**(model.get("options") or {}), **(options or {})}
     voice = options.get("voice") or "nova"
-    url = (f"https://text.pollinations.ai/{quote(prompt)}"
-           f"?model={quote(str(model['id']))}&voice={quote(str(voice))}")
+    key = _pollinations_key()
+    if not key:
+        return None, "Pollinations: нужен POLLINATIONS_API_KEY/POLLINATIONS_KEY для генерации."
+    headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
+    payload = {"model": model["id"], "input": prompt, "voice": voice}
+    response_format = options.get("response_format") or "mp3"
+    payload["response_format"] = response_format
     _report(on_status, f"Отправка запроса к Pollinations audio ({model['id']})")
     try:
-        resp = requests.get(url, timeout=180)
+        resp = requests.post(
+            "https://gen.pollinations.ai/v1/audio/speech",
+            headers=headers, json=payload, timeout=240
+        )
     except requests.exceptions.Timeout:
         return None, "Pollinations: таймаут синтеза речи"
     except requests.exceptions.RequestException as exc:
         return None, f"Pollinations: {exc}"
     if resp.status_code >= 400:
         return None, _provider_error(resp)
-    content_type = resp.headers.get("Content-Type", "")
+    content_type = resp.headers.get("Content-Type", "") or f"audio/{response_format}"
     if not content_type.startswith("audio/"):
-        return None, f"Pollinations вернул не аудио (Content-Type: {content_type or 'нет'})."
-    _report(on_status, "Pollinations вернул аудио, сохраняю файл")
+        return None, f"Pollinations вернул не аудио (Content-Type: {content_type})."
     return save_media("audio", resp.content, content_type, prefix="pollinations_tts"), None
+
+
+def generate_pollinations_video(model: dict, prompt: str, options=None, on_status=None):
+    from urllib.parse import quote
+    options = options or {}
+    key = _pollinations_key()
+    if not key:
+        return None, "Pollinations: нужен POLLINATIONS_API_KEY/POLLINATIONS_KEY для генерации видео."
+    params = [f"model={quote(str(model['id']))}"]
+    if options.get("duration"):
+        params.append(f"duration={int(options['duration'])}")
+    if options.get("aspect_ratio"):
+        params.append(f"aspect_ratio={quote(str(options['aspect_ratio']))}")
+    url = f"https://gen.pollinations.ai/video/{quote(prompt)}?{'&'.join(params)}"
+    _report(on_status, f"Отправка запроса к Pollinations video ({model['id']})")
+    try:
+        resp = requests.get(url, headers={"Authorization": f"Bearer {key}"}, timeout=600)
+    except requests.exceptions.Timeout:
+        return None, "Pollinations: таймаут генерации видео"
+    except requests.exceptions.RequestException as exc:
+        return None, f"Pollinations: {exc}"
+    if resp.status_code >= 400:
+        return None, _provider_error(resp)
+    content_type = resp.headers.get("Content-Type", "")
+    if not content_type.startswith("video/"):
+        return None, f"Pollinations вернул не видео (Content-Type: {content_type or 'нет'})."
+    return save_media("video", resp.content, content_type, prefix="pollinations_video"), None
 
 
 def generate_google_video(model: dict, prompt: str, options=None, on_status=None):
@@ -1012,6 +1119,7 @@ BACKENDS = {
     "openrouter_audio": generate_openrouter_audio,
     "pollinations_image": generate_pollinations_image,
     "pollinations_audio": generate_pollinations_audio,
+    "pollinations_video": generate_pollinations_video,
     "custom_image": generate_custom_image,
     "custom_tts": generate_custom_audio,
     "custom_video": generate_custom_video,
