@@ -44,7 +44,7 @@ def settings_models():
     force = request.args.get("refresh", "0") == "1"
     if provider not in PROVIDERS:
         return jsonify({"error": "Неизвестный провайдер"}), 400
-    if not provider_status().get(provider, False):
+    if not provider_status().get(provider, False) and provider != "pollinations":
         return jsonify({"provider": provider, "models": [], "configured": False,
                         "error": "API ключ провайдера не найден в .env"})
     models = fetch_available_models(provider, force=force)
