@@ -59,7 +59,7 @@ def settings_media_models():
     force = request.args.get("refresh", "0") == "1"
     if media_type not in {"all", "image", "audio", "video"}:
         return jsonify({"error":"Неизвестный тип media-модели"}), 400
-    if provider not in {"all", "openrouter", "google_ai_studio"}:
+    if provider not in {"all", "openrouter", "google_ai_studio", "pollinations"}:
         return jsonify({"error":"Неизвестный media-провайдер"}), 400
     try:
         models = media_models_catalog(media_type, provider, force=force)
