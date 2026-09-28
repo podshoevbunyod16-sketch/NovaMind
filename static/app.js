@@ -1052,26 +1052,32 @@ function formatContent(text) {
   // Курсив
   html = html.replace(/\*(.+?)\*/g, '<em>$1</em>');
 
-  // Таблицы
+  // Таблицы — скролл горизонтально с подсказкой
   html = html.replace(/(\|[^\n]+\|\n\|[-| :]+\|\n(?:\|[^\n]+\|\n?)*)/g, (match) => {
     const rows = match.trim().split('\n');
-    let tableHtml = '<table style="width:100%;border-collapse:collapse;margin:10px 0;">';
-
+    const colCount = (rows[0].match(/\|/g) || []).length - 1;
+    const needsScroll = colCount > 3;
+    let tableHtml = '<table>';
     rows.forEach((row, index) => {
       const cells = row.split('|').filter(c => c.trim() !== '');
-      const tag = index === 0 ? 'th' : 'td';
-
       if (index === 1 && cells.every(c => /^[-| :]+$/.test(c))) return;
-
+      const tag = index === 0 ? 'th' : 'td';
+      // Определяем выравнивание по разделителю
+      const alignRow = rows[1] ? rows[1].split('|').filter(c => c.trim() !== '') : [];
       tableHtml += '<tr>';
-      cells.forEach(cell => {
-        tableHtml += `<${tag} style="border:1px solid rgba(255,255,255,0.15);padding:8px 12px;text-align:left;">${cell.trim()}</${tag}>`;
+      cells.forEach((cell, ci) => {
+        const sep = alignRow[ci] || '';
+        const align = sep.startsWith(':') && sep.endsWith(':') ? 'center'
+                    : sep.endsWith(':') ? 'right' : 'left';
+        tableHtml += `<${tag} style="text-align:${align}">${cell.trim()}</${tag}>`;
       });
       tableHtml += '</tr>';
     });
-
     tableHtml += '</table>';
-    return `<div style="overflow-x: auto; max-width: 100%; -webkit-overflow-scrolling: touch;">${tableHtml}</div>`;
+    const hint = needsScroll
+      ? '<div class="tbl-scroll-hint show">← прокрути вправо →</div>'
+      : '';
+    return `<div class="tbl-wrap">${tableHtml}</div>${hint}`;
   });
 
   // Переносы строк
