@@ -333,17 +333,25 @@ def media_transcribe():
     endpoint = os.getenv("AUDIO_TRANSCRIPTION_URL", "")
     api_key = os.getenv("AUDIO_API_KEY", "")
     if not endpoint:
-        if os.getenv("GROQ_API_KEY") or GROQ_KEYS:
+        if os.getenv("POLLINATIONS_API_KEY") or os.getenv("POLLINATIONS_KEY") or os.getenv("POLLINATIONS_TOKEN"):
+            endpoint = "https://gen.pollinations.ai/v1/audio/transcriptions"
+            api_key = api_key or os.getenv("POLLINATIONS_API_KEY") or os.getenv("POLLINATIONS_KEY") or os.getenv("POLLINATIONS_TOKEN")
+        elif os.getenv("GROQ_API_KEY") or GROQ_KEYS:
             endpoint = "https://api.groq.com/openai/v1/audio/transcriptions"
             api_key = api_key or get_groq_key()
         elif os.getenv("OPENAI_API_KEY"):
             endpoint = "https://api.openai.com/v1/audio/transcriptions"
             api_key = api_key or os.getenv("OPENAI_API_KEY", "")
     if not endpoint:
-        return jsonify({"error": "Настройте AUDIO_TRANSCRIPTION_URL и AUDIO_API_KEY либо добавьте GROQ_API_KEY/OPENAI_API_KEY в .env"}), 503
+        return jsonify({"error": "Настройте AUDIO_TRANSCRIPTION_URL/AUDIO_API_KEY или Pollinations/Groq/OpenAI ключ."}), 503
     headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
     try:
-        response = requests.post(endpoint, headers=headers, files={"file": (media.filename, media.stream, media.mimetype)}, data={"model": os.getenv("AUDIO_TRANSCRIPTION_MODEL", "whisper-large-v3-turbo"), "language": request.form.get("language", "ru")}, timeout=180)
+        model = os.getenv("AUDIO_TRANSCRIPTION_MODEL", "")
+        if "gen.pollinations.ai" in endpoint and not model:
+            model = "openai/gpt-audio-mini"
+        if not model:
+            model = "whisper-large-v3-turbo"
+        response = requests.post(endpoint, headers=headers, files={"file": (media.filename, media.stream, media.mimetype)}, data={"model": model, "language": request.form.get("language", "ru")}, timeout=180)
         response.raise_for_status()
         result = response.json()
         return jsonify({"success": True, "text": result.get("text", ""), "language": result.get("language")})
