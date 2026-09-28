@@ -84,6 +84,7 @@ PROVIDERS = {
         "base_url": "https://gen.pollinations.ai/v1",
         "max_tokens": 131072,
         "headers": {
+            "Authorization": f"Bearer {(os.getenv('POLLINATIONS_API_KEY') or os.getenv('POLLINATIONS_KEY') or os.getenv('POLLINATIONS_TOKEN') or '')}",
             "Content-Type": "application/json"
         },
         "models": []
