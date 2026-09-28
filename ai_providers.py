@@ -401,30 +401,22 @@ GOOGLE_MEDIA_MODELS = [
 ]
 
 def media_models_catalog(media_type="all", provider="all", force=False):
-    """Возвращает модели image/audio/video с понятным статусом цены."""
-    models=[]
-    if provider in ("all", "openrouter"):
-        for m in fetch_available_models("openrouter", force=force):
-            if any(t in (m.get("media_types") or []) for t in ("image","audio","video")):
-                item=dict(m)
-                item["source_type"]="live"
-                models.append(item)
-    if provider in ("all", "google_ai_studio"):
-        configured=bool(os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_AI_STUDIO_KEY"))
-        for m in GOOGLE_MEDIA_MODELS:
-            models.append({
-                "id":m["id"], "name":m["name"], "provider":"google_ai_studio",
-                "provider_name":"Google AI Studio", "media_types":[m["type"]],
-                "free":m["free"], "pricing_status":m["price"],
-                "prompt_price":"","completion_price":"","configured":configured,
-                "description":m["description"], "context_length":0,
-                "parameters_b":0, "source_type":"official-catalog"
-            })
-    if media_type != "all":
-        models=[m for m in models if media_type in (m.get("media_types") or [])]
-    unique={}
-    for m in models: unique[(m.get("provider"),m.get("id"))]=m
-    return list(unique.values())
+    """Единый каталог image/audio/video. Pollinations берётся из live API."""
+    try:
+        import media_generation as mg
+        models = mg.media_catalog(
+            media_type=media_type,
+            provider=provider,
+            include_paid=True,
+            include_unknown=True,
+            include_trial=True,
+            refresh=force,
+        )
+        return models
+    except Exception as exc:
+        MODEL_ERRORS["media"] = str(exc)
+        return []
+
 
 def provider_status():
     from groq_rotation import GROQ_KEYS
