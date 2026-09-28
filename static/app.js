@@ -811,7 +811,7 @@ async function sendMessage(text) {
       const resp = await fetch('/api/web_search_groq', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ query: finalMsg })
+        body: JSON.stringify({ message: finalMsg })
       });
       const data = await resp.json();
       removeTyping();
