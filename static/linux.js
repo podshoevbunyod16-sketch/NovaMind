@@ -143,6 +143,7 @@
       }
 
       await consumeNdjson(response, (event) => {
+<<<<<<< HEAD
         switch (event.type) {
           case 'stage': turn.setStage(event.scene || 'agent', event.title, event.text); break;
           case 'plan': turn.plan(event.text); break;
@@ -171,6 +172,17 @@
         searched: result.searched,
         steps: result.steps,
         linux: result.steps > 0 || result.searched,
+=======
+        if (event.type === 'stage') turn.setStage('agent', event.title, event.text);
+        else if (event.type === 'plan') turn.plan(event.text);
+        else if (event.type === 'step') turn.step(event.icon, event.text);
+        else if (event.type === 'tool') turn.tool(event);
+        else if (event.type === 'task') { turn.taskChip(event.task); if (state.tab === 'tasks') loadTasks(); }
+        else if (event.type === 'sources') turn.setSources(event.sources || []);
+        else if (event.type === 'token') turn.appendToken(event.token);
+        else if (event.type === 'result') result = event;
+        else if (event.type === 'error') turn.step('⚠️', event.text);
+>>>>>>> d42dfa25f0f2c0d68742da19cdd015831aee836a
       });
     } catch (error) {
       activeAbort = null;

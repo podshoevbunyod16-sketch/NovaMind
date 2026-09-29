@@ -4,6 +4,7 @@ routes/agent.py — главный чат с Linux-окружением.
 Отдельного «агентного режима» больше нет: каждое сообщение в главном чате
 идёт сюда, и модель сама решает, как отвечать.
 
+<<<<<<< HEAD
     вопрос → [ответ сразу]                                  простые вопросы
     вопрос → план → [команда | файл | поиск | страница] × N → ответ   задачи
 
@@ -23,27 +24,57 @@ routes/agent.py — главный чат с Linux-окружением.
   * TERMINAL_ENABLED=1 в .env, иначе главный чат работает без окружения;
   * AGENT_MAX_STEPS действий и общий AGENT_TIMEOUT — цикл не крутится вечно;
   * команды проверяются белым списком routes/terminal.py.
+=======
+    план → [команда в песочнице | чтение/запись файла | поиск | задача] × N → ответ
+
+Поток событий — NDJSON, ровно как у поиска: интерфейс показывает
+`plan`, `step`, `tool`, `sources` и печатающийся ответ.
+
+Главное правило: пользователь ВСЕГДА получает ответ. Что бы ни случилось —
+лимит шагов, таймаут, зацикливание модели, битый JSON — собранные данные
+уходят в финальный запрос, и модель отвечает по ним обычным текстом.
+
+Границы (важно — это сервер, а не песочница ОС):
+  * AGENT_ENABLED=1 в .env, иначе режим выключен;
+  * AGENT_MAX_STEPS шагов и общий AGENT_TIMEOUT — цикл не крутится вечно;
+  * команды дополнительно проверяются белым списком routes/terminal.py;
+  * инструменты файлов/терминала доступны вошедшим, задачи — всем.
+>>>>>>> d42dfa25f0f2c0d68742da19cdd015831aee836a
 """
 from flask import Blueprint, Response, request, jsonify, session, stream_with_context
+from urllib.parse import urlparse
 import json
 import os
 import re
 import time
 
-from ai_providers import chat_completion, chat_stream, resolve_target
+from ai_providers import chat_completion, chat_stream, resolve_target  # noqa: F401 (chat_stream — для тестов)
 from routes.terminal import (run_agent as run_terminal, safe_path, relative_to_workspace,
+<<<<<<< HEAD
                              ensure_workspace, nova_search, nova_read, _save_research,
                              can_use_workspace, signed_in)
+=======
+                             ensure_workspace, nova_search, nova_read, _save_research,  # noqa: F401
+                             can_use_workspace, signed_in, _format_results as _format_search_results)
+>>>>>>> d42dfa25f0f2c0d68742da19cdd015831aee836a
 
 agent_bp = Blueprint("agent", __name__)
 
 MAX_STEPS = int(os.getenv("AGENT_MAX_STEPS", "8"))
+<<<<<<< HEAD
 AGENT_TIMEOUT = float(os.getenv("AGENT_TIMEOUT", "240"))
 STEP_TIMEOUT = float(os.getenv("AGENT_STEP_TIMEOUT", "30"))
 STREAM_TIMEOUT = float(os.getenv("AGENT_STREAM_TIMEOUT", "120"))
 SEARCH_PAGES = int(os.getenv("AGENT_SEARCH_PAGES", os.getenv("SEARCH_MAX_PAGES", "3")))
 MAX_OBSERVATION = 3500
 HISTORY_LIMIT = 16
+=======
+AGENT_TIMEOUT = float(os.getenv("AGENT_TIMEOUT", "180"))
+STEP_TIMEOUT = float(os.getenv("AGENT_STEP_TIMEOUT", "12"))
+MAX_OBSERVATION = 2500
+MAX_NOTE = 1800          # сколько текста каждой находки идёт в финальный запрос
+MAX_SOURCES = 12
+>>>>>>> d42dfa25f0f2c0d68742da19cdd015831aee836a
 
 TOOL_ACTIONS = {"plan", "run", "read", "write", "ls", "search", "open", "task", "task_done"}
 ALL_ACTIONS = TOOL_ACTIONS | {"answer"}
@@ -51,6 +82,7 @@ ALL_ACTIONS = TOOL_ACTIONS | {"answer"}
 AGENT_SYSTEM_PROMPT = """{persona}
 Сегодня {date}.
 
+<<<<<<< HEAD
 У тебя есть своё Linux-окружение: рабочая папка с терминалом, файлами, python3, node, git
 и доступом в интернет. Пользователь пишет с телефона — отвечай по делу, без воды.
 
@@ -93,6 +125,19 @@ SEARCH_ADDON = """
 в источниках нет."""
 
 NO_TOOLS_PROMPT = "{persona}\nСегодня {date}. Отвечай по-русски, конкретно и по делу."
+=======
+Правила:
+1. Ты ДОЛЖЕН отвечать ровно одним JSON-объектом и ничего больше — без слов вокруг.
+2. Сначала разберись в задаче (run/read/ls), потом действуй, потом answer.
+3. Один инструмент за один шаг. Не выдумывай результат команды — сначала выполни её.
+4. Команды выполняются ТОЛЬКО по одной, без | и >.
+5. Нужны свежие данные или факты — сделай search (обычно хватает 1–3 поисков), потом опирайся на найденное.
+6. НЕ повторяй одно и то же действие: результат уже перед тобой. Как только данных хватает —
+   сразу action=answer. Шагов у тебя мало, лишние поиски и чтение страниц тратят их впустую.
+7. В answer дай ПРЯМОЙ ответ на вопрос пользователя по-русски: сначала суть (названия, цифры, годы),
+   потом 1–3 предложения пояснения. Не пересказывай свои шаги и не вставляй JSON.
+   Ссылки на источники писать не нужно — интерфейс покажет их сам."""
+>>>>>>> d42dfa25f0f2c0d68742da19cdd015831aee836a
 
 
 def is_enabled():
@@ -107,9 +152,23 @@ def tools_enabled():
     return os.getenv("TERMINAL_ENABLED", "0") == "1" and can_use_workspace()
 
 
+# ───────────────────────── разбор ответов модели ─────────────────────────
+
+_THINK_BLOCK = re.compile(r"<think(?:ing)?>.*?</think(?:ing)?>", re.S | re.I)
+_THINK_TAIL = re.compile(r"^.*?</think(?:ing)?>", re.S | re.I)
+_THINK_OPEN = re.compile(r"</?think(?:ing)?>", re.I)
+
+
+def strip_think(text):
+    """Убирает «рассуждения» из ответа (nemotron, deepseek и др. кладут их прямо в текст)."""
+    text = _THINK_BLOCK.sub("", text or "")
+    text = _THINK_TAIL.sub("", text)          # закрывающий тег без открывающего
+    return _THINK_OPEN.sub("", text).strip()
+
+
 def parse_action(raw):
     """Достаёт JSON-объект действия из ответа модели. None — не разобрали."""
-    text = (raw or "").strip()
+    text = strip_think(raw)
     if not text:
         return None
     fence = re.search(r"```(?:json)?\s*(\{.*\})\s*```", text, re.S)
@@ -120,7 +179,7 @@ def parse_action(raw):
     if not block:
         return None
     try:
-        data = json.loads(block)
+        data = json.loads(block, strict=False)     # strict=False: переносы строк внутри строк
     except (TypeError, ValueError):
         # модели любят сырые переводы строк внутри "content" — пробуем мягкий разбор
         try:
@@ -130,12 +189,19 @@ def parse_action(raw):
     return data if isinstance(data, dict) and data.get("action") else None
 
 
+<<<<<<< HEAD
 def _action_share(text):
     """Какую долю ответа занимает JSON-объект (чтобы не принять пример из ответа за действие)."""
     start, end = text.find("{"), text.rfind("}")
     if not (0 <= start < end):
         return 0.0
     return (end - start + 1) / max(1, len(text.strip()))
+=======
+def looks_like_action(raw):
+    """Похоже на JSON действия, но не разобралось (обрезан, кривые кавычки)."""
+    text = strip_think(raw).lstrip()
+    return text.startswith(("{", "```")) and '"action"' in text
+>>>>>>> d42dfa25f0f2c0d68742da19cdd015831aee836a
 
 
 def clip(text, limit=MAX_OBSERVATION):
@@ -143,6 +209,7 @@ def clip(text, limit=MAX_OBSERVATION):
     return text if len(text) <= limit else text[:limit] + "\n… обрезано"
 
 
+<<<<<<< HEAD
 def _decide(buffer):
     """По началу ответа понять: это действие (JSON) или обычный текст.
 
@@ -179,6 +246,242 @@ def _persona():
         return config.system_prompt
     except Exception:          # pragma: no cover - config всегда есть в приложении
         return "Ты — NovaMind, умный AI-ассистент."
+=======
+def _ask(messages, **kwargs):
+    """Запрос к модели. Возвращает (текст, ошибка) — ровно одно из двух пустое.
+
+    chat_completion при успехе отдаёт (текст, meta-словарь), при ошибке — (None, строка).
+    Раньше второе значение принималось за «ошибку» всегда — и любой ответ модели
+    выбрасывался, так что итоговый ответ терялся.
+    """
+    text, meta = chat_completion(messages, **kwargs)
+    text = strip_think(text)
+    if text:
+        return text, ""
+    return "", str(meta) if isinstance(meta, str) and meta else "модель не ответила"
+
+
+# ───────────────────────── источники и заметки ─────────────────────────
+
+_RESULT_LINE = re.compile(r"^\s*\d+\.\s+(.+)\n\s+(https?://\S+)", re.M)
+
+
+def _add_sources(state, items):
+    """Копит уникальные источники (title, url, host) для сворачиваемого блока."""
+    seen = {item["url"] for item in state["sources"]}
+    for item in items or []:
+        url = str(item.get("url") or "").strip()
+        if not url.startswith(("http://", "https://")) or url in seen:
+            continue
+        seen.add(url)
+        state["sources"].append({
+            "title": str(item.get("title") or "")[:220],
+            "url": url,
+            "host": item.get("host") or urlparse(url).netloc,
+        })
+    del state["sources"][MAX_SOURCES:]
+
+
+def _sources_from_text(text):
+    """Источники из текстовой выдачи `nova search` (когда модель вызвала её командой run)."""
+    return [{"title": title.strip(), "url": url} for title, url in _RESULT_LINE.findall(text or "")]
+
+
+def _note(state, label, text):
+    """Запоминает находку — из этих заметок собирается финальный ответ."""
+    text = (text or "").strip()
+    if text:
+        state["notes"].append((label, clip(text, MAX_NOTE)))
+
+
+def _is_research_command(command):
+    parts = str(command or "").split()
+    return len(parts) >= 2 and parts[0] == "nova" and parts[1] in ("search", "read")
+
+
+# ───────────────────────── итоговый ответ ─────────────────────────
+
+def _synthesize(goal, state, provider, model):
+    """Финальный запрос: модель отвечает обычным текстом по собранным данным."""
+    notes = "\n\n".join(f"[{label}]\n{text}" for label, text in state["notes"][-6:])
+    prompt = (
+        f"Вопрос пользователя: {goal}\n\n"
+        f"Найденные данные:\n{notes or 'ничего не найдено'}\n\n"
+        "Ответь пользователю по-русски прямо и по существу, опираясь на эти данные: сначала суть "
+        "(названия, цифры, годы), затем 1–3 предложения пояснения. Если данные неполные или "
+        "противоречивые — скажи об этом честно. Не пиши JSON, не пересказывай свои шаги, "
+        "не показывай команды и не вставляй ссылки."
+    )
+    text, _error = _ask(
+        [{"role": "system", "content": "Ты — NovaMind, ассистент. Отвечай точно и по делу."},
+         {"role": "user", "content": prompt}],
+        provider=provider, model=model, temperature=0.3, max_tokens=1200, timeout=60,
+    )
+    action = parse_action(text)
+    if action:                                   # модель всё равно ответила JSON-ом
+        text = str(action.get("text") or "").strip() if action.get("action") == "answer" else ""
+    return text
+
+
+def _fallback_answer(state):
+    """Модель молчит — отдаём хотя бы найденное, а не пустоту."""
+    if state["notes"]:
+        label, text = state["notes"][0]
+        return ("Модель не смогла сформулировать ответ, но данные собраны. "
+                f"Вот что нашлось ({label}):\n\n{clip(text, 1500)}\n\n"
+                "Источники — в свёрнутом блоке ниже; попробуйте ещё раз или смените модель.")
+    return "Не удалось получить ответ. Проверьте модель и настройки."
+
+
+@agent_bp.route("/api/agent/status")
+def agent_status():
+    enabled = is_enabled()
+    return jsonify({
+        "enabled": enabled,
+        "tools": tools_enabled(),
+        "max_steps": MAX_STEPS,
+        "user": signed_in(),
+        "admin": bool(session.get("admin_logged_in")),
+        "hint": ("" if enabled
+                 else "Включите AGENT_ENABLED=1 в .env и перезапустите сервер"),
+    })
+
+
+@agent_bp.route("/api/agent/stream", methods=["POST"])
+def agent_stream():
+    """Агентный цикл: план → инструменты → ответ. NDJSON."""
+    data = request.get_json(silent=True) or {}
+    goal = (data.get("message") or "").strip()
+    if not goal:
+        return jsonify({"error": "Пустое сообщение"}), 400
+    if not is_enabled():
+        return jsonify({"error": "Агентный режим выключен (AGENT_ENABLED=1)"}), 403
+    if not signed_in():
+        return jsonify({"error": "Войдите в аккаунт, чтобы включить агентный режим"}), 403
+
+    provider, model, _ = resolve_target()
+    use_tools = tools_enabled()
+    if use_tools:
+        ensure_workspace()
+
+    @stream_with_context
+    def generate():
+        started = time.time()
+        state = {"task_id": None, "steps": 0, "answer": "", "sources": [], "notes": [],
+                 "research": 0}
+        yield _ndjson({"type": "stage", "scene": "agent", "title": "Планирую",
+                       "text": "Разбираю задачу по шагам…"})
+
+        # 1. План одним запросом — чтобы пользователь сразу видел ход мыслей
+        plan_text = ""
+        if use_tools:
+            plan_answer, plan_error = _ask(
+                [{"role": "user", "content":
+                    f"Задача: {goal}\n\nСоставь короткий план из 2-4 пунктов, что нужно сделать "
+                    f"в рабочей папке. Без JSON, только текст."}],
+                provider=provider, model=model, temperature=0.2, max_tokens=300, timeout=30,
+            )
+            if plan_answer and not plan_error:
+                plan_text = clip(plan_answer, 900)
+                yield _ndjson({"type": "plan", "text": plan_text})
+
+        history = [{"role": "system", "content": AGENT_SYSTEM_PROMPT}]
+        if plan_text:
+            history.append({"role": "assistant", "content": f"План:\n{plan_text}"})
+        history.append({"role": "user", "content": f"Задача: {goal}"})
+
+        # 2. Цикл действий
+        seen, duplicates, parse_fails = set(), 0, 0
+        for step in range(1, MAX_STEPS + 1):
+            if time.time() - started > AGENT_TIMEOUT:
+                yield _ndjson({"type": "step", "icon": "⏱", "text": "Время вышло — собираю ответ"})
+                break
+            if not use_tools:
+                break
+
+            state["steps"] += 1
+            raw, error = _ask(history, provider=provider, model=model,
+                              temperature=0.1, max_tokens=1200, timeout=60)
+            if error:
+                yield _ndjson({"type": "error", "text": error})
+                break                                   # ответ соберём из найденного
+
+            action = parse_action(raw)
+            if not action:
+                if looks_like_action(raw):
+                    # JSON обрезался или сломан: один раз просим повторить, потом сдаёмся
+                    parse_fails += 1
+                    if parse_fails >= 2:
+                        break
+                    history.append({"role": "assistant", "content": raw[:500]})
+                    history.append({"role": "user", "content":
+                                    "Это не разобралось как JSON. Повтори одним корректным JSON-объектом."})
+                    continue
+                state["answer"] = raw.strip()           # обычный текст — это и есть ответ
+                break
+
+            kind = str(action.get("action"))
+            key = _action_key(action, kind)
+            if key in seen and kind not in ("answer", "task", "task_done"):
+                duplicates += 1
+                yield _ndjson({"type": "step", "icon": "↺", "text": "Повторное действие пропущено"})
+                if duplicates >= 2:
+                    break
+                observation = ("Ты уже выполнял именно это действие — результат выше. Не повторяй его: "
+                               "используй имеющиеся данные и дай action=answer.")
+            else:
+                seen.add(key)
+                observation = yield from _perform(action, kind, use_tools, state, goal=goal)
+
+            if kind == "answer":
+                state["answer"] = str(action.get("text") or "").strip()
+                break
+
+            history.append({"role": "assistant", "content": json.dumps(action, ensure_ascii=False)[:2000]})
+            observation = clip(observation)
+            nudge = _nudge(state, MAX_STEPS - step)
+            history.append({"role": "user", "content":
+                            f"Результат действия:\n{observation}" + (f"\n\n{nudge}" if nudge else "")})
+
+        # 3. Нет ответа (лимит шагов, таймаут, повторы, сбой) — собираем его по найденному
+        if not state["answer"] and (use_tools or state["notes"]):
+            yield _ndjson({"type": "step", "icon": "✍️", "text": "Готовлю ответ по найденному"})
+            state["answer"] = _synthesize(goal, state, provider, model)
+        if not state["answer"] and not use_tools:
+            # инструментов нет — обычный ответ модели
+            text, _err = _ask(history, provider=provider, model=model,
+                              temperature=0.3, max_tokens=1200, timeout=60)
+            action = parse_action(text)
+            state["answer"] = (str(action.get("text") or "").strip() if action else text)
+        if not state["answer"]:
+            state["answer"] = _fallback_answer(state)
+
+        # Источники — отдельным событием; интерфейс держит их свёрнутыми
+        if state["sources"]:
+            yield _ndjson({"type": "sources", "sources": state["sources"]})
+
+        # 4. Финальный ответ печатаем по кускам — интерфейс любит поток
+        for chunk in _chunks(state["answer"]):
+            yield _ndjson({"type": "token", "token": chunk})
+
+        if state["task_id"]:
+            import database
+            task = database.get_task(state["task_id"])
+            if task and task["status"] != "done":
+                database.update_task(state["task_id"], status="done")
+                database.append_task_step(state["task_id"], "Агент закончил", status="done",
+                                          log=clip(state["answer"], 1500))
+                yield _ndjson({"type": "task", "task": database.get_task(state["task_id"])})
+
+        yield _ndjson({"type": "result", "reply": state["answer"], "steps": state["steps"],
+                       "task_id": state["task_id"], "model": model,
+                       "sources": state["sources"],
+                       "offline": provider == "local_demo"})
+        yield _ndjson({"type": "done"})
+
+    return Response(generate(), mimetype="application/x-ndjson",
+                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+>>>>>>> d42dfa25f0f2c0d68742da19cdd015831aee836a
 
 
 def _ndjson(payload):
@@ -191,6 +494,7 @@ def _chunks(text, size=48):
         yield text[index:index + size]
 
 
+<<<<<<< HEAD
 def _history_for_prompt(chat_id):
     """Последние сообщения диалога — чтобы ИИ помнил контекст, как в обычном чате."""
     if not chat_id:
@@ -544,6 +848,29 @@ def _auto_search(goal, state, messages):
 
 # ───────────────────────── действия ─────────────────────────
 
+=======
+def _action_key(action, kind):
+    """Ключ действия для поиска повторов."""
+    value = (action.get("command") or action.get("query") or action.get("url")
+             or action.get("path") or "")
+    if kind == "write":
+        value = f"{value}|{str(action.get('content') or '')[:200]}"
+    return (kind, " ".join(str(value).lower().split()))
+
+
+def _nudge(state, remaining):
+    """Подсказка модели: пора отвечать, а не искать дальше."""
+    if remaining <= 0:
+        return "Шагов не осталось. Дай финальный ответ прямо сейчас: {\"action\":\"answer\",\"text\":\"…\"}."
+    if remaining == 1:
+        return "Остался последний шаг. Больше не ищи — ответь action=answer по собранным данным."
+    if state["research"] >= 3:
+        return ("Данных из интернета уже достаточно. Если можешь ответить — сразу action=answer; "
+                "новый поиск — только если чего-то принципиально не хватает.")
+    return ""
+
+
+>>>>>>> d42dfa25f0f2c0d68742da19cdd015831aee836a
 def _perform(action, kind, use_tools, state, goal=""):
     """Одно действие в окружении.
 
@@ -590,6 +917,7 @@ def _perform(action, kind, use_tools, state, goal=""):
         query = str(action.get("query") or "").strip()
         if not query:
             return 'Пустой поисковый запрос. Повтори с {"action":"search","query":"..."}.'
+        state["research"] += 1
         results, meta = nova_search(query, limit=6)
         numbered = _add_sources(state, results)
         text = _format_numbered(query, numbered, meta.get("backend"), meta.get("elapsed_ms", 0))
@@ -597,7 +925,12 @@ def _perform(action, kind, use_tools, state, goal=""):
             yield _ndjson({"type": "step", "icon": "⚠️", "text": f"Поиск «{query}» ничего не дал"})
             text += "\nНичего не нашлось. Попробуй другой запрос."
         else:
+<<<<<<< HEAD
             state["searched"] = True
+=======
+            _add_sources(state, results)
+            _note(state, f"поиск «{query}»", text)
+>>>>>>> d42dfa25f0f2c0d68742da19cdd015831aee836a
             yield _ndjson({"type": "step", "icon": "🔎",
                            "text": f"Нашёл {len(numbered)} по запросу «{query}» ({meta.get('backend')})"})
             yield _ndjson({"type": "tool", "name": "search", "command": f"nova search {query}",
@@ -612,7 +945,11 @@ def _perform(action, kind, use_tools, state, goal=""):
         url = str(action.get("url") or "").strip()
         if not url.startswith(("http://", "https://")):
             return "Нужен полный адрес страницы, например https://example.com"
+        state["research"] += 1
         text, elapsed = nova_read(url, max_chars=4000)
+        if text:
+            _add_sources(state, [{"title": urlparse(url).netloc, "url": url}])
+            _note(state, f"страница {url}", text)
         if state["task_id"]:
             database.append_task_step(state["task_id"], f"Прочитал {url}", status="done",
                                       log=(text or "")[:1200])
@@ -628,12 +965,20 @@ def _perform(action, kind, use_tools, state, goal=""):
             path = safe_path(action.get("path", ""))
         except ValueError as exc:
             return str(exc)
+<<<<<<< HEAD
         if not os.path.isfile(path):
             yield _ndjson({"type": "tool", "name": "read", "command": f"cat {action.get('path', '')}",
                            "code": 1, "output": "Файла нет"})
             return f"Файла {action.get('path', '')} нет. Посмотри список: {{\"action\":\"ls\"}}"
         with open(path, "r", encoding="utf-8", errors="replace") as handle:
             content = handle.read(MAX_OBSERVATION)
+=======
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as handle:
+                content = handle.read(MAX_OBSERVATION)
+        except OSError as exc:                       # нет файла / это папка — сообщаем модели, а не падаем
+            return f"Не удалось прочитать {relative_to_workspace(path)}: {exc.strerror or exc}"
+>>>>>>> d42dfa25f0f2c0d68742da19cdd015831aee836a
         yield _ndjson({"type": "step", "icon": "📖", "text": f"Читаю {relative_to_workspace(path)}"})
         yield _ndjson({"type": "tool", "name": "read", "command": f"cat {relative_to_workspace(path)}",
                        "code": 0, "output": clip(content, 600)})
@@ -667,6 +1012,11 @@ def _perform(action, kind, use_tools, state, goal=""):
 
     result = run_terminal(command, timeout=STEP_TIMEOUT)
     output = (result["stdout"] or "") + (("\n" + result["stderr"]) if result["stderr"] else "")
+    if _is_research_command(command) and not result["code"]:
+        # модель искала не через action=search, а командой `nova search …` — учитываем так же
+        state["research"] += 1
+        _add_sources(state, _sources_from_text(output))
+        _note(state, command, output)
     if state["task_id"]:
         database.append_task_step(
             state["task_id"], label, status="error" if result["code"] else "done",

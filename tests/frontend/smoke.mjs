@@ -670,6 +670,7 @@ mock.agentStream = SIMPLE_STREAM;
 const sendCallsBefore = mock.sendStreamCalls;
 document.getElementById('chat-input').value = 'привет';
 await window.sendMessage();
+<<<<<<< HEAD
 await settle();
 check('обычное сообщение ушло в главный чат с Linux, без переключателя',
   mock.agentRequests.length === 1 && mock.agentRequests[0].message === 'привет'
@@ -691,6 +692,29 @@ check('шаги видны в блоке «Работа в Linux»',
   && agentBubble.querySelectorAll('.agent-term-row').length === 2
   && agentBubble.querySelector('.agent-term').textContent.includes('python3 hello.py'));
 check('блок шагов стоит над ответом', (() => {
+=======
+await new Promise((resolve) => setTimeout(resolve, 350));
+const aiTurns = document.querySelectorAll('.message.ai');
+const agentBubble = aiTurns[aiTurns.length - 1];
+check('агент показывает план', !!agentBubble && agentBubble.querySelector('.stage-plan') !== null);
+check('блок «Работа в Linux» есть, но сам не раскрывается, вывод спрятан',
+  !!agentBubble && agentBubble.querySelector('.agent-term') !== null
+  && agentBubble.querySelector('.agent-term-out') !== null);
+check('агент показывает выполненные команды в сворачиваемом блоке',
+  !!agentBubble && agentBubble.querySelectorAll('.agent-term-row').length === 2
+  && agentBubble.querySelector('.agent-term').textContent.includes('python3 hello.py')
+  && agentBubble.querySelector('.agent-term-meta').textContent.includes('шага'));
+check('агент показывает заведённую задачу',
+  !!agentBubble && agentBubble.querySelector('.agent-task') !== null
+  && agentBubble.querySelector('.agent-task').textContent.includes('Проверить песочницу'));
+check('агент печатает ответ и закрывает сцену',
+  !!agentBubble && agentBubble.querySelector('.answer').textContent.includes('привет из папки')
+  && agentBubble.querySelector('.stage').classList.contains('collapsed'));
+check('после ответа блок команд сворачивается',
+  !!agentBubble && agentBubble.querySelector('.agent-term').classList.contains('is-done')
+  && !agentBubble.querySelector('.agent-term').classList.contains('is-open'));
+check('свёрнутый блок команд можно раскрыть кликом', (() => {
+>>>>>>> d42dfa25f0f2c0d68742da19cdd015831aee836a
   const box = agentBubble.querySelector('.agent-term');
   const answer = agentBubble.querySelector('.answer');
   return !!box && !!(box.compareDocumentPosition(answer) & window.Node.DOCUMENT_POSITION_FOLLOWING);

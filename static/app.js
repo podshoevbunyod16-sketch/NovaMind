@@ -889,14 +889,18 @@ function createAssistantTurn(options = {}) {
         box.className = 'agent-term';
         box.innerHTML = `
           <button type="button" class="agent-term-head">
+<<<<<<< HEAD
             <span class="agent-term-ico">🐧</span>
+=======
+            <span class="agent-term-ico">⌨️</span>
+>>>>>>> d42dfa25f0f2c0d68742da19cdd015831aee836a
             <span class="agent-term-title">Работа в Linux</span>
             <span class="agent-term-meta"></span>
             <span class="caret">▼</span>
           </button>
           <div class="agent-term-log"></div>`;
         box.querySelector('.agent-term-head').addEventListener('click', () => {
-          // После сворачивания блок можно развернуть вручную
+          // Свёрнут по умолчанию, раскрывается только по нажатию
           box.classList.toggle('is-open');
         });
         bubble.insertBefore(box, answerEl);
@@ -917,10 +921,18 @@ function createAssistantTurn(options = {}) {
       box.querySelector('.agent-term-log').appendChild(row);
       const count = box.querySelectorAll('.agent-term-row').length;
       const done = box.querySelectorAll('.agent-term-row.is-error').length;
+      const n10 = count % 10, n100 = count % 100;
+      const word = (n10 === 1 && n100 !== 11) ? 'шаг'
+        : (n10 >= 2 && n10 <= 4 && (n100 < 12 || n100 > 14)) ? 'шага' : 'шагов';
       box.querySelector('.agent-term-meta').textContent =
+<<<<<<< HEAD
         `${count} ${count === 1 ? 'шаг' : (count < 5 ? 'шага' : 'шагов')}${done ? ` · ошибок: ${done}` : ''}`;
       box.classList.add('is-open');        // во время работы показываем
       box.classList.remove('is-done');
+=======
+        `${count} ${word}${done ? ` · ошибок: ${done}` : ''}`;
+      // Блок остаётся свёрнутым: раскрывается только по нажатию пользователя
+>>>>>>> d42dfa25f0f2c0d68742da19cdd015831aee836a
       scrollToBottom();
     },
 
@@ -954,7 +966,7 @@ function createAssistantTurn(options = {}) {
       reasoningText += token;
       if (!reasoningBox) {
         reasoningBox = document.createElement('div');
-        reasoningBox.className = 'reasoning open';
+        reasoningBox.className = 'reasoning';          // свёрнуто, пока пользователь сам не откроет
         reasoningBox.innerHTML = `
           <div class="reasoning-head">
             <svg class="reasoning-brain" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -1002,7 +1014,7 @@ function createAssistantTurn(options = {}) {
       let box = bubble.querySelector('.sources');
       if (!box) {
         box = document.createElement('div');
-        box.className = 'sources';
+        box.className = 'sources min';        // источники свёрнуты по умолчанию
         bubble.appendChild(box);
       }
       box.innerHTML = `
@@ -1548,7 +1560,7 @@ function appendMessage(role, content, meta = null) {
 
   const sources = Array.isArray(meta?.sources) ? meta.sources.filter((s) => s && s.url) : [];
   const sourcesHtml = sources.length ? `
-    <div class="sources">
+    <div class="sources min">
       <div class="sources-head"><span>🔗 Источники · ${sources.length}</span><span class="caret">▼</span></div>
       <div class="sources-list">${sources.map(sourceItemHtml).join('')}</div>
     </div>` : '';
