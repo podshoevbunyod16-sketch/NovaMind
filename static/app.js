@@ -890,7 +890,6 @@ function createAssistantTurn(options = {}) {
         box.innerHTML = `
           <button type="button" class="agent-term-head">
             <span class="agent-term-ico">⌨️</span>
- d42dfa25f0f2c0d68742da19cdd015831aee836a
             <span class="agent-term-title">Работа в Linux</span>
             <span class="agent-term-meta"></span>
             <span class="caret">▼</span>
@@ -924,7 +923,6 @@ function createAssistantTurn(options = {}) {
       box.querySelector('.agent-term-meta').textContent =
         `${count} ${word}${done ? ` · ошибок: ${done}` : ''}`;
       // Блок остаётся свёрнутым: раскрывается только по нажатию пользователя
- d42dfa25f0f2c0d68742da19cdd015831aee836a
       scrollToBottom();
     },
 
