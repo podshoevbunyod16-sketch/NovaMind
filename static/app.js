@@ -1687,25 +1687,11 @@ function setActive(el) {
 }
 
 // ========== ЧАТ ==========
-function newChat() {
-  const store = historyLoad();
-  store.activeId = null;
-  historySave(store);
-  historyReplay = true;
-  try {
-    chatContainer.innerHTML = '';
-    chatContainer.appendChild(welcomeScreen);
-    welcomeScreen.style.display = 'flex';
-    msgCount = 0;
-  } finally {
-    historyReplay = false;
-  }
-  renderChatList();
-}
 
 function clearChat() {
-  newChat();
-  fetch('/api/history/clear', { method: 'DELETE' }).catch(() => {});
+  fetch('/api/chats/clear', { method: 'POST' })
+    .then(() => newChat())
+    .catch(() => newChat());
   showNotification('Чат очищен', 'info');
 }
 
@@ -1780,77 +1766,6 @@ function historyAddMessage(role, content, meta = null) {
   renderChatList();
 }
 
-function renderChatList() {
-  const container = document.getElementById('historyContainer');
-  if (!container) return;
-
-  const store = historyLoad();
-  const chats = [...(store.chats || [])].sort((a, b) => {
-    const diff = (Number(b.updatedAt) || 0) - (Number(a.updatedAt) || 0);
-    return diff || String(b.id).localeCompare(String(a.id));
-  });
-  const active = store.activeId;
-  container.innerHTML = '';
-
-  if (!chats.length) {
-    container.innerHTML = '<div class="history-empty">💬<br>Начни диалог —<br>он появится здесь</div>';
-    return;
-  }
-
-  const now = new Date();
-  const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
-  const yesterdayStart = todayStart - 86400000;
-  const weekStart = todayStart - 6 * 86400000;
-  const groups = { 'Сегодня': [], 'Вчера': [], 'Последние 7 дней': [], 'Ранее': [] };
-
-  for (const chat of chats) {
-    const updatedAt = Number(chat.updatedAt) || Date.now();
-    if (updatedAt >= todayStart) groups['Сегодня'].push(chat);
-    else if (updatedAt >= yesterdayStart) groups['Вчера'].push(chat);
-    else if (updatedAt >= weekStart) groups['Последние 7 дней'].push(chat);
-    else groups['Ранее'].push(chat);
-  }
-
-  for (const [label, group] of Object.entries(groups)) {
-    if (!group.length) continue;
-    const heading = document.createElement('div');
-    heading.className = 'history-group-label';
-    heading.textContent = label;
-    container.appendChild(heading);
-
-    for (const chat of group) {
-      const item = document.createElement('div');
-      item.className = 'history-item' + (chat.id === active ? ' active' : '');
-      item.title = chat.title || 'Новый диалог';
-
-      const updated = new Date(Number(chat.updatedAt) || Number(chat.createdAt) || Date.now());
-      const date = updated.toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit', year: 'numeric' });
-      const time = updated.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
-      const count = (chat.messages || []).length;
-
-      item.innerHTML = `
-        <div class="history-item-icon">💬</div>
-        <div class="history-item-body">
-          <div class="history-item-title">${escapeHtml(chat.title || 'Новый диалог')}</div>
-          <div class="history-item-meta">
-            <span class="history-item-datetime">${date} · ${time}</span>
-            <span class="history-item-count">${count} сообщ.</span>
-          </div>
-        </div>
-        <button class="hist-del-btn" type="button" title="Удалить чат">×</button>`;
-
-      item.addEventListener('click', (e) => {
-        if (e.target.closest('.hist-del-btn')) return;
-        loadChat(chat.id);
-      });
-      item.querySelector('.hist-del-btn').addEventListener('click', (e) => {
-        e.stopPropagation();
-        deleteChat(chat.id);
-      });
-      container.appendChild(item);
-    }
-  }
-}
 
 function loadChat(chatId) {
   const store = historyLoad();
@@ -1880,13 +1795,6 @@ function loadChat(chatId) {
   scrollToBottom();
 }
 
-function deleteChat(chatId) {
-  const store = historyLoad();
-  store.chats = (store.chats || []).filter((c) => c.id !== chatId);
-  if (store.activeId === chatId) store.activeId = null;
-  historySave(store);
-  renderChatList();
-}
 
 function startNewChat() {
   newChat();
@@ -1897,6 +1805,193 @@ function startNewChat() {
 function loadChatList() {
   renderChatList();
   return Promise.resolve();
+}
+
+
+// ══════════════════════════════════════════
+// ИСТОРИЯ ЧАТОВ — СЕРВЕРНАЯ (SQLite)
+// ══════════════════════════════════════════
+
+let _activeChatId = null;
+let _chatListLoading = false;
+
+/** Загружает список чатов с сервера и рендерит в сайдбаре */
+async function renderChatList() {
+  const container = document.getElementById('historyContainer');
+  if (!container || _chatListLoading) return;
+  _chatListLoading = true;
+
+  try {
+    const resp = await fetch('/api/chats');
+    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+    const data = await resp.json();
+    const chats = data.chats || [];
+
+    container.innerHTML = '';
+
+    if (!chats.length) {
+      container.innerHTML = '<div class="history-empty">💬<br>Начни диалог —<br>он появится здесь</div>';
+      return;
+    }
+
+    const now = Date.now();
+    const todayStart     = new Date().setHours(0,0,0,0);
+    const yesterdayStart = todayStart - 86400000;
+    const weekStart      = todayStart - 6 * 86400000;
+    const groups = { 'Сегодня': [], 'Вчера': [], 'Последние 7 дней': [], 'Ранее': [] };
+
+    for (const chat of chats) {
+      const ts = (chat.updated_at || 0) * 1000;
+      if      (ts >= todayStart)     groups['Сегодня'].push(chat);
+      else if (ts >= yesterdayStart) groups['Вчера'].push(chat);
+      else if (ts >= weekStart)      groups['Последние 7 дней'].push(chat);
+      else                           groups['Ранее'].push(chat);
+    }
+
+    for (const [label, items] of Object.entries(groups)) {
+      if (!items.length) continue;
+      const gl = document.createElement('div');
+      gl.className = 'history-group-label';
+      gl.textContent = label;
+      container.appendChild(gl);
+
+      for (const chat of items) {
+        const item = document.createElement('div');
+        item.className = 'history-item' + (chat.id === _activeChatId ? ' active' : '');
+        item.dataset.chatId = chat.id;
+        item.innerHTML = `
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:14px;height:14px;flex-shrink:0;opacity:.5">
+            <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+          </svg>
+          <span class="hist-title">${escapeHtml(chat.title || 'Новый диалог')}</span>
+          <span class="hist-count">${chat.msg_count || ''}</span>
+          <button class="hist-del-btn" title="Удалить">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" style="width:12px;height:12px">
+              <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+            </svg>
+          </button>`;
+
+        item.addEventListener('click', () => { switchChat(chat.id); closeSidebar(); });
+        item.querySelector('.hist-del-btn').addEventListener('click', (e) => {
+          e.stopPropagation();
+          deleteChatServer(chat.id);
+        });
+        container.appendChild(item);
+      }
+    }
+  } catch (e) {
+    console.error('renderChatList error:', e);
+    container.innerHTML = '<div class="history-empty" style="color:var(--text-muted)">⚠️ Не удалось загрузить историю</div>';
+  } finally {
+    _chatListLoading = false;
+  }
+}
+
+/** Переключается на существующий чат, загружает его сообщения */
+async function switchChat(chatId) {
+  if (chatId === _activeChatId) return;
+  try {
+    // Переключаемся на сервере
+    await fetch('/api/chats/' + chatId + '/switch', { method: 'POST' });
+    _activeChatId = chatId;
+
+    // Загружаем сообщения
+    const resp = await fetch('/api/chats/' + chatId);
+    const data = await resp.json();
+    const msgs = data.messages || [];
+
+    // Очищаем экран
+    chatContainer.innerHTML = '';
+    welcomeScreen.style.display = 'none';
+    msgCount = msgs.length;
+
+    if (!msgs.length) {
+      chatContainer.appendChild(welcomeScreen);
+      welcomeScreen.style.display = 'flex';
+    } else {
+      for (const msg of msgs) {
+        appendMessage(msg.role === 'user' ? 'user' : 'ai', msg.content, false);
+      }
+      scrollToBottom();
+    }
+
+    // Обновляем активный элемент в списке
+    document.querySelectorAll('.history-item').forEach(el => {
+      el.classList.toggle('active', el.dataset.chatId === chatId);
+    });
+  } catch (e) {
+    console.error('switchChat error:', e);
+    showNotification('Ошибка загрузки чата', 'error');
+  }
+}
+
+/** Создаёт новый чат на сервере */
+async function newChat() {
+  try {
+    const resp = await fetch('/api/chats', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title: 'Новый диалог' })
+    });
+    const data = await resp.json();
+    _activeChatId = data.chat_id || null;
+  } catch (e) {
+    console.error('newChat error:', e);
+  }
+
+  // Очищаем экран
+  chatContainer.innerHTML = '';
+  chatContainer.appendChild(welcomeScreen);
+  welcomeScreen.style.display = 'flex';
+  msgCount = 0;
+
+  await renderChatList();
+  if (input) input.focus();
+}
+
+/** Удаляет чат с сервера */
+async function deleteChatServer(chatId) {
+  try {
+    await fetch('/api/chats/' + chatId, { method: 'DELETE' });
+    if (chatId === _activeChatId) {
+      _activeChatId = null;
+      chatContainer.innerHTML = '';
+      chatContainer.appendChild(welcomeScreen);
+      welcomeScreen.style.display = 'flex';
+      msgCount = 0;
+    }
+    await renderChatList();
+  } catch (e) {
+    console.error('deleteChatServer error:', e);
+  }
+}
+
+/** Старый deleteChat — теперь делегирует серверной версии */
+function deleteChat(chatId) {
+  deleteChatServer(chatId);
+}
+
+/** Загружает текущий чат при открытии страницы */
+async function loadCurrentChat() {
+  try {
+    const resp = await fetch('/api/chats/current');
+    const data = await resp.json();
+    _activeChatId = data.chat_id || null;
+    const msgs = data.messages || [];
+
+    if (msgs.length > 0) {
+      chatContainer.innerHTML = '';
+      welcomeScreen.style.display = 'none';
+      msgCount = msgs.length;
+      for (const msg of msgs) {
+        appendMessage(msg.role === 'user' ? 'user' : 'ai', msg.content, false);
+      }
+      scrollToBottom();
+    }
+  } catch (e) {
+    console.error('loadCurrentChat error:', e);
+  }
+  await renderChatList();
 }
 
 // ══════════════════════════════════════════
