@@ -532,6 +532,7 @@ async function execCommand(command) {
         else if (event.type === 'step') turn.step(event.icon, event.text);
         else if (event.type === 'tool') turn.tool(event);
         else if (event.type === 'task') { turn.taskChip(event.task); if (state.tab === 'tasks') loadTasks(); }
+        else if (event.type === 'sources') turn.setSources(event.sources || []);
         else if (event.type === 'token') turn.appendToken(event.token);
         else if (event.type === 'result') result = event;
         else if (event.type === 'error') turn.step('⚠️', event.text);

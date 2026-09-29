@@ -273,3 +273,88 @@ def test_agent_blocked_tool_is_reported_to_model(admin_client, monkeypatch):
     assert not [event for event in events if event["type"] == "tool"]
     answer = "".join(event["token"] for event in events if event["type"] == "token")
     assert "Инструменты недоступны" in answer or "по памяти" in answer
+
+
+# ══════════════ агент: ответ приходит всегда ══════════════
+
+def _stub_real_model(monkeypatch, answers):
+    """Как настоящий chat_completion: при успехе второе значение — непустой словарь meta."""
+    queue = list(answers)
+
+    def fake_completion(messages, **kwargs):
+        if not queue:
+            return None, "нет больше ответов"
+        return queue.pop(0), {"provider": "test", "model": "m", "offline": False}
+
+    monkeypatch.setattr(agent_routes, "chat_completion", fake_completion)
+    return queue
+
+
+def _fake_search(monkeypatch):
+    results = [{"title": "Список стран по ВВП", "url": "https://example.org/gdp", "snippet": "…", "host": "example.org"}]
+    monkeypatch.setattr(agent_routes, "nova_search", lambda query, limit=6: (
+        results, {"backend": "wiki", "elapsed_ms": 5, "query": query, "results": results, "count": 1, "trace": []}))
+
+
+def test_agent_answer_survives_real_meta_dict(admin_client, monkeypatch, sandbox):
+    """Регрессия: непустой meta не должен считаться ошибкой и съедать ответ."""
+    _stub_real_model(monkeypatch, ["План: ответить", "Просто текстовый ответ модели"])
+    events = _ndjson(admin_client.post("/api/agent/stream", json={"message": "привет"}))
+    assert any(event["type"] == "plan" for event in events)
+    answer = "".join(event["token"] for event in events if event["type"] == "token")
+    assert "Просто текстовый ответ" in answer
+
+
+def test_agent_step_limit_still_gives_answer_from_findings(admin_client, monkeypatch, sandbox):
+    """Модель только ищет и не отвечает — ответ собирается по найденному."""
+    monkeypatch.setattr(agent_routes, "MAX_STEPS", 2)
+    _fake_search(monkeypatch)
+    _stub_real_model(monkeypatch, [
+        "План: поискать",
+        '{"action":"search","query":"самая богатая страна"}',
+        '{"action":"search","query":"самая бедная страна"}',
+        "Самая богатая — Люксембург, самая бедная — Бурунди.",     # финальный запрос
+    ])
+    events = _ndjson(admin_client.post("/api/agent/stream", json={"message": "богатая и бедная страна"}))
+    answer = "".join(event["token"] for event in events if event["type"] == "token")
+    assert "Люксембург" in answer
+    assert "лимит шагов" not in answer.lower()
+    sources = next(event for event in events if event["type"] == "sources")
+    assert sources["sources"][0]["url"] == "https://example.org/gdp"
+
+
+def test_agent_skips_repeated_action(admin_client, monkeypatch, sandbox):
+    _fake_search(monkeypatch)
+    _stub_real_model(monkeypatch, [
+        "План: искать",
+        '{"action":"search","query":"вопрос"}',
+        '{"action":"search","query":"вопрос"}',
+        '{"action":"answer","text":"Ответ по найденному"}',
+    ])
+    events = _ndjson(admin_client.post("/api/agent/stream", json={"message": "вопрос"}))
+    assert sum(1 for event in events if event["type"] == "tool") == 1
+    assert "Ответ по найденному" in "".join(e["token"] for e in events if e["type"] == "token")
+
+
+def test_agent_strips_think_and_parses_multiline_json(admin_client, monkeypatch, sandbox):
+    _stub_real_model(monkeypatch, [
+        "План: коротко",
+        '<think>надо подумать {"action":"ls"}</think>{"action":"answer","text":"строка 1\nстрока 2"}',
+    ])
+    events = _ndjson(admin_client.post("/api/agent/stream", json={"message": "привет"}))
+    answer = "".join(event["token"] for event in events if event["type"] == "token")
+    assert answer == "строка 1\nстрока 2"
+
+
+def test_agent_nova_search_via_run_collects_sources(admin_client, monkeypatch, sandbox):
+    """Модель вызвала `nova search` командой run — источники и заметки всё равно копятся."""
+    _fake_search(monkeypatch)
+    import routes.terminal as terminal
+    monkeypatch.setattr(terminal, "nova_search", agent_routes.nova_search)
+    _stub_real_model(monkeypatch, [
+        "План: искать",
+        '{"action":"run","command":"nova search страны ввп"}',
+        '{"action":"answer","text":"Готово"}',
+    ])
+    events = _ndjson(admin_client.post("/api/agent/stream", json={"message": "страны"}))
+    assert any(event["type"] == "sources" for event in events)

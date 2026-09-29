@@ -1,13 +1,19 @@
 """
 routes/admin.py — Административные маршруты
 """
-from flask import Blueprint, request, jsonify, session, render_template
+from flask import Blueprint, request, jsonify, session, render_template, redirect
 import subprocess
 import json
 import os
-from database import list_chats
-from groq_rotation import GROQ_KEYS, get_groq_key_status
-from config import ADMIN_CODE, ADMIN_CREDENTIALS, ADMIN_SESSION_KEY, PROVIDERS
+import requests
+from urllib.parse import quote
+import config
+import groq_rotation
+from groq_rotation import GROQ_KEYS, GROQ_KEY_COOLDOWN, get_groq_key_status
+from config import ADMIN_CREDENTIALS, PROVIDERS, GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET
+
+# Папка с сохранённым кодом лежит в корне проекта (а не в routes/) — как и generated_*
+SAVED_CODES_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "saved_codes")
 
 admin_bp = Blueprint("admin", __name__)
 
@@ -60,7 +66,7 @@ def auth_google_callback():
         session['nova_google_login'] = True
         session['nova_is_admin'] = False
 
-        return redirect(f'/chat?nick={nick}&email={email}')
+        return redirect(f'/chat?nick={quote(nick)}&email={quote(email)}')
     except Exception as e:
         return f'Ошибка авторизации: {str(e)}', 500
 
@@ -132,42 +138,43 @@ def admin_check():
 
 @admin_bp.route('/api/admin/stats')
 def admin_stats():
+    from routes import chat as chat_routes
     return jsonify({
         "models": PROVIDERS,
-        "current_provider": current_provider,
-        "current_model": current_model,
-        "history_messages": len(contents),
-        "plugins_loaded": list(plugins.keys()),
-        "custom_commands": list(custom_commands.keys()),
-        "system_prompt": system_prompt,
+        "current_provider": config.current_provider,
+        "current_model": config.current_model,
+        "history_messages": len(chat_routes.contents),
+        "plugins_loaded": list(config.plugins.keys()),
+        "custom_commands": list(config.CUSTOM_ALIASES.keys()),
+        "system_prompt": config.system_prompt,
         "voice_enabled": os.environ.get("ASSISTANT_VOICE_REPLY", "0") == "1"
     })
 
 @admin_bp.route('/api/admin/settings', methods=['POST'])
 def admin_settings():
-    global system_prompt, current_provider, current_model
     data = request.get_json() or {}
+    # Настройки живут в config — их читают ai_providers и чат; локальные копии ничего не меняли
     if "system_prompt" in data:
-        system_prompt = data["system_prompt"]
+        config.system_prompt = data["system_prompt"]
     if "provider" in data and data["provider"] in PROVIDERS:
-        current_provider = data["provider"]
+        config.current_provider = data["provider"]
     if "model" in data:
         for key, pdata in PROVIDERS.items():
             for m in pdata["models"]:
                 if m["id"] == data["model"]:
-                    current_provider = key
-                    current_model = data["model"]
+                    config.current_provider = key
+                    config.current_model = data["model"]
                     break
     return jsonify({"success": True})
 
 @admin_bp.route('/api/admin/save_code', methods=['POST'])
 def admin_save_code():
     data = request.get_json() or {}
-    filename = data.get("filename", "script.py")
+    filename = os.path.basename(str(data.get("filename", "script.py"))) or "script.py"
     code = data.get("code", "")
     if not code:
         return jsonify({"error": "Нет кода"}), 400
-    code_dir = os.path.join(os.path.dirname(__file__), "saved_codes")
+    code_dir = SAVED_CODES_DIR
     os.makedirs(code_dir, exist_ok=True)
     filepath = os.path.join(code_dir, filename)
     with open(filepath, "w", encoding="utf-8") as f:
@@ -177,8 +184,8 @@ def admin_save_code():
 @admin_bp.route('/api/admin/run_saved_code', methods=['POST'])
 def admin_run_saved_code():
     data = request.get_json() or {}
-    filename = data.get("filename", "script.py")
-    code_dir = os.path.join(os.path.dirname(__file__), "saved_codes")
+    filename = os.path.basename(str(data.get("filename", "script.py"))) or "script.py"
+    code_dir = SAVED_CODES_DIR
     filepath = os.path.join(code_dir, filename)
     if not os.path.exists(filepath):
         return jsonify({"error": "Файл не найден"}), 404
@@ -195,7 +202,7 @@ def admin_run_saved_code():
 
 @admin_bp.route('/api/admin/saved_codes')
 def admin_saved_codes():
-    code_dir = os.path.join(os.path.dirname(__file__), "saved_codes")
+    code_dir = SAVED_CODES_DIR
     if not os.path.exists(code_dir):
         return jsonify({"files": []})
     files = sorted([f for f in os.listdir(code_dir) if f.endswith(".py")])
@@ -203,8 +210,8 @@ def admin_saved_codes():
 
 @admin_bp.route('/api/admin/load_code')
 def admin_load_code():
-    filename = request.args.get("file", "")
-    code_dir = os.path.join(os.path.dirname(__file__), "saved_codes")
+    filename = os.path.basename(request.args.get("file", ""))
+    code_dir = SAVED_CODES_DIR
     filepath = os.path.join(code_dir, filename)
     if not os.path.exists(filepath):
         return jsonify({"error": "Файл не найден"}), 404
@@ -220,7 +227,7 @@ def admin_groq_keys():
     """Статус всех Groq API ключей"""
     return jsonify({
         "keys": get_groq_key_status(),
-        "current_key_index": groq_key_index,
+        "current_key_index": groq_rotation.groq_key_index,
         "total_keys": len(GROQ_KEYS),
         "cooldown_hours": GROQ_KEY_COOLDOWN / 3600
     })
@@ -228,15 +235,9 @@ def admin_groq_keys():
 @admin_bp.route('/api/admin/groq_keys/reset', methods=['POST'])
 def admin_reset_groq_keys():
     """Сбросить все cooldown'ы (для админа)"""
-    global groq_key_index
-    for key_info in GROQ_KEYS:
-        key_info["exhausted_at"] = None
-    groq_key_index = 0
+    with groq_rotation._groq_lock:
+        for key_info in GROQ_KEYS:
+            key_info["exhausted_at"] = None
+        groq_rotation.groq_key_index = 0
     return jsonify({"success": True, "message": "Все ключи сброшены"})
 
-
-# ========== СТАТИКА ==========
-
-@admin_bp.route('/static/')
-def static_files(filename):
-    return send_from_directory('static', filename)

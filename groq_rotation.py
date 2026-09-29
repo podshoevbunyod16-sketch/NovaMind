@@ -5,11 +5,10 @@ import os
 import time
 import threading
 
-# Загружаем все GROQ_KEY_* из окружения
-GROQ_KEYS = []
-GROQ_KEY_COOLDOWN = 25 * 3600  # 25 часов
+# Cooldown исчерпанного ключа: 25 часов (1 день + 1 час = 90000 секунд)
+GROQ_KEY_COOLDOWN = 25 * 3600
 
-# --- Загрузка всех Groq ключей ---
+# --- Загрузка всех Groq ключей: GROQ_API_KEY_1 ... GROQ_API_KEY_9 ---
 GROQ_KEYS = []
 for i in range(1, 10):  # GROQ_API_KEY_1 ... GROQ_API_KEY_9
     k = os.getenv(f"GROQ_API_KEY_{i}", "")
@@ -23,18 +22,11 @@ if not GROQ_KEYS:
         GROQ_KEYS.append({"key": main_key, "index": 0, "exhausted_at": None})
 
 groq_key_index = 0  # Текущий активный ключ
-_groq_lock = threading.Lock()  # FIX: защита от race condition
-
-# Cooldown: 1 день + 1 час = 90000 секунд
-GROQ_KEY_COOLDOWN = 90000
-
-
-_groq_lock = threading.Lock()
-groq_key_index = 0
+_groq_lock = threading.Lock()  # защита от race condition
 
 def get_groq_key():
     """Возвращает текущий активный Groq API ключ"""
-    global groq_key_index, GROQ_KEYS
+    global groq_key_index
 
     if not GROQ_KEYS:
         return ""
@@ -57,7 +49,7 @@ def get_groq_key():
 
 def mark_groq_key_exhausted(permanent=False):
     """Помечает текущий ключ как исчерпанный. permanent=True для 401 (неверный ключ)."""
-    global groq_key_index, GROQ_KEYS
+    global groq_key_index
 
     if not GROQ_KEYS:
         return

@@ -644,13 +644,13 @@ await new Promise((resolve) => setTimeout(resolve, 350));
 const aiTurns = document.querySelectorAll('.message.ai');
 const agentBubble = aiTurns[aiTurns.length - 1];
 check('агент показывает план', !!agentBubble && agentBubble.querySelector('.stage-plan') !== null);
-check('блок команд виден во время работы и прячет вывод по умолчанию',
+check('блок «Работа в Linux» есть, но сам не раскрывается, вывод спрятан',
   !!agentBubble && agentBubble.querySelector('.agent-term') !== null
   && agentBubble.querySelector('.agent-term-out') !== null);
 check('агент показывает выполненные команды в сворачиваемом блоке',
   !!agentBubble && agentBubble.querySelectorAll('.agent-term-row').length === 2
   && agentBubble.querySelector('.agent-term').textContent.includes('python3 hello.py')
-  && agentBubble.querySelector('.agent-term-meta').textContent.includes('команд'));
+  && agentBubble.querySelector('.agent-term-meta').textContent.includes('шага'));
 check('агент показывает заведённую задачу',
   !!agentBubble && agentBubble.querySelector('.agent-task') !== null
   && agentBubble.querySelector('.agent-task').textContent.includes('Проверить песочницу'));
