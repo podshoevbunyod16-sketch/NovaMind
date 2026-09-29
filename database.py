@@ -56,13 +56,18 @@ def create_chat(title="Новый чат"):
     return chat_id
 
 def get_chat_history(chat_id, limit=50):
-    """Возвращает историю сообщений чата."""
+    """Возвращает последние `limit` сообщений чата в хронологическом порядке.
+
+    Раньше отдавались ПЕРВЫЕ сообщения — в длинном диалоге модель «забывала»
+    свежий контекст. Теперь берём хвост и разворачиваем обратно.
+    """
     with get_db() as conn:
         rows = conn.execute(
-            "SELECT role, content FROM messages WHERE chat_id=? ORDER BY created_at ASC LIMIT ?",
+            "SELECT role, content FROM messages WHERE chat_id=? "
+            "ORDER BY created_at DESC, rowid DESC LIMIT ?",
             (chat_id, limit)
         ).fetchall()
-    return [{"role": r["role"], "content": r["content"]} for r in rows]
+    return [{"role": r["role"], "content": r["content"]} for r in reversed(rows)]
 
 def add_message(chat_id, role, content):
     """Добавляет сообщение в историю чата."""

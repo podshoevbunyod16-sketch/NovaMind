@@ -41,7 +41,8 @@ def web(monkeypatch):
 
     def fake_fetch(url, max_chars=6000):
         calls.append({"url": url, "max_chars": max_chars})
-        return f"Текст страницы {url}. Секретов нет."[:max_chars]
+        # как настоящий fetch_page_text: (текст, ошибка)
+        return f"Текст страницы {url}. Секретов нет. " * 12, None
 
     monkeypatch.setattr(search_routes, "search_web", fake_search)
     monkeypatch.setattr(search_routes, "fetch_page_text", fake_fetch)
@@ -56,10 +57,21 @@ def _ndjson(response):
     return [json.loads(line) for line in response.get_data(as_text=True).splitlines() if line.strip()]
 
 
-def _stub_model(monkeypatch, answers):
+def _stub_model(monkeypatch, answers, seen=None):
+    """Модель отвечает строками по очереди — потоком, как настоящая."""
     queue = list(answers)
+
+    def fake_stream(messages, **kwargs):
+        if seen is not None:
+            seen.append({"messages": list(messages), "system": kwargs.get("system", "")})
+        text = queue.pop(0) if queue else "готово"
+        yield "token", text
+        yield "done", ""
+
+    monkeypatch.setattr(agent_routes, "chat_stream", fake_stream)
     monkeypatch.setattr(agent_routes, "chat_completion",
                         lambda messages, **kw: ((queue.pop(0) if queue else ""), {}))
+    return queue
 
 
 # ══════════════ терминал ══════════════
@@ -151,27 +163,31 @@ def test_linux_read_endpoint(admin_client, sandbox, web):
 
 # ══════════════ агент ══════════════
 
+def _answer(events):
+    return "".join(event["token"] for event in events if event["type"] == "token")
+
+
 def test_agent_searches_and_answers_with_sources(admin_client, sandbox, monkeypatch, web):
     _stub_model(monkeypatch, [
-        "План: поищу свежие данные и отвечу",
         '{"action":"search","query":"python asyncio"}',
-        '{"action":"answer","text":"По итогам поиска: docs.python.org и PEP 492"}',
+        "По итогам поиска: docs.python.org [1] и PEP 492 [3]",
     ])
     events = _ndjson(admin_client.post("/api/agent/stream", json={"message": "что нового про asyncio?"}))
     tool = next(event for event in events if event["type"] == "tool")
     assert tool["name"] == "search"
     assert tool["command"] == "nova search python asyncio"
     assert len(tool["results"]) == 3 and tool["results"][1]["host"] == "habr.com"
-    answer = "".join(event["token"] for event in events if event["type"] == "token")
-    assert "docs.python.org" in answer
+    assert "[1] asyncio — документация" in tool["output"]
+    sources = next(event for event in events if event["type"] == "sources")["sources"]
+    assert [item["host"] for item in sources] == ["docs.python.org", "habr.com", "peps.python.org"]
+    assert "docs.python.org" in _answer(events)
 
 
 def test_agent_opens_page_after_search(admin_client, sandbox, monkeypatch, web):
     _stub_model(monkeypatch, [
-        "План: найду и прочитаю",
         '{"action":"search","query":"asyncio"}',
         '{"action":"open","url":"https://peps.python.org/pep-0492/"}',
-        '{"action":"answer","text":"Прочитал PEP 492"}',
+        "Прочитал PEP 492",
     ])
     events = _ndjson(admin_client.post("/api/agent/stream", json={"message": "разберись с asyncio"}))
     names = [event.get("name") for event in events if event["type"] == "tool"]
@@ -182,12 +198,11 @@ def test_agent_opens_page_after_search(admin_client, sandbox, monkeypatch, web):
 
 def test_agent_search_step_goes_to_task_log(admin_client, sandbox, monkeypatch, web):
     _stub_model(monkeypatch, [
-        "План: заведу задачу, найду, сохраню",
         '{"action":"task","title":"Собрать справку по asyncio","detail":"выжимка для проекта"}',
         '{"action":"search","query":"asyncio cancellation"}',
         '{"action":"write","path":"notes/research/asyncio.md","content":"выжимка"}',
         '{"action":"task_done","note":"справка собрана"}',
-        '{"action":"answer","text":"Справка в notes/research/asyncio.md"}',
+        "Справка в notes/research/asyncio.md",
     ])
     events = _ndjson(admin_client.post("/api/agent/stream", json={"message": "собери справку по asyncio"}))
     result = next(event for event in events if event["type"] == "result")
@@ -201,10 +216,67 @@ def test_agent_search_step_goes_to_task_log(admin_client, sandbox, monkeypatch, 
 def test_agent_reports_empty_search(admin_client, sandbox, monkeypatch):
     monkeypatch.setattr(search_routes, "search_web", lambda query, num=8, **kw: ([], []))
     _stub_model(monkeypatch, [
-        "План: поищу",
         '{"action":"search","query":"несуществующее"}',
-        '{"action":"answer","text":"Ничего не нашлось"}',
+        "Ничего не нашлось",
     ])
     events = _ndjson(admin_client.post("/api/agent/stream", json={"message": "найди несуществующее"}))
     assert any(event["type"] == "step" and "ничего не дал" in event["text"] for event in events)
     assert not [event for event in events if event["type"] == "tool"]
+
+
+# ══════════════ кнопка «Поиск» (автопоиск) через окружение ══════════════
+
+def test_search_button_goes_through_linux(google_client, sandbox, monkeypatch, web):
+    """search=true: nova search → чтение страниц → заметка → ответ со ссылками."""
+    seen = []
+    queue = _stub_model(monkeypatch, ["Цена — 12 500 ₽ [1], подробности [2]."], seen)
+    events = _ndjson(google_client.post("/api/agent/stream",
+                                        json={"message": "сколько стоит asyncio?", "search": True}))
+    kinds = [event["type"] for event in events]
+
+    assert events[0]["type"] == "stage" and events[0]["scene"] == "search"
+    tools = [event for event in events if event["type"] == "tool"]
+    assert tools[0]["name"] == "search"
+    assert tools[0]["command"] == "nova search сколько стоит asyncio?"
+    assert [tool["name"] for tool in tools[1:]] == ["open", "open", "open"]
+    assert "sources" in kinds and kinds.index("sources") < kinds.index("token")
+
+    # выдержки сохранены в рабочую папку
+    notes = list((sandbox / "notes" / "research").glob("*-search.md"))
+    assert notes and "docs.python.org" in notes[0].read_text()
+    assert any(event["type"] == "step" and "Сохранил" in event["text"] for event in events)
+
+    # модель получила найденное и инструкцию про ссылки
+    assert "ПОИСК ВКЛЮЧЁН" in seen[0]["system"]
+    observation = seen[0]["messages"][-1]["content"]
+    assert "[1] asyncio — документация" in observation and "Текст страницы" in observation
+
+    result = next(event for event in events if event["type"] == "result")
+    assert result["searched"] is True and len(result["sources"]) == 3
+    assert "12 500" in _answer(events)
+    assert queue == []
+
+
+def test_search_button_can_search_again(google_client, sandbox, monkeypatch, web):
+    _stub_model(monkeypatch, [
+        '{"action":"search","query":"asyncio 3.13 changes"}',
+        "Итог по двум поискам [1]",
+    ])
+    events = _ndjson(google_client.post("/api/agent/stream",
+                                        json={"message": "что нового", "search": True}))
+    searches = [event for event in events if event["type"] == "tool" and event["name"] == "search"]
+    assert len(searches) == 2
+    # одинаковые ссылки не дублируются в списке источников
+    result = next(event for event in events if event["type"] == "result")
+    assert len(result["sources"]) == 3
+
+
+def test_search_button_with_empty_results(google_client, sandbox, monkeypatch):
+    monkeypatch.setattr(search_routes, "search_web", lambda query, num=8, **kw: ([], []))
+    seen = []
+    _stub_model(monkeypatch, ["Отвечу из базы знаний"], seen)
+    events = _ndjson(google_client.post("/api/agent/stream",
+                                        json={"message": "редкий вопрос", "search": True}))
+    assert any(event["type"] == "step" and "ничего не дал" in event["text"] for event in events)
+    assert "ничего не нашёл" in seen[0]["messages"][-1]["content"]
+    assert _answer(events) == "Отвечу из базы знаний"

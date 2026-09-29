@@ -224,11 +224,8 @@ function applyGlassTheme(theme) {
   document.documentElement.setAttribute('data-glass-theme', value);
   localStorage.setItem('nova_theme', value);
 }
-function cycleGlassTheme() {
-  applyGlassTheme('aurora');
-}
+// Тема одна — Aurora, кнопки смены темы нет.
 applyGlassTheme('aurora');
-$('themeBtn')?.addEventListener('click', cycleGlassTheme);
 
 /* ========== ДИАГНОСТИКА ПОИСКА ========== */
 async function loadSearchHealth(force = false) {

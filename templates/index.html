@@ -116,24 +116,10 @@
 
       <div class="topbar-actions">
 
-        <button class="icon-btn agent-btn" id="btnAgent" type="button" aria-pressed="false"
-                title="Агентный режим: задача выполняется в песочнице (терминал, файлы, задачи)">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="7" width="16" height="12" rx="3"/><path d="M12 3v4M8 13h.01M16 13h.01M9.5 16.5h5"/></svg>
-        </button>
-
-        <button class="icon-btn" id="btnLinux" type="button" aria-expanded="false"
-                title="Рабочая папка: файлы, поиск, git и задачи (Ctrl+J). Терминалом пользуется сам ИИ">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M7 9l3 3-3 3M13 15h4"/></svg>
-        </button>
-
         <button class="media-model-btn" id="btnMediaModel" type="button"
                 onclick="openMediaPicker()" title="Поиск и выбор моделей генерации изображений, аудио и видео">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z"/><path d="M19 15l.8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8z"/></svg>
           <span class="media-model-label" id="mediaModelLabel">Медиа</span>
-        </button>
-
-        <button class="icon-btn" id="btnTheme" title="Тема оформления: Aurora" onclick="cycleTheme()">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 3a9 9 0 0 0 0 18z" fill="currentColor" stroke="none"/></svg>
         </button>
 
         <button class="icon-btn" title="Настройки AI" onclick="openSettings()">
@@ -151,38 +137,16 @@
       <div class="welcome" id="welcomeScreen">
         <img src="/static/images/image.png" alt="Khirad" class="welcome-logo">
         <h1>Привет! Я <span>Khirad</span></h1>
-        <p>Ваш интеллектуальный AI-ассистент. Задайте любой вопрос или используйте инструменты из боковой панели.</p>
-        <div class="suggestions">
-          <div class="suggestion-card" onclick="activateMode({prefix: '/services weather ', label: '🌤 Погода', placeholder: 'Введите город для погоды...'})">
-            <div class="card-icon">🌤️</div>
-            <div class="card-title">Погода</div>
-            <div class="card-desc">Узнайте погоду в любом городе</div>
-          </div>
-          <div class="suggestion-card" onclick="activateMode({prefix: '/code ', label: '💻 Помощник кода', placeholder: 'Опишите, какой код создать...'})">
-            <div class="card-icon">💻</div>
-            <div class="card-title">Напиши код</div>
-            <div class="card-desc">Сгенерировать код на любом языке</div>
-          </div>
-          <div class="suggestion-card" onclick="activateMode({prefix: '/services currency ', label: '💱 Курс валют', placeholder: 'Введите валюты (USD RUB)...'})">
-            <div class="card-icon">💱</div>
-            <div class="card-title">Курс валют</div>
-            <div class="card-desc">Актуальные курсы валют</div>
-          </div>
-          <div class="suggestion-card" onclick="enableWebSearch()">
-            <div class="card-icon">🔍</div>
-            <div class="card-title">Поиск в интернете</div>
-            <div class="card-desc">Живой поиск с источниками под ответом</div>
-          </div>
-        </div>
+        <p>Напишите задачу — я отвечу сразу или сам поработаю в Linux: запущу код, создам файлы, найду свежие данные.</p>
       </div>
     </div>
 
     <!-- Input Area -->
     <div class="input-area">
       <div class="input-toolbar">
-        <button class="toolbar-btn" id="btn-web-search" onclick="toggleWebSearch()" title="Живой поиск в интернете с источниками">
+        <button class="toolbar-btn" id="btn-web-search" onclick="toggleWebSearch()" title="Автопоиск: ИИ ищет в интернете через Linux-окружение и отвечает с источниками">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-          <span id="searchBtnText">Поиск в интернете</span>
+          <span id="searchBtnText">Поиск</span>
           <span class="lg-dot" id="searchHealthDot" title="Состояние поисковых бэкендов"></span>
         </button>
 
@@ -193,7 +157,7 @@
 
         <button class="toolbar-btn" id="btn-attach" onclick="toggleAttachMenu()">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
-          Прикрепить файл
+          <span>Прикрепить файл</span>
         </button>
 
         <div class="attach-dropdown" id="attachDropdown">
@@ -209,8 +173,8 @@
           <button class="toolbar-btn" onclick="attachVideo()">🎬 Видео</button>
         </div>
 
-        <button class="toolbar-btn" id="btn-media" onclick="openMediaPicker()">🎨 Медиа</button>
-        <button class="toolbar-btn" id="btn-calm" onclick="toggleCalmMotion()" title="Отключить фоновые анимации">✨ Анимации</button>
+        <button class="toolbar-btn" id="btn-media" onclick="openMediaPicker()" title="Модели изображений, аудио и видео">🎨 <span>Медиа</span></button>
+        <button class="toolbar-btn" id="btn-calm" onclick="toggleCalmMotion()" title="Отключить фоновые анимации">✨ <span>Анимации</span></button>
       </div>
 
       <div class="mode-active" id="modeActiveBar" hidden>
@@ -249,7 +213,7 @@
       </div>
 
       <div class="input-footer">
-        Khirad может ошибаться. Проверяйте важную информацию · <b>Ctrl+K</b> — команды
+        Khirad может ошибаться. Проверяйте важную информацию
       </div>
     </div>
 
@@ -305,83 +269,6 @@
 </div>
 
 <div class="lg-toast-stack" id="toastStack" aria-live="polite"></div>
-
-
- <!-- ═══════════════ МАЛЕНЬКИЙ LINUX ═══════════════ 
-  <aside class="linux-panel" id="linuxPanel" hidden aria-label="Маленький Linux">
-    <header class="linux-head">
-      <div class="linux-title">
-        <span class="linux-led" id="linuxLed"></span>
-        <span>Рабочая папка</span>
-        <code class="linux-path" id="linuxPath">workspace/</code>
-        <span class="linux-hint" title="Терминала в чате нет — им пользуется ИИ во время рассуждений">ИИ работает в песочнице сам</span>
-      </div>
-      <nav class="linux-tabs" id="linuxTabs" role="tablist">
-        <button type="button" class="linux-tab is-active" data-tab="files" role="tab">Файлы</button>
-        <button type="button" class="linux-tab" data-tab="search" role="tab">Поиск</button>
-        <button type="button" class="linux-tab" data-tab="git" role="tab">Git</button>
-        <button type="button" class="linux-tab" data-tab="tasks" role="tab">Задачи<span class="linux-badge" id="tasksBadge" hidden>0</span></button>
-      </nav>
-      <button class="icon-btn linux-close" id="btnLinuxClose" type="button" title="Закрыть (Esc)">✕</button>
-    </header>
-
-    <div class="linux-body">
-      <!-- Файлы 
-      <section class="linux-sec" data-sec="files">
-        <div class="sec-bar">
-          <button class="lg-btn tiny" id="btnFilesRefresh" type="button">Обновить</button>
-          <span class="sec-hint" id="filesHint"></span>
-        </div>
-        <div class="file-list" id="fileList"></div>
-        <div class="file-view" id="fileView" hidden>
-          <div class="file-view-head">
-            <code id="fileViewPath"></code>
-            <span class="file-view-acts">
-              <button class="lg-btn tiny" id="btnFileToChat" type="button" title="Вставить содержимое в поле ввода">В чат</button>
-              <button class="lg-btn tiny" id="btnFileToTerm" type="button" title="Показать в терминале">В терминал</button>
-              <button class="lg-btn tiny" id="btnFileClose" type="button">Закрыть</button>
-            </span>
-          </div>
-          <pre class="file-view-body" id="fileViewBody"></pre>
-        </div>
-      </section>
-
-      <!-- Поиск: интернет и код, оба — через песочницу -
-      <section class="linux-sec" data-sec="search">
-        <form class="search-form" id="searchForm">
-          <div class="search-modes" id="searchModes">
-            <button type="button" class="search-mode is-active" data-mode="web" title="Поиск в интернете теми же бэкендами, что и в чате">Интернет</button>
-            <button type="button" class="search-mode" data-mode="code" title="Тот же запрос, но по файлам рабочей папки">По песочнице</button>
-          </div>
-          <input id="searchInput" placeholder="например: python asyncio task group" autocomplete="off">
-          <button class="lg-btn tiny" type="submit" id="btnSearchRun">Искать</button>
-        </form>
-        <div class="search-status" id="searchStatus" hidden></div>
-        <div class="search-list" id="searchList"></div>
-      </section>
-
-      <!-- Git --
-      <section class="linux-sec" data-sec="git">
-        <div class="sec-bar">
-          <button class="lg-btn tiny" id="btnGitRefresh" type="button">Обновить</button>
-          <span class="sec-hint" id="gitHint"></span>
-        </div>
-        <div class="git-box" id="gitBox"></div>
-      </section>
-
-      <!-- Задачи --
-      <section class="linux-sec" data-sec="tasks">
-        <form class="task-form" id="taskForm">
-          <input id="taskInput" placeholder="Новая задача — Enter, чтобы добавить">
-          <button class="lg-btn tiny" type="submit">Добавить</button>
-        </form>
-        <div class="task-list" id="taskList"></div>
-      </section>
-    </div>
-  </aside>
--->
-
-
 
 
 
