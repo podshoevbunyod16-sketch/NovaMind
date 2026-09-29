@@ -94,16 +94,44 @@ def is_admin():
     return bool(session.get("admin_logged_in"))
 
 
+def signed_in():
+    """Вошёл ли пользователь — через Google, другой OAuth или по нику.
+
+    Google кладёт флаги в сессию сам (routes/admin.py), быстрый вход по нику
+    синхронизируется через /api/session/login. Песочница — рабочее окружение,
+    поэтому доступ есть у любого вошедшего, а не только у админа.
+    """
+    return bool(session.get("admin_logged_in")
+                or session.get("nova_google_login")
+                or session.get("nova_signed_in")
+                or session.get("nova_user_nick")
+                or session.get("username"))
+
+
+def can_use_workspace():
+    """Кто может выполнять команды песощницы.
+
+    По умолчанию — любой вошедший. TERMINAL_STRICT_ADMIN=1 возвращает
+    старое поведение: только администратор.
+    """
+    if is_admin():
+        return True
+    if os.getenv("TERMINAL_STRICT_ADMIN", "0") == "1":
+        return False
+    return signed_in()
+
+
 def denied(reason):
-    return jsonify({"error": reason, "enabled": is_enabled(), "admin": is_admin()}), 403
+    return jsonify({"error": reason, "enabled": is_enabled(), "user": signed_in(),
+                    "admin": is_admin()}), 403
 
 
 def guard():
     """Единая проверка доступа. None — можно работать, иначе готовый ответ."""
     if not is_enabled():
         return denied("Окружение выключено. Включите TERMINAL_ENABLED=1 в .env и перезапустите сервер.")
-    if not is_admin():
-        return denied("Доступно только администратору (вход в панель управления).")
+    if not can_use_workspace():
+        return denied("Войдите в аккаунт (Google или другой), чтобы пользоваться рабочей папкой.")
     return None
 
 
@@ -370,12 +398,14 @@ def run_agent(command, timeout=12):
 @terminal_bp.route("/api/terminal/status")
 def terminal_status():
     """Доступен ли терминал и что уже есть в песочнице."""
-    enabled, admin = is_enabled(), is_admin()
-    payload = {"enabled": enabled, "admin": admin, "available": enabled and admin,
+    enabled, user = is_enabled(), signed_in()
+    allowed = can_use_workspace()
+    payload = {"enabled": enabled, "user": user, "admin": is_admin(),
+               "available": enabled and allowed,
                "workspace": relative_to_workspace(WORKSPACE)}
-    if not (enabled and admin):
-        payload["hint"] = ("Включите TERMINAL_ENABLED=1 в .env и войдите как администратор"
-                           if not enabled else "Войдите как администратор")
+    if not (enabled and allowed):
+        payload["hint"] = ("Включите TERMINAL_ENABLED=1 в .env и перезапустите сервер"
+                           if not enabled else "Войдите в аккаунт, чтобы открыть рабочую папку")
         return jsonify(payload)
     ensure_workspace()
     payload["cwd"] = WORKSPACE

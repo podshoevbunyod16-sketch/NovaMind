@@ -105,6 +105,24 @@ def admin_client(client, sandbox):
     """Администратор в уже включённой песочнице."""
     with client.session_transaction() as session:
         session["admin_logged_in"] = True
-        session["username"] = "admin"
+        session["admin_username"] = "admin"
+    return client
+
+
+@pytest.fixture
+def google_client(client, sandbox):
+    """Обычный пользователь: вошёл через Google — песочница ему доступна."""
+    with client.session_transaction() as session:
+        session["nova_google_login"] = True
+        session["nova_user_nick"] = "Иван"
+        session["nova_user_email"] = "ivan@example.com"
+    return client
+
+
+@pytest.fixture
+def nick_client(client, sandbox):
+    """Вход по нику: серверная сессия ставится через /api/session/login."""
+    response = client.post("/api/session/login", json={"nick": "Мария"})
+    assert response.status_code == 200
     return client
 

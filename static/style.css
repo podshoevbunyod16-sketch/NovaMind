@@ -1196,6 +1196,10 @@ button, input, select, textarea, .stage, .sources-head, .msg-actions {
   min-width: 16px; padding: 0 4px; border-radius: 8px; font-size: 10px; line-height: 15px;
   background: var(--acc); color: #04121f; font-weight: 700; text-align: center;
 }
+.linux-hint {
+  font-size: 10.5px; color: var(--txt-dim); background: rgba(120, 190, 255, .1);
+  border: 1px solid rgba(120, 190, 255, .18); border-radius: 20px; padding: 2px 9px;
+}
 .linux-close { padding: 4px 9px; }
 
 .linux-body { flex: 1; min-height: 0; display: flex; }
@@ -1371,23 +1375,46 @@ kbd {
   background: rgba(179, 156, 255, .18); color: #c9b8ff; border-radius: 6px; padding: 2px 7px;
 }
 .stage-plan-text { color: var(--txt-dim); white-space: pre-wrap; }
-.agent-tools { display: flex; flex-direction: column; gap: 6px; margin: 10px 0; }
-.agent-tool { border: 1px solid rgba(255, 255, 255, .09); border-radius: 10px; overflow: hidden; }
-.agent-tool-head {
+
+/* Терминала в чате нет: это блок выполненных команд внутри ответа ИИ.
+   Во время работы раскрыт, после ответа сворачивается в одну строку. */
+.agent-term {
+  margin: 10px 0; border: 1px solid rgba(255, 255, 255, .09); border-radius: 12px; overflow: hidden;
+  background: rgba(0, 0, 0, .18);
+}
+.agent-term-head {
   display: flex; align-items: center; gap: 8px; width: 100%; text-align: left; cursor: pointer;
-  background: rgba(255, 255, 255, .04); border: none; color: var(--txt); font: inherit; font-size: 12px; padding: 6px 10px;
+  background: rgba(255, 255, 255, .04); border: none; color: var(--txt);
+  font: inherit; font-size: 12px; padding: 7px 11px;
 }
-.agent-tool-cmd { font-family: var(--mono, ui-monospace, monospace); font-size: 11.5px; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.agent-tool-code { font-size: 10.5px; color: #5ae6a0; }
-.agent-tool.is-error .agent-tool-code, .agent-tool.is-error .agent-tool-ico { color: #ff8f8f; }
-.agent-tool-out {
-  display: none; margin: 0; padding: 9px 11px; max-height: 260px; overflow: auto;
-  font-family: var(--mono, ui-monospace, monospace); font-size: 11px; line-height: 1.5; white-space: pre-wrap;
-  color: #cfd6e4; background: rgba(0, 0, 0, .32); border-top: 1px solid rgba(255, 255, 255, .06);
+.agent-term-head:hover { background: rgba(255, 255, 255, .07); }
+.agent-term-ico { flex-shrink: 0; }
+.agent-term-title { font-weight: 600; }
+.agent-term-meta { margin-left: auto; font-size: 10.5px; color: var(--txt-dim); }
+.agent-term-head .caret { font-size: 9px; color: var(--txt-dim); transition: transform .18s ease; }
+.agent-term.is-open .agent-term-head .caret { transform: rotate(180deg); }
+/* Свёрнутое состояние после ответа — тише, чтобы не спорить с текстом */
+.agent-term.is-done { opacity: .72; }
+.agent-term.is-done .agent-term-head { background: transparent; border-top: 1px solid rgba(255, 255, 255, .05); }
+.agent-term-log { display: none; padding: 4px 8px 8px; }
+.agent-term.is-open .agent-term-log { display: block; }
+.agent-term-row {
+  display: flex; align-items: flex-start; gap: 7px; padding: 4px 3px; font-size: 11.5px;
+  border-bottom: 1px dashed rgba(255, 255, 255, .05); flex-wrap: wrap;
 }
-.agent-tool.is-open .agent-tool-out { display: block; }
-.agent-tool-head .caret { font-size: 9px; color: var(--txt-dim); transition: transform .15s ease; }
-.agent-tool.is-open .agent-tool-head .caret { transform: rotate(180deg); }
+.agent-term-row:last-child { border-bottom: none; }
+.agent-term-sign { color: #5ae6a0; flex-shrink: 0; }
+.agent-term-row.is-error .agent-term-sign, .agent-term-row.is-error .agent-term-code { color: #ff8f8f; }
+.agent-term-cmd {
+  font-family: var(--mono, ui-monospace, monospace); font-size: 11px; color: #8fd3ff;
+  overflow-wrap: anywhere; flex: 1; min-width: 0;
+}
+.agent-term-code { font-size: 10.5px; color: #5ae6a0; }
+.agent-term-out {
+  width: 100%; margin: 2px 0 2px 18px; padding: 7px 9px; max-height: 200px; overflow: auto;
+  font-family: var(--mono, ui-monospace, monospace); font-size: 10.5px; line-height: 1.5;
+  white-space: pre-wrap; color: #cfd6e4; background: rgba(0, 0, 0, .3); border-radius: 8px;
+}
 .agent-task {
   display: flex; align-items: center; gap: 8px; margin: 10px 0; padding: 7px 11px;
   border: 1px solid rgba(179, 156, 255, .3); border-radius: 11px; background: rgba(179, 156, 255, .1); font-size: 12px;

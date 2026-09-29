@@ -433,7 +433,18 @@
             localStorage.setItem('nova_user_nick', nick);
             localStorage.setItem('nova_user_code', code);
             localStorage.setItem('nova_is_admin', 'false');
+            syncServerSession(nick);
             window.location.href = '/chat';
+        }
+
+        // Серверная сессия: без неё рабочая папка и агентный режим
+        // не откроются — сервер не знает про вход по нику.
+        function syncServerSession(nick) {
+            fetch('/api/session/login', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({nick: nick})
+            }).catch(() => {});
         }
 
         function quickLogin(type) {

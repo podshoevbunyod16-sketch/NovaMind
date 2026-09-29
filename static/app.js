@@ -884,32 +884,62 @@ function createAssistantTurn(options = {}) {
       scrollToBottom();
     },
 
-    /** Вывод команды терминала — сворачиваемый блок прямо в ответе. */
+    /**
+     * Команды, которые ИИ выполняет в песочнице.
+     *
+     * Отдельного терминала в чате нет: во время работы блок раскрыт,
+     * а как только пошёл финальный ответ — сворачивается в одну строку.
+     */
     tool(event = {}) {
       const command = event.command || '';
       if (!command) return;
-      let box = bubble.querySelector('.agent-tools');
+      let box = bubble.querySelector('.agent-term');
       if (!box) {
         box = document.createElement('div');
-        box.className = 'agent-tools';
+        box.className = 'agent-term';
+        box.innerHTML = `
+          <button type="button" class="agent-term-head">
+            <span class="agent-term-ico">⌨️</span>
+            <span class="agent-term-title">Работа в песочнице</span>
+            <span class="agent-term-meta"></span>
+            <span class="caret">▼</span>
+          </button>
+          <div class="agent-term-log"></div>`;
+        box.querySelector('.agent-term-head').addEventListener('click', () => {
+          // После сворачивания блок можно развернуть вручную
+          box.classList.toggle('is-open');
+        });
         bubble.appendChild(box);
       }
       const failed = Number(event.code) !== 0;
-      const wrapEl = document.createElement('div');
-      wrapEl.className = `agent-tool${failed ? ' is-error' : ''}`;
-      wrapEl.innerHTML = `
-        <button type="button" class="agent-tool-head">
-          <span class="agent-tool-ico">${failed ? '✕' : '⌨'}</span>
-          <code class="agent-tool-cmd">${escapeHtml(command)}</code>
-          <span class="agent-tool-code">${escapeHtml(String(event.code ?? 0))}</span>
-          <span class="caret">▼</span>
-        </button>
-        <pre class="agent-tool-out">${escapeHtml(event.output || '(пусто)')}</pre>`;
-      wrapEl.querySelector('.agent-tool-head').addEventListener('click', () => {
-        wrapEl.classList.toggle('is-open');
-      });
-      box.appendChild(wrapEl);
+      const row = document.createElement('div');
+      row.className = `agent-term-row${failed ? ' is-error' : ''}`;
+      row.innerHTML = `
+        <span class="agent-term-sign">${failed ? '✕' : '›'}</span>
+        <code class="agent-term-cmd">${escapeHtml(command)}</code>
+        <span class="agent-term-code">${escapeHtml(String(event.code ?? 0))}</span>`;
+      if (event.output) {
+        const out = document.createElement('pre');
+        out.className = 'agent-term-out';
+        out.textContent = String(event.output).slice(0, 1200);
+        row.appendChild(out);
+      }
+      box.querySelector('.agent-term-log').appendChild(row);
+      const count = box.querySelectorAll('.agent-term-row').length;
+      const done = box.querySelectorAll('.agent-term-row.is-error').length;
+      box.querySelector('.agent-term-meta').textContent =
+        `${count} ${count === 1 ? 'команда' : 'команд'}${done ? ` · ошибок: ${done}` : ''}`;
+      box.classList.add('is-open');        // во время работы показываем
+      box.classList.remove('is-done');
       scrollToBottom();
+    },
+
+    /** Свернуть блок команд: дальше ИИ пишет ответ, а не работает руками. */
+    finishTerm() {
+      const box = bubble.querySelector('.agent-term');
+      if (!box) return;
+      box.classList.remove('is-open');
+      box.classList.add('is-done');
     },
 
     /** Агент завёл задачу — показываем её прямо в ответе. */
@@ -967,6 +997,7 @@ function createAssistantTurn(options = {}) {
     appendToken(token) {
       if (!token) return;
       api.collapseStage();
+      api.finishTerm();          // команды показаны — дальше только ответ
       answerText += token;
       answerEl.innerHTML = formatContent(answerText);
       scrollToBottom();
@@ -1003,6 +1034,7 @@ function createAssistantTurn(options = {}) {
       if (finished) return;
       finished = true;
       api.collapseStage();
+      api.finishTerm();
       stopTimer();
       wrap.classList.remove('is-working');
       if (reasoningBox) {
@@ -1048,6 +1080,7 @@ function createAssistantTurn(options = {}) {
     fail(message) {
       finished = true;
       api.collapseStage();
+      api.finishTerm();
       stopTimer();
       wrap.classList.remove('is-working');
       answerEl.innerHTML = `<span style="color:var(--err)">❌ ${escapeHtml(message || 'Неизвестная ошибка')}</span>`;
@@ -1572,7 +1605,7 @@ function formatContent(text) {
           <button type="button" data-code="optimize" title="Оптимизировать и показать diff">⚡ Оптимизируй</button>
           <button type="button" data-code="similar" title="Найти аналог в интернете через песочницу">🔎 Аналог</button>
           <button type="button" data-code="copy" title="Скопировать код">📋</button>
-          <button type="button" data-code="terminal" title="Перенести в терминал песочницы">⌨️ В терминал</button>
+          <button type="button" data-code="terminal" title="Сохранить код файлом в рабочую папку">⌨️ В песочницу</button>
         </span>
       </div>
       <pre><code>${code.trim()}</code></pre>

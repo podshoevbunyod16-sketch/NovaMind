@@ -111,25 +111,25 @@ def test_terminal_help_lists_nova(admin_client, sandbox):
 
 # ══════════════ эндпоинты панели ══════════════
 
-def test_linux_search_endpoint(admin_client, sandbox, web):
-    data = admin_client.post("/api/linux/search", json={"query": "asyncio"}).get_json()
+def test_linux_search_endpoint(google_client, sandbox, web):
+    data = google_client.post("/api/linux/search", json={"query": "asyncio"}).get_json()
     assert data["mode"] == "web" and data["count"] == 3
     assert data["backend"] == "searxng"
     assert data["results"][0]["host"] == "docs.python.org"
 
 
-def test_linux_search_is_admin_only(client, sandbox, web):
+def test_linux_search_requires_signed_in(client, sandbox, web):
     assert client.post("/api/linux/search", json={"query": "x"}).status_code == 403
 
 
-def test_linux_search_rejects_empty_query(admin_client, sandbox, web):
-    assert admin_client.post("/api/linux/search", json={"query": "  "}).status_code == 400
+def test_linux_search_rejects_empty_query(google_client, sandbox, web):
+    assert google_client.post("/api/linux/search", json={"query": "  "}).status_code == 400
 
 
-def test_linux_search_by_code_uses_grep(admin_client, sandbox, web):
+def test_linux_search_by_code_uses_grep(google_client, sandbox, web):
     (sandbox / "app.py").write_text("import asyncio\n\nasync def main():\n    await asyncio.sleep(1)\n",
                                     encoding="utf-8")
-    data = admin_client.post("/api/linux/search", json={"query": "asyncio", "mode": "code"}).get_json()
+    data = google_client.post("/api/linux/search", json={"query": "asyncio", "mode": "code"}).get_json()
     assert data["mode"] == "code" and data["count"] >= 2
     assert any(match["path"].endswith("app.py") for match in data["results"])
     assert any("asyncio.sleep" in match["snippet"] for match in data["results"])

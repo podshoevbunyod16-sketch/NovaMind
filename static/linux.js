@@ -16,10 +16,8 @@
   const $ = (id) => document.getElementById(id);
   const state = {
     open: false,
-    tab: 'terminal',
+    tab: 'files',
     status: null,
-    history: [],
-    histIndex: -1,
     busy: false,
     file: null,
     searchMode: 'web',
@@ -33,7 +31,6 @@
   function cache() {
     [
       'linuxPanel', 'linuxPath', 'linuxLed', 'linuxTabs', 'btnLinuxClose', 'btnLinux', 'btnAgent',
-      'termOut', 'termChips', 'termForm', 'termInput', 'termNote',
       'fileList', 'filesHint', 'btnFilesRefresh', 'fileView', 'fileViewPath', 'fileViewBody',
       'btnFileToChat', 'btnFileToTerm', 'btnFileClose',
       'searchForm', 'searchModes', 'searchInput', 'btnSearchRun', 'searchStatus', 'searchList',
@@ -69,69 +66,11 @@
     if (typeof window.showNotification === 'function') window.showNotification(message, kind);
   }
 
-  // ───────────────────────── терминал ─────────────────────────
+  // Терминала в чате нет по замыслу: им пользуется ИИ во время рассуждений,
+// а результат команд приходит в ответе сворачиваемым блоком. Здесь только
+// служебный вывод для уведомлений — без панели, поля ввода и истории команд.
 
-  function termLine(kind, text) {
-    if (!el.termOut) return;
-    const line = document.createElement('div');
-    line.className = `term-line is-${kind}`;
-    line.textContent = text == null ? '' : String(text);
-    el.termOut.appendChild(line);
-    el.termOut.scrollTop = el.termOut.scrollHeight;
-  }
-
-  function termBanner(text, kind = 'info') {
-    termLine('banner', text);
-  }
-
-  /** Подсказки быстрого ввода — самые ходовые команды. */
-  const QUICK = [
-    { cmd: 'ls -la', title: 'Что в папке' },
-    { cmd: 'python3 hello.py', title: 'Запустить пример' },
-    { cmd: 'git status', title: 'Состояние git' },
-    { cmd: 'cat README.md', title: 'Прочитать README' },
-    { cmd: 'nova search ', title: '🔎 Поиск в интернете' },
-    { cmd: 'grep -rn "TODO" .', title: '🔎 Поиск по песочнице' },
-    { cmd: 'help', title: 'Что доступно' },
-  ];
-
-  function paintQuickChips() {
-    if (!el.termChips) return;
-    el.termChips.innerHTML = QUICK.map((item) =>
-      `<button type="button" class="term-chip" data-cmd="${esc(item.cmd)}" title="${esc(item.cmd)}">${esc(item.title)}</button>`
-    ).join('');
-  }
-
-  function setNote(text) {
-    if (!el.termNote) return;
-    el.termNote.hidden = !text;
-    if (text) el.termNote.textContent = text;
-  }
-
-  async function runTerminal(command) {
-    const cmd = String(command || '').trim();
-    if (!cmd || state.busy) return;
-    state.busy = true;
-    setNote('');
-    termLine('cmd', `$ ${cmd}`);
-    el.termOut.scrollTop = el.termOut.scrollHeight;
-    try {
-      const result = await api('/api/terminal/run', { method: 'POST', body: JSON.stringify({ command: cmd }) });
-      if (result.stdout) termLine('out', result.stdout);
-      if (result.stderr) termLine('err', result.stderr);
-      const meta = `код ${result.code} · ${result.duration_ms} мс`;
-      termLine(result.code ? 'err' : 'meta', meta + (result.timed_out ? ' · прервано по таймауту' : ''));
-      state.history.unshift(cmd);
-      loadGit();                 // команда могла изменить репозиторий
-    } catch (error) {
-      termLine('err', error.message);
-    } finally {
-      state.busy = false;
-      el.termInput.focus();
-    }
-  }
-
-  // ───────────────────────── статус окружения ─────────────────────────
+// ───────────────────────── статус окружения ─────────────────────────
 
   async function loadStatus() {
     try {
@@ -139,25 +78,9 @@
       state.status = status;
       if (el.linuxLed) el.linuxLed.classList.toggle('is-on', !!status.available);
       if (el.linuxPath) el.linuxPath.textContent = `${status.workspace || 'workspace/'}/`;
-      if (el.termInput) el.termInput.disabled = !status.available;
-      if (status.available) {
-        setNote('');
-        if (!el.termOut.children.length) {
-          termBanner('Песочница готова. Команды выполняются по одной, без | и >.');
-          termBanner('Наберите help — покажу, что доступно.');
-        }
-      } else {
-        setNote(status.hint || 'Окружение недоступно');
-        if (!el.termOut.children.length) {
-          termBanner(status.enabled
-            ? 'Нужен вход администратора: откройте панель управления и войдите.'
-            : 'Окружение выключено. В .env добавьте TERMINAL_ENABLED=1 и перезапустите сервер.');
-        }
-      }
-      if (el.filesHint) el.filesHint.textContent = status.available ? '' : status.hint || '';
-      if (!status.available && !el.taskList.children.length) paintTasksOff();
+      paintAccess(status);
     } catch (error) {
-      setNote(error.message);
+      if (el.filesHint) el.filesHint.textContent = error.message;
     }
     try {
       state.agentStatus = await api('/api/agent/status');
@@ -165,6 +88,12 @@
       state.agentStatus = { enabled: false };
     }
     paintAgentButton();
+  }
+
+  function paintAccess(status) {
+    if (!el.filesHint) return;
+    el.filesHint.textContent = status.available ? '' : (status.hint || '');
+    if (el.termNote) el.termNote.hidden = true;
   }
 
   // ───────────────────────── файлы ─────────────────────────
@@ -298,11 +227,11 @@ async function runLinuxSearch(query) {
 }
 
 /** Открывает найденное в терминале — командой, а не копипастой. */
-function searchInTerminal(query) {
+async function searchInTerminal(query) {
+  // Того же поиска через песочницу: команда уходит агенту, а не в поле ввода.
   const text = String(query ?? (el.searchInput ? el.searchInput.value : '')).trim();
-  if (!text) return;
-  setTab('terminal');
-  runTerminal(`nova search ${text}`);
+  if (!text) return null;
+  return runLinuxSearch(text);
 }
 
 async function saveSearchResult() {
@@ -314,8 +243,8 @@ async function saveSearchResult() {
       body: JSON.stringify({ query: data.query, results: data.results }),
     });
     showNotification(`Сохранено: ${saved.path}`, 'info');
-    termLine('meta', `💾 поиск сохранён: ${saved.path}`);
     setTab('files');
+    loadFiles();
   } catch (error) {
     showNotification(error.message, 'warn');
   }
@@ -325,12 +254,48 @@ async function readResult(url) {
   searchStatus(`Читаю ${url}…`);
   try {
     const data = await api('/api/linux/read', { method: 'POST', body: JSON.stringify({ url }) });
-    setTab('terminal');
-    termLine('cmd', `nova read ${url}`);
-    termLine('out', data.text || '(страница пустая)');
-    termLine('meta', `${data.bytes} символов · ${data.elapsed_ms} мс`);
+    showNotification(`Прочитано ${data.bytes} символов за ${data.elapsed_ms} мс`, 'info');
+    await saveToWorkspace(`sources/${hostOf(data.url)}.md`,
+      `# ${data.url}\n\n${data.text}\n`, 'Прочитанная страница');
   } catch (error) {
     searchStatus(error.message, 'warn');
+  }
+}
+
+function hostOf(url) {
+  try { return new URL(url).hostname.replace(/^www\./, '') || 'source'; }
+  catch (_) { return 'source'; }
+}
+
+/** Кладёт текст файлом в рабочую папку — без терминала, через API песочницы. */
+async function saveToWorkspace(path, content, label) {
+  try {
+    const data = await api('/api/terminal/file', {
+      method: 'POST',
+      body: JSON.stringify({ action: 'write', path, content }),
+    });
+    showNotification(`${label || 'Файл'}: ${data.path || 'рабочая папка'}`, 'info');
+    openPanel('files');
+    await loadFiles();
+    return data.path;
+  } catch (error) {
+    showNotification(error.message, 'warn');
+    return null;
+  }
+}
+
+/** Выполнить команду песочницы без показа терминала — для кнопок панели. */
+async function execCommand(command) {
+  try {
+    const data = await api('/api/terminal/run', {
+      method: 'POST',
+      body: JSON.stringify({ command }),
+    });
+    if (data.code) showNotification(`${command}: код ${data.code}`, 'warn');
+    return data.code === 0;
+  } catch (error) {
+    showNotification(error.message, 'warn');
+    return false;
   }
 }
 
@@ -345,7 +310,10 @@ async function readResult(url) {
           <div class="sec-empty">Это не git-репозиторий.</div>
           <button class="lg-btn tiny" id="btnGitInit" type="button">Создать репозиторий</button>`;
         const init = $('btnGitInit');
-        if (init) init.addEventListener('click', () => runTerminal('git init').then(loadGit));
+        if (init) init.addEventListener('click', async () => {
+          const done = await execCommand('git init');
+          if (done) { showNotification('Репозиторий создан', 'info'); loadGit(); }
+        });
         if (el.gitHint) el.gitHint.textContent = '';
         return;
       }
@@ -371,10 +339,6 @@ async function readResult(url) {
 
   const STATUS_FLOW = { todo: 'doing', doing: 'done', done: 'todo' };
   const STATUS_LABEL = { todo: 'К выполнению', doing: 'В работе', done: 'Готово' };
-
-  function paintTasksOff() {
-    if (el.taskInput) el.taskInput.disabled = false;   // задачи доступны всем
-  }
 
   async function loadTasks() {
     if (!el.taskList) return;
@@ -474,7 +438,6 @@ async function readResult(url) {
     if (el.btnLinux) el.btnLinux.setAttribute('aria-expanded', 'true');
     setTab(tab || state.tab);
     await loadStatus();
-    if (state.tab === 'terminal') el.termInput && el.termInput.focus();
   }
 
   function closePanel() {
@@ -669,17 +632,11 @@ async function readResult(url) {
       return;
     }
     if (action.key === 'terminal') {
-      const name = (lang === 'python' || lang === 'py') ? `snippets/${Date.now()}.py`
-        : (lang === 'js' || lang === 'javascript') ? `snippets/${Date.now()}.js` : `snippets/${Date.now()}.txt`;
-      openPanel('terminal');
-      termBanner(`Код вставлен в ${name} — сохраните его командой:`);
-      termLine('cmd', `cat > ${name} << 'EOF'   ← вставьте код и EOF`);
-      termLine('out', text);
-      termLine('out', 'EOF');
-      el.termInput.value = `cat > ${name}`;
-      el.termInput.focus();
-      el.termInput.select();
-      showNotification('Код в терминале — скопируйте вставку и завершите EOF', 'info');
+      // Терминала в чате нет: код просто сохраняется файлом в рабочую папку
+      const ext = { python: 'py', py: 'py', js: 'js', javascript: 'js', ts: 'ts', typescript: 'ts' }[lang] || 'txt';
+      const name = `snippets/${Date.now()}-${(text.split('\n')[0] || 'code')
+        .replace(/[^A-Za-z0-9_]+/g, '_').slice(0, 24) || 'snippet'}.${ext}`;
+      saveToWorkspace(name, text, 'Код сохранён');
       return;
     }
     if (action.key === 'explain' && state.agent) {
@@ -716,35 +673,6 @@ async function readResult(url) {
       if (button) setTab(button.dataset.tab);
     });
 
-    el.termForm && el.termForm.addEventListener('submit', (event) => {
-      event.preventDefault();
-      const command = el.termInput.value;
-      el.termInput.value = '';
-      runTerminal(command);
-    });
-
-    // ↑/↓ — история команд, Ctrl+L — очистить
-    el.termInput && el.termInput.addEventListener('keydown', (event) => {
-      if (event.key === 'ArrowUp' || event.key === 'ArrowDown') {
-        if (!state.history.length) return;
-        event.preventDefault();
-        state.histIndex = event.key === 'ArrowUp'
-          ? Math.min(state.histIndex + 1, state.history.length - 1)
-          : state.histIndex - 1;
-        el.termInput.value = state.histIndex < 0 ? '' : state.history[state.histIndex];
-        return;
-      }
-      if (event.key === 'l' && (event.ctrlKey || event.metaKey)) {
-        event.preventDefault();
-        if (el.termOut) el.termOut.innerHTML = '';
-      }
-    });
-
-    el.termChips && el.termChips.addEventListener('click', (event) => {
-      const chip = event.target.closest('.term-chip');
-      if (chip) { el.termInput.value = chip.dataset.cmd; el.termInput.focus(); }
-    });
-
     el.btnFilesRefresh && el.btnFilesRefresh.addEventListener('click', loadFiles);
     el.fileList && el.fileList.addEventListener('click', (event) => {
       const row = event.target.closest('.file-row');
@@ -759,10 +687,11 @@ async function readResult(url) {
       closePanel();
     });
     el.btnFileToTerm && el.btnFileToTerm.addEventListener('click', () => {
+      // Просмотрщик файла вместо консоли: тот же текст, но без терминала
       if (!state.file) return;
-      setTab('terminal');
-      termLine('cmd', `cat ${state.file.path}`);
-      termLine('out', state.file.content);
+      el.fileViewPath.textContent = state.file.path;
+      el.fileViewBody.textContent = state.file.content;
+      el.fileView.hidden = false;
     });
 
     el.searchForm && el.searchForm.addEventListener('submit', (event) => {
@@ -852,7 +781,7 @@ async function readResult(url) {
     close: closePanel,
     toggle: togglePanel,
     setTab,
-    run: runTerminal,
+    run: execCommand,
     loadTasks,
     loadFiles,
     loadGit,
@@ -869,7 +798,6 @@ async function readResult(url) {
   function init() {
     cache();
     if (!el.linuxPanel) return;
-    paintQuickChips();
     wire();
     state.agent = localStorage.getItem('novamind_agent_mode') === '1';
     loadStatus();

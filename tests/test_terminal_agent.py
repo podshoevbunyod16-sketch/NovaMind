@@ -34,15 +34,42 @@ def test_terminal_is_off_by_default(client, monkeypatch):
     assert client.post("/api/terminal/run", json={"command": "ls"}).status_code == 403
 
 
-def test_terminal_requires_admin(client, sandbox):
+def test_terminal_requires_signed_in(client, sandbox):
     response = _run(client, "ls")
     assert response.status_code == 403
-    assert "администратор" in response.get_json()["error"].lower()
+    assert "войдите" in response.get_json()["error"].lower()
+
+
+def test_terminal_works_for_google_user(google_client, sandbox):
+    """Вошёл через Google — песочница доступна, админом быть не нужно."""
+    assert google_client.get("/api/terminal/status").get_json()["available"] is True
+    result = _run(google_client, "pwd").get_json()
+    assert result["code"] == 0 and str(sandbox) in result["stdout"]
+
+
+def test_terminal_works_for_plain_nick(nick_client, sandbox):
+    """Быстрый вход по нику тоже открывает песочницу."""
+    check = nick_client.get("/api/session/check").get_json()
+    assert check["signed_in"] is True and check["admin"] is False
+    assert nick_client.get("/api/terminal/status").get_json()["available"] is True
+    assert _run(nick_client, "ls").get_json()["code"] == 0
+
+
+def test_strict_admin_mode_is_optional(google_client, sandbox, monkeypatch):
+    """TERMINAL_STRICT_ADMIN=1 возвращает режим «только администратор»."""
+    monkeypatch.setenv("TERMINAL_STRICT_ADMIN", "1")
+    assert google_client.get("/api/terminal/status").get_json()["available"] is False
+    assert _run(google_client, "ls").status_code == 403
+
+
+def test_logout_closes_workspace(nick_client, sandbox):
+    nick_client.post("/api/session/logout")
+    assert nick_client.get("/api/terminal/status").get_json()["available"] is False
 
 
 def test_status_reports_workspace_and_commands(admin_client):
     status = admin_client.get("/api/terminal/status").get_json()
-    assert status["available"] is True
+    assert status["available"] is True and status["user"] is True
     assert "ls" in status["commands"] and "git" in status["commands"]
 
 
@@ -164,9 +191,15 @@ def test_agent_status_reports_tools(admin_client):
     assert status["max_steps"] >= 1
 
 
-def test_agent_requires_enable_flag(client, monkeypatch, sandbox):
+def test_agent_requires_enable_flag(google_client, monkeypatch, sandbox):
     monkeypatch.setenv("AGENT_ENABLED", "0")
+    assert google_client.post("/api/agent/stream", json={"message": "привет"}).status_code == 403
+
+
+def test_agent_requires_signed_in(client, sandbox):
+    """Агентный режим — как и песочница — только для вошедших."""
     assert client.post("/api/agent/stream", json={"message": "привет"}).status_code == 403
+    assert client.get("/api/agent/status").get_json()["tools"] is False
 
 
 def test_agent_runs_command_then_answers(admin_client, monkeypatch, sandbox):

@@ -24,7 +24,7 @@ import time
 from ai_providers import chat_completion, chat_stream, resolve_target
 from routes.terminal import (run_agent as run_terminal, safe_path, relative_to_workspace,
                              ensure_workspace, nova_search, nova_read, _save_research,
-                             _format_results as _format_search_results)
+                             can_use_workspace, signed_in, _format_results as _format_search_results)
 
 agent_bp = Blueprint("agent", __name__)
 
@@ -63,11 +63,11 @@ def is_enabled():
 
 
 def tools_enabled():
-    """Инструменты терминала и файлов — только админу при включённом окружении.
+    """Инструменты терминала и файлов — любому вошедшему при включённом окружении.
 
     Флаг читаем в момент вызова, а не на импорте: .env может подгрузиться позже.
     """
-    return os.getenv("TERMINAL_ENABLED", "0") == "1" and bool(session.get("admin_logged_in"))
+    return os.getenv("TERMINAL_ENABLED", "0") == "1" and can_use_workspace()
 
 
 def parse_action(raw):
@@ -101,8 +101,10 @@ def agent_status():
         "enabled": enabled,
         "tools": tools_enabled(),
         "max_steps": MAX_STEPS,
+        "user": signed_in(),
         "admin": bool(session.get("admin_logged_in")),
-        "hint": "" if enabled else "Включите AGENT_ENABLED=1 в .env и перезапустите сервер",
+        "hint": ("" if enabled
+                 else "Включите AGENT_ENABLED=1 в .env и перезапустите сервер"),
     })
 
 
@@ -115,6 +117,8 @@ def agent_stream():
         return jsonify({"error": "Пустое сообщение"}), 400
     if not is_enabled():
         return jsonify({"error": "Агентный режим выключен (AGENT_ENABLED=1)"}), 403
+    if not signed_in():
+        return jsonify({"error": "Войдите в аккаунт, чтобы включить агентный режим"}), 403
 
     provider, model, _ = resolve_target()
     use_tools = tools_enabled()

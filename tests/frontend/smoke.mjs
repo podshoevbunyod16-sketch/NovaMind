@@ -192,8 +192,8 @@ const dom = new JSDOM(html, {
         return { ok: true, status: 200, async json() { return { selection: null }; } };
       }
       if (path.startsWith('/api/terminal/status')) {
-        return json({ enabled: true, admin: true, available: true, workspace: 'workspace', git: true,
-                      commands: ['ls', 'python3', 'git'] });
+        return json({ enabled: true, user: true, admin: false, available: true,
+                      workspace: 'workspace', git: true, commands: ['ls', 'python3', 'git', 'nova'] });
       }
       if (path.startsWith('/api/terminal/run')) {
         const command = String(JSON.parse(options.body || '{}').command || '');
@@ -219,6 +219,8 @@ const dom = new JSDOM(html, {
         ], truncated: false, workspace: 'workspace' });
       }
       if (path.startsWith('/api/terminal/file')) {
+        const body = JSON.parse(options.body || '{}');
+        if (body.action === 'write') return json({ path: body.path, bytes: (body.content || '').length });
         return json({ path: 'hello.py', content: 'print(\"привет\")' });
       }
       if (path.startsWith('/api/terminal/git')) {
@@ -562,34 +564,28 @@ check('вход: после входа нет ошибок', realErrors.length =
 
 console.log('\n10) Маленький Linux: панель, терминал, файлы, git, задачи');
 const linuxPanel = document.getElementById('linuxPanel');
-const termOut = document.getElementById('termOut');
-const termInput = document.getElementById('termInput');
 const press = (key, options = {}) => document.dispatchEvent(
   new window.KeyboardEvent('keydown', { key, bubbles: true, cancelable: true, ...options })
 );
 
 check('панель скрыта до первого открытия', linuxPanel.hidden === true);
+check('терминала в панели нет — его использует ИИ',
+  !document.querySelector('#linuxTabs .linux-tab[data-tab="terminal"]')
+  && !document.querySelector('.linux-sec[data-sec="terminal"]')
+  && !document.getElementById('termForm')
+  && !document.getElementById('termInput'));
+check('вкладки: файлы, поиск, git, задачи',
+  ['files', 'search', 'git', 'tasks'].every((tab) => !!document.querySelector(`#linuxTabs .linux-tab[data-tab="${tab}"]`))
+  && document.querySelectorAll('#linuxTabs .linux-tab').length === 4);
+
 press('j', { ctrlKey: true });
 await new Promise((resolve) => setTimeout(resolve, 120));
-check('Ctrl+J открывает панель', linuxPanel.hidden === false
+check('Ctrl+J открывает панель рабочей папки', linuxPanel.hidden === false
   && document.body.classList.contains('linux-open')
   && document.getElementById('btnLinux').getAttribute('aria-expanded') === 'true');
-check('доступ к песочнице подтверждён, индикатор горит',
+check('вход через аккаунт открывает песочницу обычному пользователю',
   document.getElementById('linuxLed').classList.contains('is-on')
   && document.getElementById('linuxPath').textContent.includes('workspace'));
-
-termInput.value = 'ls -la';
-document.getElementById('termForm').dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
-await new Promise((resolve) => setTimeout(resolve, 120));
-check('терминал выполняет команду и печатает вывод',
-  termOut.textContent.includes('$ ls -la') && termOut.textContent.includes('README.md')
-  && termOut.textContent.includes('код 0'), termOut.textContent.slice(-120));
-
-termInput.value = 'shutdown now';
-document.getElementById('termForm').dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
-await new Promise((resolve) => setTimeout(resolve, 120));
-check('команда вне белого списка ругается понятно',
-  termOut.textContent.includes('не в списке разрешённых'));
 
 document.querySelector('#linuxTabs .linux-tab[data-tab="files"]').click();
 await new Promise((resolve) => setTimeout(resolve, 120));
@@ -648,15 +644,29 @@ await new Promise((resolve) => setTimeout(resolve, 350));
 const aiTurns = document.querySelectorAll('.message.ai');
 const agentBubble = aiTurns[aiTurns.length - 1];
 check('агент показывает план', !!agentBubble && agentBubble.querySelector('.stage-plan') !== null);
-check('агент показывает выполненные команды',
-  !!agentBubble && agentBubble.querySelectorAll('.agent-tool').length === 2
-  && agentBubble.textContent.includes('python3 hello.py'));
+check('блок команд виден во время работы и прячет вывод по умолчанию',
+  !!agentBubble && agentBubble.querySelector('.agent-term') !== null
+  && agentBubble.querySelector('.agent-term-out') !== null);
+check('агент показывает выполненные команды в сворачиваемом блоке',
+  !!agentBubble && agentBubble.querySelectorAll('.agent-term-row').length === 2
+  && agentBubble.querySelector('.agent-term').textContent.includes('python3 hello.py')
+  && agentBubble.querySelector('.agent-term-meta').textContent.includes('команд'));
 check('агент показывает заведённую задачу',
   !!agentBubble && agentBubble.querySelector('.agent-task') !== null
   && agentBubble.querySelector('.agent-task').textContent.includes('Проверить песочницу'));
 check('агент печатает ответ и закрывает сцену',
   !!agentBubble && agentBubble.querySelector('.answer').textContent.includes('привет из папки')
   && agentBubble.querySelector('.stage').classList.contains('collapsed'));
+check('после ответа блок команд сворачивается',
+  !!agentBubble && agentBubble.querySelector('.agent-term').classList.contains('is-done')
+  && !agentBubble.querySelector('.agent-term').classList.contains('is-open'));
+check('свёрнутый блок команд можно раскрыть кликом', (() => {
+  const box = agentBubble.querySelector('.agent-term');
+  box.querySelector('.agent-term-head').dispatchEvent(new window.MouseEvent('click', { bubbles: true, cancelable: true }));
+  const opened = box.classList.contains('is-open');
+  box.querySelector('.agent-term-head').dispatchEvent(new window.MouseEvent('click', { bubbles: true, cancelable: true }));
+  return opened && !box.classList.contains('is-open');
+})());
 check('мета ответа упоминает агента и шаги',
   !!agentBubble && agentBubble.querySelector('.msg-meta').textContent.includes('агент')
   && agentBubble.querySelector('.msg-meta').textContent.includes('шагов: 2'));
@@ -690,10 +700,11 @@ check('«Объясни» подставляет код в поле ввода',
 
 codeBlock.querySelector('[data-code="terminal"]').dispatchEvent(
   new window.MouseEvent('click', { bubbles: true, cancelable: true }));
-await new Promise((resolve) => setTimeout(resolve, 150));
-check('«В терминал» открывает панель и подставляет имя файла',
-  linuxPanel.hidden === false && termInput.value.includes('snippets/')
-  && termOut.textContent.includes('def add'), termInput.value);
+await new Promise((resolve) => setTimeout(resolve, 200));
+check('«В песочницу» сохраняет код файлом — без терминала на экране',
+  linuxPanel.hidden === false
+  && document.querySelector('.linux-sec[data-sec="files"]').classList.contains('is-active')
+  && !document.getElementById('termForm'));
 
 press('Escape');
 await new Promise((resolve) => setTimeout(resolve, 100));
@@ -752,10 +763,9 @@ await new Promise((resolve) => setTimeout(resolve, 100));
 document.getElementById('searchForm').dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
 await new Promise((resolve) => setTimeout(resolve, 200));
 searchList.querySelector('[data-act="save"]').click();
-await new Promise((resolve) => setTimeout(resolve, 200));
+await new Promise((resolve) => setTimeout(resolve, 250));
 check('«Сохранить» уводит выдачу в рабочую папку',
-  document.querySelector('.linux-sec[data-sec="files"]').classList.contains('is-active')
-  || termOut.textContent.includes('notes/research'));
+  document.querySelector('.linux-sec[data-sec="files"]').classList.contains('is-active'));
 
 window.Linux.open('search');
 await new Promise((resolve) => setTimeout(resolve, 100));
@@ -770,10 +780,9 @@ check('«В задачу» заводит задачу и открывает с�
 window.Linux.open('search');
 await new Promise((resolve) => setTimeout(resolve, 100));
 searchList.querySelector('[data-act="read"]').click();
-await new Promise((resolve) => setTimeout(resolve, 200));
-check('«Читать» открывает страницу источника в терминале',
-  document.querySelector('.linux-sec[data-sec="terminal"]').classList.contains('is-active')
-  && termOut.textContent.includes('Текст страницы asyncio'));
+await new Promise((resolve) => setTimeout(resolve, 300));
+check('«Читать» сохраняет прочитанную страницу в рабочую папку',
+  document.querySelector('.linux-sec[data-sec="files"]').classList.contains('is-active'));
 
 // тот же запрос, но по файлам песочницы
 window.Linux.open('search');
@@ -803,17 +812,13 @@ check('«Аналог» ищет по коду в интернете через 
 check('поиск по коду сразу показал результаты',
   searchList.textContent.includes('asyncio — документация'));
 
-// терминал умеет тот же поиск
-window.Linux.setTab('terminal');
-termInput.value = 'nova search asyncio';
-document.getElementById('termForm').dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
-await new Promise((resolve) => setTimeout(resolve, 200));
-check('команда nova search в терминале печатает источники',
-  termOut.textContent.includes('$ nova search asyncio')
-  && termOut.textContent.includes('docs.python.org'));
-check('в терминале есть чипы поиска',
-  document.getElementById('termChips').textContent.includes('Поиск в интернете')
-  && document.getElementById('termChips').textContent.includes('Поиск по песочнице'));
+// nova search остаётся инструментом песочницы: агент вызывает его через run
+const novaTurn = window.createAssistantTurn();
+novaTurn.setStage('agent', 'Планирую', 'Проверю песочницу');
+novaTurn.tool({ name: 'run', command: 'nova search asyncio', code: 0, output: 'docs.python.org' });
+check('команда nova search доступна как инструмент ИИ, а не как панель',
+  novaTurn.element.textContent.includes('nova search asyncio')
+  && novaTurn.element.querySelector('.agent-term') !== null);
 press('Escape');
 await new Promise((resolve) => setTimeout(resolve, 80));
 

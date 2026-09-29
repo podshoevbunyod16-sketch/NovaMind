@@ -81,6 +81,42 @@ def admin_login():
     session['admin_username'] = username
     return jsonify({'success': True, 'username': username})
 
+@admin_bp.route('/api/session/login', methods=['POST'])
+def session_login():
+    """Серверный вход по нику.
+
+    Google кладёт флаги в сессию сам (см. выше), а быстрый вход по нику живёт
+    только в localStorage — без этого шага сервер не знает, что человек вошёл,
+    и не пускает его в рабочую папку и агентный режим.
+    """
+    data = request.get_json(silent=True) or {}
+    nick = (data.get('nick') or data.get('username') or '').strip()[:64]
+    if not nick:
+        return jsonify({'success': False, 'error': 'Пустой ник'}), 400
+    session['nova_user_nick'] = nick
+    session['nova_signed_in'] = True
+    return jsonify({'success': True, 'nick': nick})
+
+
+@admin_bp.route('/api/session/check')
+def session_check():
+    """Кто вошёл — интерфейсу нужно знать, открывать ли рабочую папку."""
+    return jsonify({
+        'signed_in': bool(session.get('admin_logged_in') or session.get('nova_google_login')
+                          or session.get('nova_signed_in') or session.get('nova_user_nick')
+                          or session.get('username')),
+        'nick': session.get('admin_username') or session.get('nova_user_nick') or '',
+        'admin': bool(session.get('admin_logged_in')),
+    })
+
+
+@admin_bp.route('/api/session/logout', methods=['POST'])
+def session_logout():
+    for key in ('nova_user_nick', 'nova_signed_in'):
+        session.pop(key, None)
+    return jsonify({'success': True})
+
+
 @admin_bp.route('/api/admin/logout', methods=['POST'])
 def admin_logout():
     session.clear()
