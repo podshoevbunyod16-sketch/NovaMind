@@ -199,11 +199,18 @@ def test_agent_status_reports_tools(admin_client):
 
 
 def test_agent_status_explains_disabled_env(google_client, monkeypatch):
+    """Без Linux агент всё равно доступен (поиск, медиа), а подсказка объясняет, как включить Linux."""
     monkeypatch.setenv("TERMINAL_ENABLED", "0")
+    status = google_client.get("/api/agent/status").get_json()
+    assert status["available"] is True and status["tools"] is False
+    assert "TERMINAL_ENABLED=1" in status["hint"]
+
+
+def test_agent_status_when_agent_switched_off(google_client, monkeypatch):
     monkeypatch.setenv("AGENT_ENABLED", "0")
     status = google_client.get("/api/agent/status").get_json()
     assert status["available"] is False
-    assert "TERMINAL_ENABLED=1" in status["hint"]
+    assert "AGENT_ENABLED=0" in status["hint"]
 
 
 def test_agent_requires_enable_flag(google_client, monkeypatch, sandbox):

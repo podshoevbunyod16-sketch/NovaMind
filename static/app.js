@@ -361,205 +361,6 @@ function appendMediaMessage(kind, url, title) {
 }
 
 // ══════════════════════════════════════════
-// ЕДИНАЯ ПАНЕЛЬ МЕДИА-МОДЕЛЕЙ
-// ══════════════════════════════════════════
-let activeMediaModel = null;
-let pickerType = 'all';
-let pickerModels = [];
-let mediaSearchTimer = null;
-
-const MEDIA_KIND_ICON = { image: '🖼', audio: '🔊', video: '🎬' };
-const PRICING_BADGE = {
-  free:    { cls: 'free',    label: 'FREE' },
-  trial:   { cls: 'trial',   label: 'ПРОБНЫЕ КРЕДИТЫ' },
-  paid:    { cls: 'paid',    label: 'PAID' },
-  unknown: { cls: 'unknown', label: 'ЦЕНА НЕ ПОДТВЕРЖДЕНА' },
-};
-
-function openMediaPicker() {
-  const modal = document.getElementById('mediaPicker');
-  if (!modal) return;
-  modal.classList.add('open');
-  modal.setAttribute('aria-hidden', 'false');
-  loadMediaModels(false);
-  setTimeout(() => document.getElementById('mediaSearch')?.focus(), 60);
-}
-
-function closeMediaPicker() {
-  const modal = document.getElementById('mediaPicker');
-  if (!modal) return;
-  modal.classList.remove('open');
-  modal.setAttribute('aria-hidden', 'true');
-}
-
-function openMediaStudio() { openMediaPicker(); }
-function closeMediaStudio() { closeMediaPicker(); }
-
-function setPickerType(type) {
-  pickerType = type;
-  document.querySelectorAll('[data-picker-type]').forEach((tab) => {
-    tab.classList.toggle('active', tab.dataset.pickerType === type);
-  });
-  loadMediaModels(false);
-}
-
-function onMediaSearchInput() {
-  window.clearTimeout(mediaSearchTimer);
-  mediaSearchTimer = window.setTimeout(() => loadMediaModels(false), 250);
-}
-
-async function loadMediaModels(force = false) {
-  const list = document.getElementById('pickerList');
-  const meta = document.getElementById('pickerMeta');
-  if (!list) return;
-  list.innerHTML = '<div class="picker-empty">Проверяю подключённых провайдеров…</div>';
-  meta.textContent = 'Запрос каталога…';
-  const params = new URLSearchParams({
-    type: pickerType,
-    q: (document.getElementById('mediaSearch')?.value || '').trim(),
-    include_trial: '1',
-  });
-  if (document.getElementById('mediaIncludePaid')?.checked) params.set('include_paid', '1');
-  if (force) params.set('refresh', '1');
-  try {
-    const response = await fetch('/api/media/models?' + params.toString());
-    const data = await response.json();
-    if (!response.ok) throw new Error(data.error || ('HTTP ' + response.status));
-    pickerModels = data.models || [];
-    meta.textContent = `${data.count} модел. · бесплатных: ${data.free_count} · ` +
-      `пробные кредиты: ${data.trial_count} · цены сверены ${data.pricing_verified_at || '—'}`;
-    renderPickerModels();
-  } catch (error) {
-    meta.textContent = error.message;
-    list.innerHTML = `<div class="picker-empty error">Не удалось загрузить каталог: ${escapeHtml(error.message)}</div>`;
-  }
-}
-
-function renderPickerModels() {
-  const list = document.getElementById('pickerList');
-  if (!list) return;
-  const includeTrial = document.getElementById('mediaIncludeTrial')?.checked !== false;
-  const models = pickerModels.filter((m) => includeTrial || m.pricing_status !== 'trial');
-  if (!models.length) {
-    list.innerHTML = '<div class="picker-empty">По этим фильтрам моделей нет. ' +
-      'Для видео бесплатных API сейчас не подтверждено — включите «Платные» или подключите свой endpoint в .env.</div>';
-    return;
-  }
-  list.innerHTML = models.map(pickerCard).join('');
-  document.querySelectorAll('[data-pick-model]').forEach((button) => {
-    button.addEventListener('click', () => pickMediaModel(button.dataset));
-  });
-}
-
-function pickerCard(model) {
-  const badge = PRICING_BADGE[model.pricing_status] || PRICING_BADGE.unknown;
-  const selected = activeMediaModel && activeMediaModel.provider === model.provider && activeMediaModel.model === model.id;
-  const connected = model.provider_connected;
-  const stateLabel = selected ? '✓ Выбрана'
-    : !connected ? 'Нет ключа в .env'
-    : model.pricing_status === 'free' ? 'Выбрать'
-    : model.pricing_status === 'trial' ? 'Выбрать (кредиты)'
-    : model.pricing_status === 'paid' ? 'Выбрать (платно)'
-    : 'Выбрать (цена неизвестна)';
-  return `<article class="picker-card ${selected ? 'selected' : ''} ${connected ? '' : 'disconnected'}">
-    <div class="picker-card-top">
-      <span class="picker-kind">${MEDIA_KIND_ICON[model.media_type] || '✦'}</span>
-      <span class="picker-badge ${badge.cls}">${badge.label}</span>
-      <span class="picker-provider">${escapeHtml(model.provider_name || model.provider)}</span>
-      ${model.in_provider_catalog === false ? '<span class="picker-badge unknown">НЕТ В КАТАЛОГЕ</span>' : ''}
-    </div>
-    <h3>${escapeHtml(model.name || model.id)}</h3>
-    <div class="picker-id"><code>${escapeHtml(model.id)}</code></div>
-    <p>${escapeHtml(model.description || '')}</p>
-    <div class="picker-note">${escapeHtml(model.pricing_note || '')}</div>
-    ${model.pricing_source ? `<div class="picker-src">Источник цены: ${escapeHtml(model.pricing_source)}</div>` : ''}
-    <button class="picker-select" type="button" data-pick-model="${escapeHtml(model.id)}"
-      data-provider="${escapeHtml(model.provider)}" data-pricing="${escapeHtml(model.pricing_status)}"
-      data-media-type="${escapeHtml(model.media_type || '')}" ${connected ? '' : 'disabled'}>${stateLabel}</button>
-  </article>`;
-}
-
-async function pickMediaModel(dataset) {
-  const pricing = dataset.pricing;
-  const confirm = {};
-  if (pricing === 'trial') {
-    if (!window.confirm('Модель доступна только за счёт пробных кредитов провайдера.\nГенерация может израсходовать эти кредиты. Продолжить?')) return;
-    confirm.trial = true;
-  } else if (pricing === 'paid') {
-    if (!window.confirm('Это платная модель: бесплатный API для неё не подтверждён.\nКаждая генерация будет оплачена по тарифу провайдера. Использовать?')) return;
-    confirm.paid = true;
-  } else if (pricing === 'unknown') {
-    if (!window.confirm('Цену этой модели подтвердить не удалось (свой endpoint из .env).\nСтоимость определяет ваш провайдер. Использовать?')) return;
-    confirm.unknown = true;
-  }
-  try {
-    const response = await fetch('/api/media/select', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ provider: dataset.provider, model: dataset.pickModel, confirm }),
-    });
-    const data = await response.json();
-    if (!response.ok || data.error) throw new Error(data.error || ('HTTP ' + response.status));
-    activeMediaModel = data.selection;
-    updateMediaChip();
-    showNotification(`Медиа: ${data.selection.name}`, 'success');
-    const hint = document.getElementById('pickerHint');
-    if (hint) hint.textContent = `Выбрано: ${data.selection.name}. Напишите промпт в обычном поле чата.`;
-    renderPickerModels();
-  } catch (error) {
-    showNotification(error.message, 'warn');
-  }
-}
-
-async function clearMediaModel(quiet = false) {
-  try {
-    await fetch('/api/media/select', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ clear: true }),
-    });
-  } catch (_) {}
-  activeMediaModel = null;
-  updateMediaChip();
-  if (!quiet) showNotification('Обычный текстовый чат', 'info');
-  renderPickerModels();
-}
-
-async function refreshMediaSelection() {
-  try {
-    const response = await fetch('/api/media/selection');
-    const data = await response.json();
-    activeMediaModel = data.selection || null;
-  } catch (_) {
-    activeMediaModel = null;
-  }
-  updateMediaChip();
-}
-
-function updateMediaChip() {
-  const label = document.getElementById('mediaModelLabel');
-  const bar = document.getElementById('mediaActiveBar');
-  const text = document.getElementById('mediaActiveText');
-  const mediaBtn = document.getElementById('btn-media');
-  const modelButton = document.getElementById('btnMediaModel');
-  if (activeMediaModel) {
-    const icon = MEDIA_KIND_ICON[activeMediaModel.media_type] || '🎨';
-    setShortText(label, `${icon} ${activeMediaModel.name}`, 22);
-    if (bar) bar.hidden = false;
-    if (text) {
-      const badge = PRICING_BADGE[activeMediaModel.pricing_status] || PRICING_BADGE.unknown;
-      setShortText(text, `${icon} ${activeMediaModel.name} · ${activeMediaModel.provider_name} · ${badge.label}`, 44);
-    }
-    if (input && !inputMode) input.placeholder = `Опишите, что создать (${activeMediaModel.media_type}: ${activeMediaModel.name})…`;
-    mediaBtn?.classList.add('active');
-    modelButton?.classList.add('active');
-  } else {
-    if (label) { label.textContent = 'Медиа'; label.removeAttribute('title'); }
-    if (bar) bar.hidden = true;
-    if (input && !inputMode) input.placeholder = 'Напишите сообщение...';
-    mediaBtn?.classList.remove('active');
-    modelButton?.classList.remove('active');
-  }
-}
-
-// ══════════════════════════════════════════
 // ВЫВОД МЕДИА В ПЕРЕПИСКЕ
 // ══════════════════════════════════════════
 function mediaBubbleHtml(payload) {
@@ -582,6 +383,64 @@ function mediaBubbleHtml(payload) {
         <a href="${escapeHtml(url)}" target="_blank" rel="noopener">Открыть в новой вкладке</a>
       </div>
     </div>`;
+}
+
+/**
+ * Медиа прямо внутри ответа ИИ: картинка, аудиоплеер или видео.
+ * ИИ сам решает, что сгенерировать и какой моделью, — здесь только показ.
+ */
+const MEDIA_ICON = { image: '🖼', audio: '🔊', video: '🎬' };
+
+function turnMediaPlayer(item) {
+  const url = escapeHtml(item.url || '');
+  const alt = escapeHtml(item.prompt || item.title || 'Сгенерировано ИИ');
+  if (item.kind === 'audio') return `<audio controls preload="metadata" src="${url}"></audio>`;
+  if (item.kind === 'video') return `<video controls playsinline preload="metadata" src="${url}"></video>`;
+  return `<a class="turn-media-open" href="${url}" target="_blank" rel="noopener"><img src="${url}" alt="${alt}" loading="lazy"></a>`;
+}
+
+function turnMediaCaption(item) {
+  const bits = [`${MEDIA_ICON[item.kind] || '✦'} ${escapeHtml(item.model_name || item.model || 'ИИ')}`];
+  if (item.elapsed_ms) bits.push(`${(item.elapsed_ms / 1000).toFixed(1)} c`);
+  const name = escapeHtml(item.filename || `novamind_${item.kind || 'media'}`);
+  return `<figcaption><span class="turn-media-meta">${bits.join(' · ')}</span>`
+    + `<a class="turn-media-dl" href="${escapeHtml(item.url || '')}" download="${name}" title="Скачать">⬇ Скачать</a></figcaption>`;
+}
+
+function turnMediaItemHtml(item) {
+  return `<figure class="turn-media-item" data-kind="${escapeHtml(item.kind || 'image')}">`
+    + `${turnMediaPlayer(item)}${turnMediaCaption(item)}</figure>`;
+}
+
+/** Видео у провайдера делается долго: опрашиваем задачу и подменяем карточку плеером. */
+async function pollTurnMediaJob(item, figure) {
+  const statusEl = figure.querySelector('.turn-media-status');
+  for (let attempt = 0; attempt < 120; attempt++) {
+    await new Promise((resolve) => setTimeout(resolve, window.NOVA_MEDIA_POLL_MS || 5000));
+    if (!figure.isConnected) return;
+    let data;
+    try {
+      const response = await fetch('/api/media/jobs/' + encodeURIComponent(item.job_id));
+      data = await response.json();
+      if (!response.ok) throw new Error(data.error || ('HTTP ' + response.status));
+    } catch (error) {
+      if (statusEl) statusEl.textContent = 'Не удалось узнать статус: ' + error.message;
+      continue;
+    }
+    if (data.state === 'succeeded' && data.media) {
+      const ready = { ...item, ...data.media, kind: 'video', job_id: null };
+      figure.outerHTML = turnMediaItemHtml(ready);
+      historyAddMessage('ai', 'MEDIA_RESULT:' + JSON.stringify({ ...ready, title: item.prompt || 'Видео' }));
+      return;
+    }
+    if (['failed', 'cancelled', 'error'].includes(data.state)) {
+      if (statusEl) statusEl.textContent = '❌ ' + (data.error || 'Провайдер отменил задачу');
+      figure.classList.add('is-error');
+      return;
+    }
+    if (statusEl) statusEl.textContent = `Видео готовится у провайдера… (${data.state}, проверок: ${data.polls})`;
+  }
+  if (statusEl) statusEl.textContent = 'Видео всё ещё готовится — загляните позже.';
 }
 
 function appendMediaResult(payload, options = {}) {
@@ -641,76 +500,6 @@ async function pollMediaJob(jobId, card) {
     }
   }
   if (statusEl) statusEl.textContent = 'Опрос остановлен: задача всё ещё выполняется у провайдера.';
-}
-
-async function sendMediaMessage(message) {
-  const response = await fetch('/send_stream', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ message, media: true, reasoning: false }),
-  });
-
-  if (!response.ok) {
-    const raw = await response.text();
-    let details = `HTTP ${response.status}`;
-    try { details = JSON.parse(raw).error || details; } catch (_) { details += ': ' + raw.slice(0, 300); }
-    throw new Error(details);
-  }
-  if (!response.body) throw new Error('Браузер не поддерживает потоковый ответ');
-
-  isTyping = true;
-  setSendBusy(true);
-  const started = Date.now();
-  const wrap = document.createElement('div');
-  wrap.className = 'message ai is-working';
-  wrap.innerHTML = '<div class="msg-avatar">✦</div><div class="msg-body"><div class="msg-name">NovaMind</div>' +
-    '<div class="msg-bubble media-bubble media-job"><div class="media-status" data-role="status">Подключение…</div>' +
-    '<div class="lg-bar" style="margin-top:9px"><span></span></div>' +
-    '<div class="media-status-log" data-role="log"></div></div></div>';
-  chatContainer.appendChild(wrap);
-  const statusEl = wrap.querySelector('[data-role="status"]');
-  const logEl = wrap.querySelector('[data-role="log"]');
-
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = '';
-  let finished = false;
-
-  const consumeLine = (line) => {
-    if (!line.trim()) return;
-    const event = JSON.parse(line);
-    if (event.error) throw new Error(event.error);
-    if (event.status === 'started' || event.status === 'progress') {
-      const seconds = ((Date.now() - started) / 1000).toFixed(1);
-      if (statusEl) statusEl.textContent = `⏳ ${event.message} · ${seconds} c`;
-      if (logEl && event.model) logEl.textContent = `${event.model.provider_name || ''} · ${event.model.pricing_label || ''}`;
-      scrollToBottom();
-      return;
-    }
-    if (event.media) {
-      finished = true;
-      wrap.remove();
-      if (event.media.job_id) pollMediaJob(event.media.job_id, appendMediaJobCard(event.media));
-      else appendMediaResult(event.media);
-      return;
-    }
-    if (event.done) finished = true;
-  };
-
-  try {
-    while (true) {
-      const { value, done } = await reader.read();
-      buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
-      const lines = buffer.split('\n');
-      buffer = lines.pop() || '';
-      for (const line of lines) consumeLine(line);
-      if (done || finished) break;
-    }
-    if (buffer.trim()) consumeLine(buffer);
-  } finally {
-    isTyping = false;
-    setSendBusy(false);
-  }
 }
 
 // ══════════════════════════════════════════════════════════════════
@@ -776,6 +565,7 @@ function createAssistantTurn(options = {}) {
   let reasoningText = '';
   let answerText = '';
   let sourcesData = [];
+  const mediaData = [];
   let finished = false;
 
   const startTimer = () => {
@@ -890,7 +680,7 @@ function createAssistantTurn(options = {}) {
         box.innerHTML = `
           <button type="button" class="agent-term-head">
             <span class="agent-term-ico">🐧</span>
-            <span class="agent-term-title">Работа в Linux</span>
+            <span class="agent-term-title">${window.Linux && window.Linux.hasLinux && !window.Linux.hasLinux() ? 'Шаги ИИ' : 'Работа в Linux'}</span>
             <span class="agent-term-meta"></span>
             <span class="caret">▼</span>
           </button>
@@ -946,6 +736,31 @@ function createAssistantTurn(options = {}) {
       box.innerHTML = `<span class="agent-task-ico">${task.status === 'done' ? '✔' : '📋'}</span>
         <span class="agent-task-title">${escapeHtml(task.title || 'Задача')}</span>
         <span class="agent-task-meta">${escapeHtml(statusLabel)}${steps ? ` · шагов: ${steps}` : ''}</span>`;
+      scrollToBottom();
+    },
+
+    /** ИИ сгенерировал картинку, аудио или видео — показываем прямо в ответе. */
+    addMedia(item = {}) {
+      if (!item.url && !item.job_id) return;
+      let box = bubble.querySelector('.turn-media');
+      if (!box) {
+        box = document.createElement('div');
+        box.className = 'turn-media';
+        bubble.insertBefore(box, answerEl);
+      }
+      const holder = document.createElement('div');
+      if (item.job_id && !item.url) {
+        holder.innerHTML = `<figure class="turn-media-item is-pending" data-kind="video">
+          <div class="turn-media-wait"><span class="turn-media-spin"></span>
+          <span class="turn-media-status">Видео готовится у провайдера…</span></div>
+          <figcaption><span class="turn-media-meta">🎬 ${escapeHtml(item.model_name || 'видео')}</span></figcaption></figure>`;
+        box.appendChild(holder.firstElementChild);
+        pollTurnMediaJob(item, box.lastElementChild);
+      } else {
+        holder.innerHTML = turnMediaItemHtml(item);
+        box.appendChild(holder.firstElementChild);
+        mediaData.push(item);
+      }
       scrollToBottom();
     },
 
@@ -1056,6 +871,7 @@ function createAssistantTurn(options = {}) {
       if (!historyReplay && answerText) {
         historyAddMessage('ai', answerText, {
           sources: sourcesData.slice(0, 12),
+          media: mediaData.length ? mediaData.slice(0, 6) : undefined,
           model: meta.model || null,
           elapsed_ms: Date.now() - startedAt,
           reasoning: reasoningText || null,
@@ -1087,6 +903,7 @@ function createAssistantTurn(options = {}) {
 
     get text() { return answerText; },
     get sources() { return sourcesData; },
+    get media() { return mediaData; },
   };
 
   return api;
@@ -1383,19 +1200,10 @@ async function sendMessage(text) {
       return;
     }
 
-    // ── Медиа-модель ──
-    if (activeMediaModel) {
-      try {
-        await sendMediaMessage(finalMsg);
-      } catch (error) {
-        appendMessage('ai', '❌ Ошибка генерации: ' + (error.message || 'неизвестная ошибка'));
-      }
-      return;
-    }
-
-    // ── Главный чат с Linux-окружением ──
-    // ИИ сам решает: ответить сразу или работать в Linux по шагам.
-    // Кнопка «Поиск» тоже идёт через окружение (nova search → чтение страниц → ответ).
+    // ── Главный чат: ИИ-агент ──
+    // ИИ сам решает, что делать: ответить сразу, поискать, нарисовать картинку,
+    // озвучить текст, сделать видео или поработать в Linux по шагам.
+    // Модель генерации медиа тоже выбирает он — кнопок выбора нет.
     if (window.Linux && typeof window.Linux.runTurn === 'function') {
       const handled = await window.Linux.runTurn(finalMsg, {
         search: webSearchOn || autoSearchOn,
@@ -1492,7 +1300,7 @@ function clearInputMode(quiet = false) {
   if (!inputMode) return;
   inputMode = null;
   paintModeChip();
-  updateMediaChip();          // вернёт подсказку поля: медиа-модель или обычный чат
+  if (input) input.placeholder = input.dataset.defaultPlaceholder || 'Напишите сообщение...';
   if (!quiet) showNotification('Режим выключен — обычный чат', 'info');
 }
 
@@ -1546,6 +1354,9 @@ function appendMessage(role, content, meta = null) {
     formatted = formatted.replace(/!\[Image\]\(.*?\)/, '');
   }
 
+  const savedMedia = isAI && Array.isArray(meta?.media) ? meta.media.filter((m) => m && m.url) : [];
+  const mediaHtml = savedMedia.length
+    ? `<div class="turn-media">${savedMedia.map(turnMediaItemHtml).join('')}</div>` : '';
   const sources = Array.isArray(meta?.sources) ? meta.sources.filter((s) => s && s.url) : [];
   const sourcesHtml = sources.length ? `
     <div class="sources">
@@ -1559,6 +1370,7 @@ function appendMessage(role, content, meta = null) {
       <div class="msg-name">${isAI ? 'NovaMind' : 'Вы'}</div>
       <div class="msg-bubble">
         ${meta?.reasoning ? `<div class="reasoning"><div class="reasoning-head"><span>🧠</span><span>Рассуждение</span><span class="caret">▶</span></div><div class="reasoning-body"><div class="reasoning-text">${escapeHtml(meta.reasoning)}</div></div></div>` : ''}
+        ${mediaHtml}
         <div class="answer">${formatted}${imageHtml}</div>
         ${sourcesHtml}
       </div>
@@ -1925,9 +1737,8 @@ function newChat() {
   const store = historyLoad();
   store.activeId = null;
   historySave(store);
-  // Новый чат — чистый лист: никаких активных режимов и медиа-моделей.
+  // Новый чат — чистый лист: никаких активных режимов.
   clearInputMode(true);
-  clearMediaModel(true);
   historyReplay = true;
   try {
     chatContainer.innerHTML = '';
@@ -2150,7 +1961,6 @@ function loadChatList() {
 const CMDK_ACTIONS = [
   { icon: '🔍', label: 'Включить/выключить поиск в интернете', hint: '', run: () => toggleWebSearch() },
   { icon: '🧠', label: 'Включить/выключить рассуждения', hint: '', run: () => toggleReasoning() },
-  { icon: '🎨', label: 'Открыть панель медиа-моделей', hint: '', run: () => openMediaPicker() },
   { icon: '✖️', label: 'Выключить активный режим', hint: '', run: () => clearInputMode() },
   { icon: '✨', label: 'Спокойный режим анимаций', hint: '', run: () => toggleCalmMotion() },
   { icon: '🧹', label: 'Очистить чат', hint: '', run: () => clearChat() },
@@ -2163,7 +1973,6 @@ const CMDK_ACTIONS = [
   { icon: '💱', label: 'Режим: курс валют', hint: '/services currency', run: () => activateMode({ prefix: '/services currency ', label: '💱 Курс валют', placeholder: 'USD RUB…' }) },
   { icon: '📚', label: 'Режим: Википедия', hint: '/services wiki', run: () => activateMode({ prefix: '/services wiki ', label: '📚 Википедия', placeholder: 'Запрос…' }) },
   { icon: '💻', label: 'Режим: код', hint: '/code', run: () => activateMode({ prefix: '/code ', label: '💻 Помощник кода', placeholder: 'Какой код создать…' }) },
-  { icon: '🖼', label: 'Режим: изображение', hint: '/image', run: () => activateMode({ prefix: '/image ', label: '🎨 Генерация изображений', placeholder: 'Опишите изображение…' }) },
 ];
 
 let cmdkIndex = 0;
@@ -2355,7 +2164,6 @@ document.addEventListener('keydown', (event) => {
     return;
   }
   if (key === 'Escape') {
-    closeMediaPicker();
     closeCmdk();
     document.getElementById('attachDropdown')?.classList.remove('open');
     return;
@@ -2385,7 +2193,6 @@ document.addEventListener('click', (event) => {
   setWebSearch(webSearchOn, true);
   document.getElementById('btn-reasoning')?.classList.toggle('active', reasoningOn);
   input.focus();
-  refreshMediaSelection();
   refreshAiStatus();
   checkHealth(false);
   renderChatList();

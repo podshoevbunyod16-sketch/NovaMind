@@ -24,7 +24,9 @@
  *  11. главный чат сам работает в Linux: план, шаги, свёрнутый блок
  *      «Работа в Linux», простые вопросы — сразу текстом;
  *  12. кнопка «Поиск» (автопоиск) идёт через Linux-окружение,
- *      кнопки у блоков кода, откат на обычный чат, «стоп».
+ *      кнопки у блоков кода, откат на обычный чат, «стоп»;
+ *  13. ИИ сам генерирует картинки, аудио и видео: кнопок «Медиа» нет,
+ *      файл появляется прямо в ответе и остаётся после перезагрузки.
  */
 import { createRequire } from 'node:module';
 
@@ -129,6 +131,35 @@ const LINUX_SEARCH_STREAM = [
   { type: 'token', token: 'Средняя цена — **12 500 ₽** [1].' },
   { type: 'result', reply: 'Средняя цена — 12 500 ₽ [1].', steps: 0, searched: true, model: 'mock-model',
     sources: LINUX_SOURCES },
+  { type: 'done' },
+];
+
+// ИИ сам решил нарисовать картинку — модель выбрал сервер
+const IMAGE_STREAM = [
+  { type: 'stage', scene: 'media', title: 'Рисую изображение', text: 'a red fox in a snowy forest, watercolor' },
+  { type: 'step', icon: '🎨', text: 'Пробую Pollinations Flux (Pollinations)' },
+  { type: 'media', media: { kind: 'image', url: '/media/fox.png', filename: 'fox.png', mime: 'image/png',
+    model: 'flux', model_name: 'Pollinations Flux', provider_name: 'Pollinations', elapsed_ms: 2300,
+    prompt: 'a red fox in a snowy forest, watercolor' } },
+  { type: 'token', token: 'Готово! Нарисовал лисичку в зимнем лесу.' },
+  { type: 'result', reply: 'Готово! Нарисовал лисичку в зимнем лесу.', steps: 1, linux: false, model: 'mock-model',
+    media: [{ kind: 'image', url: '/media/fox.png' }] },
+  { type: 'done' },
+];
+const AUDIO_STREAM = [
+  { type: 'stage', scene: 'media', title: 'Озвучиваю', text: 'Добро пожаловать!' },
+  { type: 'media', media: { kind: 'audio', url: '/media/hello.mp3', filename: 'hello.mp3',
+    model_name: 'Gemini 3.8 Flash TTS', provider_name: 'Google AI Studio', prompt: 'Добро пожаловать!' } },
+  { type: 'token', token: 'Озвучил приветствие.' },
+  { type: 'result', reply: 'Озвучил приветствие.', steps: 1, linux: false, model: 'mock-model' },
+  { type: 'done' },
+];
+const VIDEO_STREAM = [
+  { type: 'stage', scene: 'media', title: 'Делаю видео', text: 'a cat surfing' },
+  { type: 'media', media: { kind: 'video', job_id: 'job-1', state: 'queued', model_name: 'Veo 3.1',
+    provider_name: 'Google AI Studio', prompt: 'a cat surfing' } },
+  { type: 'token', token: 'Видео готовится — появится здесь само.' },
+  { type: 'result', reply: 'Видео готовится — появится здесь само.', steps: 1, linux: false, model: 'mock-model' },
   { type: 'done' },
 ];
 
@@ -243,6 +274,13 @@ const dom = new JSDOM(html, {
       if (path.startsWith('/api/search/health')) {
         return { ok: true, status: 200, async json() { return { ok: true, alive: ['searxng'], backends: [{ backend: 'searxng', ok: true, count: 2, ms: 12, error: null }] }; } };
       }
+      if (path.startsWith('/api/media/jobs/')) {
+        mock.jobPolls = (mock.jobPolls || 0) + 1;
+        return json(mock.jobPolls < 2
+          ? { job_id: 'job-1', state: 'running', polls: mock.jobPolls, events: [] }
+          : { job_id: 'job-1', state: 'succeeded', polls: mock.jobPolls, events: [],
+              media: { kind: 'video', url: '/media/cat.mp4', filename: 'cat.mp4', mime: 'video/mp4' } });
+      }
       if (path.startsWith('/api/media/')) {
         return { ok: true, status: 200, async json() { return { selection: null }; } };
       }
@@ -304,6 +342,10 @@ const dom = new JSDOM(html, {
                       text: 'Текст страницы asyncio', elapsed_ms: 120, bytes: 22 });
       }
       if (path.startsWith('/api/agent/status')) {
+        if (mock.linux === 'media') {
+          return json({ enabled: true, tools: false, available: true, max_steps: 8,
+            hint: 'ИИ ищет в интернете и генерирует медиа. Для Linux-окружения добавьте TERMINAL_ENABLED=1' });
+        }
         return json(mock.linux
           ? { enabled: true, tools: true, available: true, max_steps: 8, hint: '' }
           : { enabled: false, tools: false, available: false, max_steps: 8,
@@ -495,8 +537,9 @@ check('повторный клик по режиму выключает его',
 window.activateMode({ prefix: '/services wiki ', label: '📚 Википедия', placeholder: 'Запрос…' });
 window.newChat();
 check('новый чат снимает активный режим', modeBar.hidden === true);
-check('плашка медиа не висит без выбранной модели',
-  document.getElementById('mediaActiveBar').hidden === true);
+check('кнопок и панели выбора медиа-модели нет',
+  !document.getElementById('btnMediaModel') && !document.getElementById('btn-media')
+  && !document.getElementById('mediaActiveBar') && !document.getElementById('mediaPicker'));
 
 console.log('\n7) Ошибок за весь прогон не появилось');
 check('консоль чистая', consoleErrors.length === 0, consoleErrors.join(' | '));
@@ -803,6 +846,87 @@ check('«стоп» останавливает работу в Linux',
 window.fetch = fetchBeforeStop;
 
 check('за весь прогон ошибок в консоли нет', consoleErrors.length === 0, consoleErrors.join(' | '));
+
+
+// ══════════════════════════════════════════════════════════════
+// 13) ИИ сам генерирует картинки, аудио и видео
+// ══════════════════════════════════════════════════════════════
+console.log('\n13) ИИ сам решает, что сгенерировать, и сам выбирает модель');
+check('в командной панели нет выбора медиа-модели и режима «изображение»',
+  (() => { window.openCmdk(); const text = document.getElementById('cmdk').textContent; window.closeCmdk();
+    return !text.includes('медиа-моделей') && !text.includes('Режим: изображение'); })());
+check('приветствие говорит, что ИИ сам рисует, озвучивает и делает видео', (() => {
+  const text = document.getElementById('welcomeScreen').textContent;
+  return text.includes('нарисую') && text.includes('видео');
+})());
+
+mock.agentStream = IMAGE_STREAM;
+document.getElementById('chat-input').value = 'нарисуй лису в зимнем лесу';
+await window.sendMessage();
+await settle();
+const imageTurn = lastAi();
+check('просьба нарисовать ушла агенту как обычное сообщение',
+  mock.agentRequests[mock.agentRequests.length - 1].message === 'нарисуй лису в зимнем лесу');
+check('картинка прямо в ответе ИИ', imageTurn.querySelector('.turn-media img')?.getAttribute('src') === '/media/fox.png');
+check('картинка стоит над текстом ответа', (() => {
+  const box = imageTurn.querySelector('.turn-media');
+  return !!box && !!(box.compareDocumentPosition(imageTurn.querySelector('.answer')) & window.Node.DOCUMENT_POSITION_FOLLOWING);
+})());
+check('подпись: какой моделью ИИ нарисовал и сколько ждали',
+  imageTurn.querySelector('.turn-media-meta').textContent.includes('Pollinations Flux')
+  && imageTurn.querySelector('.turn-media-meta').textContent.includes('2.3 c'));
+check('кнопка «Скачать»', imageTurn.querySelector('.turn-media-dl')?.getAttribute('download') === 'fox.png');
+check('генерация — не Linux: блока шагов и метки Linux нет',
+  !imageTurn.querySelector('.agent-term') && !imageTurn.querySelector('.msg-meta').textContent.includes('Linux'));
+check('текст ответа напечатан', imageTurn.querySelector('.answer').textContent.includes('лисичку'));
+const savedChat = JSON.parse(window.localStorage.getItem('nova_history_v2'));
+const savedAi = savedChat.chats.find((c) => c.id === savedChat.activeId).messages.filter((m) => m.role === 'ai').pop();
+check('картинка сохранена в истории вместе с ответом', savedAi.meta?.media?.[0]?.url === '/media/fox.png');
+
+mock.agentStream = AUDIO_STREAM;
+document.getElementById('chat-input').value = 'озвучь приветствие';
+await window.sendMessage();
+await settle();
+check('озвучка — плеер прямо в ответе', lastAi().querySelector('.turn-media audio')?.getAttribute('src') === '/media/hello.mp3');
+
+window.NOVA_MEDIA_POLL_MS = 30;
+mock.agentStream = VIDEO_STREAM;
+document.getElementById('chat-input').value = 'сделай видео с котом на сёрфе';
+await window.sendMessage();
+const videoTurn = lastAi();
+check('видео: пока готовится — карточка ожидания', !!videoTurn.querySelector('.turn-media-item.is-pending'));
+await settle(250);
+check('видео готово — плеер подменил карточку',
+  videoTurn.querySelector('.turn-media video')?.getAttribute('src') === '/media/cat.mp4'
+  && !videoTurn.querySelector('.is-pending'));
+
+// Перезагрузка чата из истории: картинка на месте
+const activeId = JSON.parse(window.localStorage.getItem('nova_history_v2')).activeId;
+window.loadChat(activeId);
+await settle(60);
+check('после перезагрузки чата картинка на месте',
+  [...document.querySelectorAll('.turn-media img')].some((img) => img.getAttribute('src') === '/media/fox.png'));
+check('после перезагрузки видео на месте',
+  [...document.querySelectorAll('video')].some((video) => video.getAttribute('src') === '/media/cat.mp4'));
+
+// Без Linux агент всё равно работает: ищет и генерирует
+mock.linux = 'media';
+await window.Linux.loadStatus();
+check('без Linux ИИ-агент доступен', window.Linux.isAvailable() === true && window.Linux.hasLinux() === false);
+check('индикатор: ИИ рисует и ищет, но без Linux', (() => {
+  const title = document.getElementById('statusDot').title;
+  return title.includes('рисует') && !title.includes('Linux');
+})());
+mock.agentStream = LINUX_SEARCH_STREAM;
+window.setWebSearch(true, true);
+document.getElementById('chat-input').value = 'сколько стоит ноутбук?';
+await window.sendMessage();
+await settle();
+window.setWebSearch(false, true);
+check('без Linux блок шагов называется честно — «Шаги ИИ»',
+  lastAi().querySelector('.agent-term-title')?.textContent === 'Шаги ИИ');
+
+check('после медиа-сценариев консоль чистая', consoleErrors.length === 0, consoleErrors.join(' | '));
 
 if (failures.length) {
   console.error(`\n❌ Провалено проверок: ${failures.length} → ${failures.join(', ')}`);

@@ -1,11 +1,18 @@
 """
-routes/agent.py — главный чат с Linux-окружением.
+routes/agent.py — главный чат: ИИ-агент, который сам выбирает, что делать.
 
-Отдельного «агентного режима» больше нет: каждое сообщение в главном чате
-идёт сюда, и модель сама решает, как отвечать.
+Отдельных режимов и кнопок нет: каждое сообщение в главном чате идёт сюда,
+и модель сама решает, как отвечать.
 
-    вопрос → [ответ сразу]                                  простые вопросы
-    вопрос → план → [команда | файл | поиск | страница] × N → ответ   задачи
+    вопрос → [ответ сразу]                                          простые вопросы
+    вопрос → план → [команда | файл | поиск | страница |
+                     картинка | озвучка | видео] × N → ответ          задачи
+
+Инструменты:
+  * веб: search / open — всегда;
+  * медиа: image / audio / video / media_models — всегда; модель генерации
+    выбирает сам агент (media_agent.py), бесплатные — первыми;
+  * Linux: run / read / write / ls — при TERMINAL_ENABLED=1 и входе в аккаунт.
 
 Как это устроено:
   * каждый шаг — потоковый запрос к модели. Если модель начинает писать
@@ -20,7 +27,8 @@ routes/agent.py — главный чат с Linux-окружением.
   * история диалога берётся из базы, ответ сохраняется туда же.
 
 Границы (это сервер, а не песочница ОС):
-  * TERMINAL_ENABLED=1 в .env, иначе главный чат работает без окружения;
+  * AGENT_ENABLED=0 выключает агента целиком (чат уходит в /send_stream);
+  * TERMINAL_ENABLED=1 в .env, иначе агент работает без Linux-команд;
   * AGENT_MAX_STEPS действий и общий AGENT_TIMEOUT — цикл не крутится вечно;
   * команды проверяются белым списком routes/terminal.py.
 """
@@ -30,6 +38,7 @@ import os
 import re
 import time
 
+import media_agent
 from ai_providers import chat_completion, chat_stream, resolve_target
 from routes.terminal import (run_agent as run_terminal, safe_path, relative_to_workspace,
                              ensure_workspace, nova_search, nova_read, _save_research,
@@ -45,58 +54,100 @@ SEARCH_PAGES = int(os.getenv("AGENT_SEARCH_PAGES", os.getenv("SEARCH_MAX_PAGES",
 MAX_OBSERVATION = 3500
 HISTORY_LIMIT = 16
 
-TOOL_ACTIONS = {"plan", "run", "read", "write", "ls", "search", "open", "task", "task_done"}
+LINUX_ACTIONS = {"run", "read", "write", "ls"}
+WEB_ACTIONS = {"search", "open"}
+MEDIA_ACTIONS = {"image", "audio", "video", "media_models"}
+TOOL_ACTIONS = {"plan", "task", "task_done"} | LINUX_ACTIONS | WEB_ACTIONS | MEDIA_ACTIONS
 ALL_ACTIONS = TOOL_ACTIONS | {"answer"}
 
 AGENT_SYSTEM_PROMPT = """{persona}
 Сегодня {date}.
 
-У тебя есть своё Linux-окружение: рабочая папка с терминалом, файлами, python3, node, git
-и доступом в интернет. Пользователь пишет с телефона — отвечай по делу, без воды.
+Ты — ИИ-агент. Ты сам решаешь, что сделать для пользователя: ответить, поискать в интернете,
+{linux_line}нарисовать картинку, озвучить текст или сделать видео. Пользователь пишет с телефона —
+отвечай по делу, без воды.
 
 КАК ОТВЕЧАТЬ
 • Если можно ответить сразу (приветствие, объяснение, перевод, знания, совет) —
   просто ответь обычным текстом в markdown. Без JSON.
-• Если для цели нужно действовать — посчитать, запустить или проверить код, создать или
-  прочитать файлы, узнать свежие данные из интернета — работай в окружении ПО ШАГАМ,
-  пока цель не достигнута. Каждый шаг — ТОЛЬКО один JSON-объект, без слов вокруг:
+• Если для цели нужно действовать — работай ПО ШАГАМ, пока цель не достигнута.
+  Каждый шаг — ТОЛЬКО один JSON-объект, без слов вокруг:
 
   {{"action":"plan","steps":["шаг 1","шаг 2"]}}              план для сложной задачи (первым шагом)
-  {{"action":"write","path":"calc.py","content":"print(2**10)"}}  записать файл
-  {{"action":"run","command":"python3 calc.py","thought":"проверю расчёт"}}  выполнить команду
-  {{"action":"read","path":"data.csv"}}                        прочитать файл
-  {{"action":"ls"}}                                            список файлов
   {{"action":"search","query":"что найти"}}                    поиск в интернете
   {{"action":"open","url":"https://…"}}                        прочитать страницу
-  {{"action":"task","title":"…","detail":"…"}}                 завести задачу (для длинной работы)
+  {{"action":"image","prompt":"подробное описание на английском","aspect":"1:1"}}  нарисовать изображение
+  {{"action":"audio","text":"что озвучить","voice":""}}        озвучить текст (речь, аудио)
+  {{"action":"video","prompt":"описание сцены на английском","duration":5,"aspect":"16:9"}}  сделать видео
+  {{"action":"media_models","type":"image"}}                   какие модели генерации доступны
+{linux_actions}  {{"action":"task","title":"…","detail":"…"}}                 завести задачу (для длинной работы)
   {{"action":"task_done","note":"что сделано"}}                закрыть задачу
 
-• После каждого действия придёт его результат. Смотри на него и решай следующий шаг.
-  Ошибка — исправь (перепиши файл, поправь команду) и попробуй снова.
-• Никогда не выдумывай результат команды или страницы — сначала выполни действие.
-• Когда цель достигнута — напиши финальный ответ обычным текстом (markdown):
-  что сделано и какой результат. Код, который пользователю пригодится, покажи в ответе.
+МЕДИА
+• Просят картинку, рисунок, логотип, фото, арт — image. Озвучку, голос, аудио, прочитать
+  вслух — audio. Ролик, анимацию, видео — video. Не спрашивай, какой моделью: модель
+  выбирается сама (лучшая бесплатная), а если провайдер откажет — берётся следующая.
+• Промпт для image/video пиши подробно и по-английски: объект, стиль, свет, ракурс, фон.
+  aspect: 1:1, 16:9, 9:16, 4:3, 3:4. Можно указать "model", если пользователь назвал модель
+  или нужен особый стиль — список даст media_models.
+• Готовый файл сразу показывается пользователю в чате. В финальном ответе НЕ вставляй
+  ссылку и markdown-картинку — коротко скажи, что получилось, и предложи варианты.
+• Не получилось — честно скажи почему и что подключить (это будет в результате действия).
 
-ОГРАНИЧЕНИЯ ТЕРМИНАЛА
+ПРАВИЛА
+• После каждого действия придёт его результат. Смотри на него и решай следующий шаг.
+  Ошибка — исправь и попробуй снова.
+• Никогда не выдумывай результат команды, страницы или генерации — сначала выполни действие.
+• Когда цель достигнута — напиши финальный ответ обычным текстом (markdown):
+  что сделано и какой результат.{linux_rules}"""
+
+LINUX_LINE = "поработать в своём Linux-окружении (код, файлы, терминал), "
+LINUX_ACTION_LINES = """  {"action":"write","path":"calc.py","content":"print(2**10)"}  записать файл
+  {"action":"run","command":"python3 calc.py","thought":"проверю расчёт"}  выполнить команду
+  {"action":"read","path":"data.csv"}                        прочитать файл
+  {"action":"ls"}                                            список файлов
+"""
+LINUX_RULES = """
+
+LINUX-ОКРУЖЕНИЕ
+Рабочая папка с терминалом, файлами, python3, node, git и интернетом. Посчитать, запустить
+или проверить код, создать или прочитать файлы — делай это в окружении, а не в уме.
+Код, который пользователю пригодится, покажи в ответе.
 Одна команда за раз, без |, >, &&, $(), sudo. Сложную логику пиши в файл (write)
 и запускай (run: python3 файл.py). Разрешены: ls, cat, grep, find, head, tail, wc,
 mkdir, cp, mv, rm, python3, pip, node, npm, git, curl, sqlite3, date и похожие.
 Команда `nova search <запрос>` и `nova read <url>` тоже работают в терминале."""
+NO_LINUX_RULES = """
+
+Linux-окружение сейчас выключено: команды run/read/write/ls недоступны. Считай и пиши код
+в ответе сам и предупреди, что код не запускался."""
+
+
+def build_system_prompt(use_tools, search_mode=False, date=None):
+    """Системный промпт агента: веб и медиа — всегда, Linux — если включён."""
+    prompt = AGENT_SYSTEM_PROMPT.format(
+        persona=_persona(), date=date or time.strftime("%Y-%m-%d"),
+        linux_line=LINUX_LINE if use_tools else "",
+        linux_actions=LINUX_ACTION_LINES if use_tools else "",
+        linux_rules=LINUX_RULES if use_tools else NO_LINUX_RULES,
+    )
+    if search_mode:
+        prompt += SEARCH_ADDON
+    return prompt
+
 
 SEARCH_ADDON = """
 
 ПОИСК ВКЛЮЧЁН
-Пользователь нажал «Поиск»: окружение уже нашло источники и прочитало лучшие страницы —
+Пользователь нажал «Поиск»: источники уже найдены и лучшие страницы прочитаны —
 результат лежит в истории выше. Если данных мало или они противоречат друг другу — сделай
 ещё search или open. Цифры можно пересчитать в python. В финальном ответе опирайся на
 найденное, ссылайся на источники как [1], [2] (номера из выдачи) и прямо говори, чего
 в источниках нет."""
 
-NO_TOOLS_PROMPT = "{persona}\nСегодня {date}. Отвечай по-русски, конкретно и по делу."
-
-
 def is_enabled():
-    return os.getenv("AGENT_ENABLED", os.getenv("TERMINAL_ENABLED", "0")) == "1"
+    """Агент включён по умолчанию; AGENT_ENABLED=0 возвращает старый чат."""
+    return os.getenv("AGENT_ENABLED", "1") != "0"
 
 
 def tools_enabled():
@@ -215,18 +266,24 @@ def _history_for_prompt(chat_id):
 @agent_bp.route("/api/agent/status")
 def agent_status():
     enabled = is_enabled()
+    user = signed_in()
     tools = tools_enabled()
     hint = ""
-    if not enabled or os.getenv("TERMINAL_ENABLED", "0") != "1":
-        hint = "Linux-окружение выключено: добавьте TERMINAL_ENABLED=1 в .env и перезапустите сервер"
-    elif not tools:
-        hint = "Войдите в аккаунт, чтобы ИИ мог работать в Linux-окружении"
+    if not enabled:
+        hint = "ИИ-агент выключен (AGENT_ENABLED=0) — чат отвечает без инструментов"
+    elif not user:
+        hint = "Войдите в аккаунт, чтобы ИИ мог искать, генерировать медиа и работать в Linux"
+    elif os.getenv("TERMINAL_ENABLED", "0") != "1":
+        hint = ("ИИ ищет в интернете и генерирует медиа. Для Linux-окружения добавьте "
+                "TERMINAL_ENABLED=1 в .env и перезапустите сервер")
     return jsonify({
         "enabled": enabled,
         "tools": tools,
-        "available": enabled and tools,
+        "linux": tools,
+        "media": {kind: mg_connected(kind) for kind in media_agent.KINDS},
+        "available": enabled and user,
         "max_steps": MAX_STEPS,
-        "user": signed_in(),
+        "user": user,
         "admin": bool(session.get("admin_logged_in")),
         "hint": hint,
     })
@@ -240,9 +297,9 @@ def agent_stream():
     if not goal:
         return jsonify({"error": "Пустое сообщение"}), 400
     if not is_enabled():
-        return jsonify({"error": "Linux-окружение выключено (TERMINAL_ENABLED=1)"}), 403
+        return jsonify({"error": "ИИ-агент выключен (AGENT_ENABLED=0)"}), 403
     if not signed_in():
-        return jsonify({"error": "Войдите в аккаунт, чтобы ИИ работал в Linux-окружении"}), 403
+        return jsonify({"error": "Войдите в аккаунт, чтобы ИИ мог работать с инструментами"}), 403
 
     search_mode = bool(data.get("search"))
     reasoning = bool(data.get("reasoning"))
@@ -264,29 +321,24 @@ def agent_stream():
             print(f"[agent] история недоступна: {exc}")
             chat_id = None
 
-    date = time.strftime("%Y-%m-%d")
-    if use_tools:
-        system = AGENT_SYSTEM_PROMPT.format(persona=_persona(), date=date)
-        if search_mode:
-            system += SEARCH_ADDON
-    else:
-        system = NO_TOOLS_PROMPT.format(persona=_persona(), date=date)
+    system = build_system_prompt(use_tools, search_mode)
 
     @stream_with_context
     def generate():
         started = time.time()
         state = {"task_id": None, "steps": 0, "answer": "", "sources": [],
-                 "searched": False, "announced": False}
+                 "searched": False, "announced": False, "media": [], "linux": False,
+                 "use_tools": use_tools}
         messages = list(history) + [{"role": "user", "content": goal}]
 
         try:
-            if search_mode and use_tools:
+            if search_mode:
                 yield from _auto_search(goal, state, messages)
 
             for step_no in range(MAX_STEPS + 1):
                 out_of_time = time.time() - started > AGENT_TIMEOUT
-                allow = use_tools and step_no < MAX_STEPS and not out_of_time
-                if use_tools and not allow and step_no > 0:
+                allow = step_no < MAX_STEPS and not out_of_time
+                if not allow and step_no > 0:
                     note = "Время вышло" if out_of_time else "Шаги закончились"
                     yield _ndjson({"type": "step", "icon": "⏱", "text": f"{note} — собираю ответ"})
                     messages.append({"role": "user", "content":
@@ -307,9 +359,10 @@ def agent_stream():
 
                 action = outcome["action"]
                 kind = str(action.get("action"))
-                if not state["announced"] and not search_mode:
+                if not state["announced"] and not search_mode and kind not in MEDIA_ACTIONS:
                     state["announced"] = True
-                    yield _ndjson({"type": "stage", "scene": "agent", "title": "Работаю в Linux",
+                    title = "Работаю в Linux" if use_tools and kind in LINUX_ACTIONS else "Работаю над задачей"
+                    yield _ndjson({"type": "stage", "scene": "agent", "title": title,
                                    "text": "Иду к цели по шагам…"})
                 state["steps"] += 1
                 thought = str(action.get("thought") or "").strip()
@@ -344,7 +397,15 @@ def agent_stream():
         if chat_id:
             try:
                 from database import add_message, trim_messages
-                add_message(chat_id, "assistant", state["answer"])
+                saved = state["answer"]
+                if state["media"]:
+                    # ИИ должен помнить, что уже нарисовал: «сделай ярче», «ещё вариант»
+                    notes = "\n".join(
+                        f"[{media_agent.KIND_LABELS.get(item.get('kind'), 'медиа')}: "
+                        f"«{clip(item.get('prompt', ''), 300)}» — {item.get('model_name') or item.get('model')}]"
+                        for item in state["media"])
+                    saved = f"{saved}\n\n{notes}"
+                add_message(chat_id, "assistant", saved)
                 trim_messages(chat_id, max_messages=100)
             except Exception as exc:
                 print(f"[agent] не удалось сохранить ответ: {exc}")
@@ -352,6 +413,7 @@ def agent_stream():
         yield _ndjson({"type": "result", "reply": state["answer"], "steps": state["steps"],
                        "task_id": state["task_id"], "model": model, "provider": provider,
                        "sources": state["sources"], "searched": state["searched"],
+                       "media": state["media"], "linux": state["linux"],
                        "offline": provider == "local_demo"})
         yield _ndjson({"type": "done"})
 
@@ -488,7 +550,7 @@ def _auto_search(goal, state, messages):
     query = _search_query(goal)
     state["searched"] = True
     yield _ndjson({"type": "stage", "scene": "search", "title": "Поищу в интернете",
-                   "text": "Ищу через Linux-окружение…"})
+                   "text": "Ищу через Linux-окружение…" if state.get("use_tools", True) else "Ищу источники…"})
     results, meta = nova_search(query, limit=8)
     numbered = _add_sources(state, results)
     listing = _format_numbered(query, numbered, meta.get("backend"), meta.get("elapsed_ms", 0))
@@ -526,12 +588,13 @@ def _auto_search(goal, state, messages):
                                  f"URL: {page['url']}\n{page['text']}")
     context = "\n\n".join(context_parts)
 
-    try:
-        stamp = time.strftime("%Y-%m-%d %H:%M")
-        saved = _save_research(query, f"# {query}\n\n_поиск {stamp}_\n\n{context}\n", "search")
-        yield _ndjson({"type": "step", "icon": "💾", "text": f"Сохранил выдержки: {saved}"})
-    except OSError as exc:
-        print(f"[agent] не удалось сохранить заметку: {exc}")
+    if state.get("use_tools", True):
+        try:
+            stamp = time.strftime("%Y-%m-%d %H:%M")
+            saved = _save_research(query, f"# {query}\n\n_поиск {stamp}_\n\n{context}\n", "search")
+            yield _ndjson({"type": "step", "icon": "💾", "text": f"Сохранил выдержки: {saved}"})
+        except OSError as exc:
+            print(f"[agent] не удалось сохранить заметку: {exc}")
 
     yield _ndjson({"type": "stage", "scene": "write", "title": "Разбираю найденное",
                    "text": "Решаю, хватает ли данных"})
@@ -583,8 +646,14 @@ def _perform(action, kind, use_tools, state, goal=""):
             yield _ndjson({"type": "task", "task": database.get_task(state["task_id"])})
         return "Задача закрыта. Теперь ответь пользователю."
 
-    if not use_tools:
-        return "Инструменты недоступны. Ответь пользователю по имеющимся данным."
+    if kind in MEDIA_ACTIONS:
+        return (yield from _perform_media(action, kind, state))
+
+    if kind in LINUX_ACTIONS and not use_tools:
+        return ("Linux-окружение выключено (нет TERMINAL_ENABLED=1): команды и файлы недоступны. "
+                "Ответь без них и предупреди, что код не запускался.")
+    if kind in LINUX_ACTIONS:
+        state["linux"] = True
 
     if kind == "search":
         query = str(action.get("query") or "").strip()
@@ -678,3 +747,84 @@ def _perform(action, kind, use_tools, state, goal=""):
                    "output": clip(output, 1500)})
     body = output.strip() or "(пустой вывод)"
     return f"$ {command}\nкод выхода: {result['code']}\n{body}"
+
+
+# ───────────────────────── медиа ─────────────────────────
+
+MEDIA_STAGE = {
+    "image": ("🎨", "Рисую изображение"),
+    "audio": ("🔊", "Озвучиваю"),
+    "video": ("🎬", "Делаю видео"),
+}
+
+
+def mg_connected(kind):
+    """Есть ли хоть одна модель для этого типа медиа (для статуса)."""
+    try:
+        return media_agent.quick_available(kind)
+    except Exception:
+        return False
+
+
+def _perform_media(action, kind, state):
+    """Генерация медиа по решению ИИ. Модель выбирает media_agent.
+
+    Генератор событий (stage/step/media). Возвращает наблюдение для модели.
+    """
+    if kind == "media_models":
+        wanted = str(action.get("type") or "all").strip().lower()
+        yield _ndjson({"type": "step", "icon": "🧩", "text": "Смотрю, какие модели генерации доступны"})
+        return media_agent.describe(wanted if wanted in media_agent.KINDS else "all")
+
+    prompt = str(action.get("prompt") or action.get("text") or "").strip()
+    if not prompt:
+        field = "text" if kind == "audio" else "prompt"
+        return f'Пустое описание. Повтори с {{"action":"{kind}","{field}":"..."}}.'
+
+    icon, title = MEDIA_STAGE[kind]
+    yield _ndjson({"type": "stage", "scene": "media", "title": title,
+                   "text": clip(prompt, 140)})
+    events = []
+    result, model, errors = media_agent.generate(
+        kind, prompt, options=media_agent.build_options(kind, action),
+        wanted_model=str(action.get("model") or ""), on_status=events.append,
+    )
+    # На телефоне достаточно «какой моделью пробовал» — служебные строки провайдера прячем
+    attempts = [message for message in events if message.startswith("Пробую")] or events[-1:]
+    for message in attempts[-3:]:
+        yield _ndjson({"type": "step", "icon": icon, "text": clip(message, 160)})
+
+    if not result:
+        reason = "; ".join(errors) or "неизвестная ошибка"
+        yield _ndjson({"type": "step", "icon": "⚠️", "text": clip(f"Не получилось: {reason}", 220)})
+        return (f"Генерация ({media_agent.KIND_LABELS[kind]}) не удалась: {clip(reason, 1200)}\n"
+                f"Объясни пользователю коротко и по-человечески, что случилось и что подключить.")
+
+    media = {
+        "kind": result.get("kind") or kind,
+        "url": result.get("url"),
+        "filename": result.get("filename"),
+        "mime": result.get("mime"),
+        "model": result.get("model"),
+        "model_name": result.get("model_name") or model.get("name"),
+        "provider": result.get("provider"),
+        "provider_name": result.get("provider_name") or model.get("provider_name"),
+        "pricing_status": result.get("pricing_status"),
+        "elapsed_ms": result.get("elapsed_ms"),
+        "prompt": prompt,
+        "title": prompt[:80],
+    }
+    if result.get("job_id"):
+        media.update({"job_id": result["job_id"], "state": result.get("state") or "queued"})
+    state["media"].append(media)
+    yield _ndjson({"type": "media", "media": media})
+
+    used = f"{media['model_name']} ({media['provider_name']})"
+    tried = f" До этого не вышло: {'; '.join(errors)}." if errors else ""
+    if media.get("job_id"):
+        return (f"Видео поставлено в очередь у провайдера моделью {used}, задача {media['job_id']}. "
+                f"Пользователь видит статус в чате, файл появится сам.{tried} "
+                f"Коротко скажи, что видео готовится.")
+    return (f"Готово: {media_agent.KIND_LABELS[kind]} создано моделью {used} за "
+            f"{(media.get('elapsed_ms') or 0) / 1000:.1f} c и уже показано пользователю.{tried} "
+            f"Не вставляй ссылку — коротко опиши результат или сделай следующий шаг.")
