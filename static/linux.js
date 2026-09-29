@@ -171,7 +171,6 @@
         searched: result.searched,
         steps: result.steps,
         linux: result.steps > 0 || result.searched,
- d42dfa25f0f2c0d68742da19cdd015831aee836a
       });
     } catch (error) {
       activeAbort = null;
