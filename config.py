@@ -100,9 +100,18 @@ PROVIDERS = {
             "Content-Type": "application/json",
         },
         "models": [
-            {"id": "local-llama", "name": "Local Llama (llama.cpp)", "context_length": 4096},
+            {"id": os.getenv("LOCAL_MODEL_ID", "local-llama"),
+             "name": os.getenv("LOCAL_MODEL_NAME", "Local Llama (llama.cpp)"), "context_length": 4096},
             {"id": "llama.cpp", "name": "Llama.cpp Local", "context_length": 4096}
         ]
+    },
+    # Встроенная офлайн-модель: не требует ни ключей, ни сети.
+    # Нужна, чтобы чат отвечал всегда (демо-режим и аварийный контур).
+    "local_demo": {
+        "url": "local://novamind/offline",
+        "max_tokens": 4096,
+        "headers": {},
+        "models": [{"id": "nova-local-1", "name": "Nova Local 1 (офлайн)", "context_length": 8192}],
     },
 }
 
@@ -169,6 +178,61 @@ def save_selected_media_model(selection):
 
 
 load_runtime_settings()
+
+
+# ---------- Доступность провайдеров ----------
+def has_credentials(provider: str) -> bool:
+    """Подключён ли провайдер (есть ключ / не требует ключа вовсе)."""
+    if provider == "groq":
+        keys = [os.getenv("GROQ_API_KEY", "")] + [os.getenv(f"GROQ_API_KEY_{i}", "") for i in range(1, 10)]
+        return any(k.strip() for k in keys)
+    if provider == "cerebras":
+        return bool(os.getenv("CEREBRAS_API_KEY", "").strip())
+    if provider == "openrouter":
+        return bool(os.getenv("OPENROUTER_API_KEY", "").strip())
+    if provider == "google_ai_studio":
+        return bool((os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_AI_STUDIO_KEY") or "").strip())
+    if provider == "pollinations":
+        # Каталог моделей публичный, но генерация текста требует ключ.
+        return bool((os.getenv("POLLINATIONS_API_KEY")
+                     or os.getenv("POLLINATIONS_KEY")
+                     or os.getenv("POLLINATIONS_TOKEN") or "").strip())
+    if provider == "openai_compatible":
+        # Локальный llama-server / Ollama ключ не требуют.
+        return True
+    if provider == "local_demo":
+        return True
+    return False
+
+
+def first_available_provider() -> str:
+    """Первый провайдер, который реально может ответить прямо сейчас."""
+    for provider in ("groq", "google_ai_studio", "openrouter", "cerebras", "pollinations"):
+        if has_credentials(provider):
+            return provider
+    return "local_demo"
+
+
+def ensure_usable_provider() -> None:
+    """
+    Если выбранный провайдер не может ответить (нет ключа), переключаемся на
+    тот, который может. Без этого чат молча возвращал «нет ответа от ИИ».
+    """
+    global current_provider, current_model
+    if current_provider not in PROVIDERS:
+        current_provider = "local_demo"
+        current_model = "nova-local-1"
+        return
+    if current_provider == "local_demo" or has_credentials(current_provider):
+        return
+    fallback = first_available_provider()
+    print(f"[config] Провайдер '{current_provider}' не подключён — переключаюсь на '{fallback}'")
+    current_provider = fallback
+    models = PROVIDERS.get(fallback, {}).get("models") or []
+    current_model = models[0]["id"] if models else "nova-local-1"
+
+
+ensure_usable_provider()
 
 # ---------- Кастомные команды ----------
 CUSTOM_COMMANDS_FILE = os.path.join(os.path.dirname(__file__), "custom_commands.json")

@@ -55,8 +55,8 @@ def test_send_without_media_selection_is_rejected(client, gemini_key):
 
 def test_send_without_media_flag_keeps_text_chat(client, gemini_key, monkeypatch):
     select_tts(client)
-    monkeypatch.setattr("routes.chat.groq_request_with_rotation",
-                        lambda *a, **k: ({"choices": [{"message": {"content": "текстовый ответ"}}]}, None))
+    monkeypatch.setattr("routes.chat.chat_completion",
+                        lambda *a, **k: ("текстовый ответ", {"provider": "groq", "model": "test"}))
     response = client.post("/send", json={"message": "обычный вопрос"})
     assert response.status_code == 200
     assert response.get_json()["reply"] == "текстовый ответ"

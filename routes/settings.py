@@ -13,11 +13,22 @@ def index():
 
 @settings_bp.route('/chat')
 def chat_page():
-    return render_template('index.html')
+    return render_template('index.html', google_client_id=GOOGLE_CLIENT_ID)
 
 @settings_bp.route('/settings')
 def settings_page():
     return render_template('settings.html')
+
+PROVIDER_HINTS = {
+    "groq": "Бесплатный тариф, нужен GROQ_API_KEY",
+    "cerebras": "Нужен CEREBRAS_API_KEY",
+    "openrouter": "Нужен OPENROUTER_API_KEY",
+    "google_ai_studio": "Нужен GEMINI_API_KEY",
+    "pollinations": "Каталог публичный; для генерации нужен POLLINATIONS_API_KEY",
+    "openai_compatible": "Локальный llama-server / Ollama, ключ не обязателен",
+    "local_demo": "Встроенная офлайн-модель: работает всегда, без сети и ключей",
+}
+
 
 @settings_bp.route('/api/settings/providers')
 def settings_providers():
@@ -30,6 +41,8 @@ def settings_providers():
                 "name": PROVIDER_LABELS.get(provider, provider),
                 "configured": statuses.get(provider, False),
                 "url": data.get("url", "").split("/chat/completions")[0],
+                "hint": PROVIDER_HINTS.get(provider, ""),
+                "offline": provider == "local_demo",
             }
             for provider, data in PROVIDERS.items()
         ],
@@ -44,6 +57,7 @@ def settings_models():
     force = request.args.get("refresh", "0") == "1"
     if provider not in PROVIDERS:
         return jsonify({"error": "Неизвестный провайдер"}), 400
+    # Каталог Pollinations публичный: показываем модели даже без ключа.
     if not provider_status().get(provider, False) and provider != "pollinations":
         return jsonify({"provider": provider, "models": [], "configured": False,
                         "error": "API ключ провайдера не найден в .env"})
@@ -82,6 +96,7 @@ def settings_select():
     config.current_model = model
     save_selected_model(provider, model)
     return jsonify({"success": True, "provider": provider, "model": model,
+                    "provider_name": PROVIDER_LABELS.get(provider, provider),
                     "message": f"Выбрано: {model}"})
 
 @settings_bp.route('/admin/login')

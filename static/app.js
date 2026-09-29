@@ -1,66 +1,33 @@
-/* ══════════════════════════════════════════
-   NovaMind — Основной скрипт чата
-══════════════════════════════════════════ */
+/* ══════════════════════════════════════════════════════════════════
+   NovaMind · Khirad — основной скрипт чата (Liquid Glass edition)
+
+   Что нового:
+   • AssistantTurn — «живой» пузырь ИИ: сцена поиска, шаги, панель
+     рассуждений, потоковая печать ответа и источники внизу пузыря.
+   • Поиск и рассуждения работают по потоку NDJSON (без подвисаний).
+   • Командная панель Ctrl+K, темы стекла, стоп-генерации, TTS,
+     индикатор состояния ИИ и поисковых бэкендов.
+   ══════════════════════════════════════════════════════════════════ */
 
 // ========== СОСТОЯНИЕ ==========
 let isRecording    = false;
 let recognition    = null;
 let isTyping       = false;
-let webSearchOn    = false;
-let reasoningOn    = false;
-let autoSearchOn   = false;  // ← АВТО ПОИСК
+let webSearchOn    = localStorage.getItem('nova_web_search') === '1';
+let reasoningOn    = localStorage.getItem('nova_reasoning') === '1';
+let autoSearchOn   = false;
 let currentMode    = 'chat';
 let msgCount       = 0;
-let chatHistory    = JSON.parse(localStorage.getItem('nova_history') || '[]');
 let selectedModelName = 'Nova Ultra';
 let inputMode      = null;
 let historyReplay  = false;
-let sidebarDrag    = null;
-// ══════════════════════════════════════════
-// ЗАЩИТА ОТ КОПИРОВАНИЯ ИНТЕРФЕЙСА
-// ══════════════════════════════════════════
+let activeAbort    = null;      // AbortController текущего запроса
+let lastUserMessage = '';
+let aiStatus       = null;
 
-(function initCopyProtection() {
-  // Правый клик — только в сообщениях
-  document.addEventListener('contextmenu', function(e) {
-    const isInsideMessage = e.target.closest('.msg-bubble') !== null;
-    if (!isInsideMessage) {
-      e.preventDefault();
-      return false;
-    }
-  });
+const THEMES = ['aurora', 'midnight', 'sunset', 'light'];
+const THEME_LABEL = { aurora: 'Aurora', midnight: 'Midnight', sunset: 'Sunset', light: 'Light glass' };
 
-  // Ctrl+C / Cmd+C — только в сообщениях
-  document.addEventListener('keydown', function(e) {
-    const selection = window.getSelection();
-    const isInsideMessage = selection?.anchorNode?.parentElement?.closest('.msg-bubble') !== null ||
-                            document.activeElement?.closest('.msg-bubble') !== null;
-    
-    if ((e.ctrlKey || e.metaKey) && e.key === 'c') {
-      if (!isInsideMessage) {
-        e.preventDefault();
-        showNotification('Копирование интерфейса запрещено. Выделите текст в сообщении.', 'warn');
-        return false;
-      }
-    }
-
-    // Ctrl+A — выделить всё (только в сообщениях)
-    if ((e.ctrlKey || e.metaKey) && e.key === 'a') {
-      if (!isInsideMessage) {
-        e.preventDefault();
-        return false;
-      }
-    }
-  });
-
-  // Drag & drop — только из сообщений
-  document.addEventListener('dragstart', function(e) {
-    if (!e.target.closest('.msg-bubble')) {
-      e.preventDefault();
-      return false;
-    }
-  });
-})();
 // ========== DOM-ЭЛЕМЕНТЫ ==========
 const input         = document.getElementById('chat-input');
 const sendBtn       = document.getElementById('sendBtn');
@@ -69,45 +36,130 @@ const voiceTooltip  = document.getElementById('voiceTooltip');
 const chatContainer = document.getElementById('chatContainer');
 const welcomeScreen = document.getElementById('welcomeScreen');
 
+// ══════════════════════════════════════════
+// ЗАЩИТА ОТ КОПИРОВАНИЯ ИНТЕРФЕЙСА
+// ══════════════════════════════════════════
+(function initCopyProtection() {
+  document.addEventListener('contextmenu', function (e) {
+    if (!e.target.closest('.msg-bubble')) {
+      e.preventDefault();
+      return false;
+    }
+  });
+
+  document.addEventListener('keydown', function (e) {
+    const selection = window.getSelection();
+    const insideMessage =
+      selection?.anchorNode?.parentElement?.closest('.msg-bubble') ||
+      document.activeElement?.closest('.msg-bubble');
+    const inField = ['INPUT', 'TEXTAREA'].includes(document.activeElement?.tagName || '');
+
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'c' && !insideMessage && !inField) {
+      e.preventDefault();
+      showNotification('Копирование интерфейса запрещено. Выделите текст в сообщении.', 'warn');
+      return false;
+    }
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'a' && !insideMessage && !inField) {
+      e.preventDefault();
+      return false;
+    }
+  });
+
+  document.addEventListener('dragstart', function (e) {
+    if (!e.target.closest('.msg-bubble')) {
+      e.preventDefault();
+      return false;
+    }
+  });
+})();
+
+// ══════════════════════════════════════════
+// УВЕДОМЛЕНИЯ (стеклянные тосты)
+// ══════════════════════════════════════════
+function showNotification(message, type = 'info') {
+  const stack = document.getElementById('toastStack');
+  const toast = document.createElement('div');
+  const icon = { ok: '✅', success: '✅', warn: '⚠️', err: '❌', error: '❌', info: '✦' }[type] || '✦';
+  const cls = { ok: 'ok', success: 'ok', warn: 'warn', err: 'err', error: 'err' }[type] || '';
+  toast.className = `lg-toast ${cls}`;
+  toast.innerHTML = `<span>${icon}</span><span>${escapeHtml(message)}</span>`;
+  if (stack) {
+    stack.appendChild(toast);
+    while (stack.children.length > 4) stack.firstChild.remove();
+  } else {
+    document.body.appendChild(toast);
+  }
+  setTimeout(() => {
+    toast.classList.add('out');
+    setTimeout(() => toast.remove(), 320);
+  }, 3000);
+}
+
+// ══════════════════════════════════════════
+// ТЕМЫ И АНИМАЦИИ
+// ══════════════════════════════════════════
+function applyTheme(theme) {
+  document.documentElement.setAttribute('data-glass-theme', theme);
+  localStorage.setItem('nova_theme', theme);
+  const meta = document.querySelector('meta[name="theme-color"]');
+  if (meta) meta.setAttribute('content', theme === 'light' ? '#eef1fb' : '#070713');
+}
+
+function cycleTheme() {
+  const current = document.documentElement.getAttribute('data-glass-theme') || 'aurora';
+  const next = THEMES[(THEMES.indexOf(current) + 1) % THEMES.length];
+  applyTheme(next);
+  showNotification(`Тема: ${THEME_LABEL[next]}`, 'info');
+}
+
+function toggleCalmMotion() {
+  const calm = document.documentElement.getAttribute('data-motion') === 'calm';
+  document.documentElement.setAttribute('data-motion', calm ? 'full' : 'calm');
+  localStorage.setItem('nova_motion', calm ? 'full' : 'calm');
+  document.getElementById('btn-calm')?.classList.toggle('active', !calm);
+  showNotification(calm ? 'Анимации включены' : 'Спокойный режим: фоновые анимации выключены', 'info');
+}
+
+(function initAppearance() {
+  applyTheme(localStorage.getItem('nova_theme') || 'aurora');
+  const motion = localStorage.getItem('nova_motion') || 'full';
+  document.documentElement.setAttribute('data-motion', motion);
+  document.getElementById('btn-calm')?.classList.toggle('active', motion === 'calm');
+})();
+
 // ========== ПРОВЕРКА АВТОРИЗАЦИИ ==========
 if (!localStorage.getItem('nova_user_nick')) {
   window.location.href = '/';
 }
 
 // ========== АДМИН-ПАНЕЛЬ И НИКНЕЙМ ==========
-(function() {
+(function () {
   const isAdmin = localStorage.getItem('nova_is_admin') === 'true';
   const adminLink = document.getElementById('admin-link');
   const displayNick = document.getElementById('display-nick');
   if (displayNick) {
     displayNick.textContent = localStorage.getItem('nova_user_nick') || 'Пользователь';
   }
-  if (isAdmin && adminLink) {
-    adminLink.style.display = 'flex';
-  }
+  if (isAdmin && adminLink) adminLink.style.display = 'flex';
 
-  // Аватарка Google
   const googleAvatar = localStorage.getItem('nova_user_avatar');
   const avatarEl = document.querySelector('.user-avatar');
   if (googleAvatar && avatarEl) {
-    avatarEl.innerHTML = `<img src="${googleAvatar}" style="width:100%;height:100%;border-radius:50%;object-fit:cover;">`;
+    avatarEl.innerHTML = `<img src="${googleAvatar}" alt="" style="width:100%;height:100%;border-radius:50%;object-fit:cover;">`;
     avatarEl.style.background = 'none';
   }
 })();
 
 // ========== ВЫХОД ==========
 function logout() {
-  localStorage.removeItem('nova_user_nick');
-  localStorage.removeItem('nova_user_code');
-  localStorage.removeItem('nova_is_admin');
-  localStorage.removeItem('nova_google_login');
-  localStorage.removeItem('nova_user_avatar');
+  ['nova_user_nick', 'nova_user_code', 'nova_is_admin', 'nova_google_login', 'nova_user_avatar']
+    .forEach((key) => localStorage.removeItem(key));
   window.location.href = '/';
 }
 
 // ========== ВВОД ТЕКСТА ==========
 input.addEventListener('input', () => {
-  sendBtn.disabled = !input.value.trim();
+  if (!isTyping) sendBtn.disabled = !input.value.trim();
 });
 
 function autoResize(el) {
@@ -118,43 +170,54 @@ function autoResize(el) {
 function handleKey(e) {
   if (e.key === 'Enter' && !e.shiftKey) {
     e.preventDefault();
-    if (!sendBtn.disabled) sendMessage();
+    if (isTyping) { stopGeneration(); return; }
+    if (input.value.trim()) sendMessage();
   }
 }
 
-// ========== ЧЕТЫРЕ КНОПКИ (добавлен авто поиск) ==========
-function toggleWebSearch() {
-  webSearchOn = !webSearchOn;
+// ========== ПЕРЕКЛЮЧАТЕЛИ ==========
+function setWebSearch(state, silent = false) {
+  webSearchOn = state;
+  localStorage.setItem('nova_web_search', state ? '1' : '0');
   const btn = document.getElementById('btn-web-search');
-  btn.classList.toggle('active', webSearchOn);
-  showNotification(webSearchOn ? 'Поиск в интернете включён' : 'Поиск выключен', 'info');
+  btn?.classList.toggle('active', state);
+  btn?.classList.toggle('is-live', state);
+  const label = document.getElementById('searchBtnText');
+  if (label) label.textContent = state ? 'Поиск включён' : 'Поиск в интернете';
+  if (!silent) {
+    showNotification(state
+      ? '🔍 Поиск в интернете включён — покажу сцену поиска и источники'
+      : 'Поиск выключен', state ? 'ok' : 'info');
+  }
+}
+
+function toggleWebSearch() { setWebSearch(!webSearchOn); }
+
+function enableWebSearch() {
+  setWebSearch(true, true);
+  showNotification('🔍 Поиск включён. Задайте вопрос — увидите сцену поиска и источники.', 'ok');
+  input.focus();
 }
 
 function toggleReasoning() {
   reasoningOn = !reasoningOn;
-  const btn = document.getElementById('btn-reasoning');
-  btn.classList.toggle('active', reasoningOn);
-  showNotification(reasoningOn ? 'Режим рассуждения включён' : 'Рассуждение выключено', 'info');
+  localStorage.setItem('nova_reasoning', reasoningOn ? '1' : '0');
+  document.getElementById('btn-reasoning')?.classList.toggle('active', reasoningOn);
+  showNotification(reasoningOn
+    ? '🧠 Режим рассуждения включён — покажу ход мыслей модели'
+    : 'Рассуждение выключено', reasoningOn ? 'ok' : 'info');
 }
 
-// ========== АВТО ПОИСК ==========
 function toggleAutoSearch() {
   autoSearchOn = !autoSearchOn;
-  const btn = document.getElementById('btn-auto-search');
-  btn.classList.toggle('active', autoSearchOn);
-
-  if (autoSearchOn) {
-    showNotification('🔍 Авто поиск включён. AI будет искать актуальную информацию при необходимости.', 'info');
-  } else {
-    showNotification('🔍 Авто поиск выключен', 'info');
-  }
+  document.getElementById('btn-auto-search')?.classList.toggle('active', autoSearchOn);
+  showNotification(autoSearchOn ? '🔍 Авто-поиск включён' : 'Авто-поиск выключен', 'info');
 }
 
 // ========== ПРИКРЕПИТЬ ==========
 function toggleAttachMenu() {
   document.getElementById('attachDropdown').classList.toggle('open');
 }
-
 
 async function analyzeAttachment(file, kind) {
   document.getElementById('attachDropdown').classList.remove('open');
@@ -172,31 +235,27 @@ async function analyzeAttachment(file, kind) {
   if (userDesc === null) return;
 
   appendMessage('user', `${kind === 'image' ? '📷' : '📁'} ${file.name}${userDesc ? '\n💬 ' + userDesc : ''}`);
-  showTyping();
+  const turn = createAssistantTurn();
+  turn.beginIdle('Читаю файл…');
 
   const formData = new FormData();
   formData.append('file', file);
   formData.append('description', userDesc.trim() || defaultPrompt);
 
   try {
-    const response = await fetch('/api/attachments/analyze', {
-      method: 'POST',
-      body: formData
-    });
+    const response = await fetch('/api/attachments/analyze', { method: 'POST', body: formData });
     const raw = await response.text();
     let data;
     try { data = JSON.parse(raw); }
     catch (_) { throw new Error('Сервер вернул не JSON (HTTP ' + response.status + ')'); }
-
     if (!response.ok || data.error) {
       throw new Error(data.error || ('Ошибка обработки файла: HTTP ' + response.status));
     }
-
-    removeTyping();
-    appendMessage('ai', data.result || 'Анализ завершён, но ответ пустой.');
+    turn.collapseStage();
+    turn.appendText(data.result || 'Анализ завершён, но ответ пустой.');
+    turn.finish({ model: aiStatus?.model });
   } catch (error) {
-    removeTyping();
-    appendMessage('ai', '❌ ' + (error.message || 'Ошибка анализа вложения'));
+    turn.fail(error.message || 'Ошибка анализа вложения');
   }
 }
 
@@ -204,7 +263,6 @@ function attachImage() {
   const el = document.createElement('input');
   el.type = 'file';
   el.accept = 'image/*';
-  el.multiple = false;
   el.onchange = () => { if (el.files[0]) analyzeAttachment(el.files[0], 'image'); };
   el.click();
 }
@@ -218,7 +276,6 @@ function attachDocument() {
     '.sh','.bash','.java','.c','.cpp','.h','.hpp','.go','.rs','.php',
     '.pdf','.docx','.xlsx','.xlsm','.pptx'
   ].join(',');
-  el.multiple = false;
   el.onchange = () => { if (el.files[0]) analyzeAttachment(el.files[0], 'document'); };
   el.click();
 }
@@ -235,22 +292,40 @@ function pickMediaFile(accept, callback) {
 function attachAudio() {
   pickMediaFile('audio/*', (file) => {
     appendMessage('user', `🎧 ${file.name}`);
+    const turn = createAssistantTurn();
+    turn.beginIdle('Расшифровываю аудио…');
     const data = new FormData();
     data.append('file', file);
-    showTyping();
-    fetch('/api/media/transcribe', {method: 'POST', body: data})
+    fetch('/api/media/transcribe', { method: 'POST', body: data })
       .then((response) => response.json())
       .then((result) => {
-        removeTyping();
-        if (result.error) appendMessage('ai', '❌ ' + result.error);
-        else {
-          input.value = result.text || '';
-          autoResize(input);
-          sendBtn.disabled = !input.value.trim();
-          appendMessage('ai', `🎧 **Расшифровка ${file.name}:**\n\n${result.text || 'Текст не распознан.'}`);
-        }
+        if (result.error) { turn.fail(result.error); return; }
+        input.value = result.text || '';
+        autoResize(input);
+        sendBtn.disabled = !input.value.trim();
+        turn.collapseStage();
+        turn.appendText(`**Расшифровка ${file.name}:**\n\n${result.text || 'Текст не распознан.'}`);
+        turn.finish({ model: 'whisper' });
       })
-      .catch(() => { removeTyping(); appendMessage('ai', '❌ Ошибка загрузки аудио'); });
+      .catch((error) => turn.fail(error.message || 'Ошибка загрузки аудио'));
+  });
+}
+
+function attachVideo() {
+  pickMediaFile('video/*', (file) => {
+    appendMessage('user', `🎬 ${file.name}`);
+    const turn = createAssistantTurn();
+    turn.beginIdle('Загружаю видео…');
+    const data = new FormData();
+    data.append('file', file);
+    fetch('/api/media/upload', { method: 'POST', body: data })
+      .then((response) => response.json())
+      .then((result) => {
+        turn.remove();
+        if (result.error) appendMessage('ai', '❌ ' + result.error);
+        else appendMediaMessage('video', result.url, `Видео: ${file.name}`);
+      })
+      .catch(() => { turn.remove(); appendMessage('ai', '❌ Ошибка загрузки видео'); });
   });
 }
 
@@ -262,43 +337,25 @@ function appendMediaMessage(kind, url, title) {
     : kind === 'video'
       ? `<video controls playsinline preload="metadata" src="${url}"></video>`
       : `<img src="${url}" alt="${escapeHtml(title)}">`;
-  wrap.innerHTML = `<div class="msg-avatar">✦</div><div class="msg-body"><div class="msg-name">NovaMind</div><div class="msg-bubble media-bubble"><div>${escapeHtml(title)}</div>${media}<a href="${url}" target="_blank" rel="noopener">Открыть файл</a></div></div>`;
+  wrap.innerHTML = `<div class="msg-avatar">✦</div><div class="msg-body"><div class="msg-name">NovaMind</div><div class="msg-bubble media-bubble"><div class="media-title">${escapeHtml(title)}</div>${media}<div class="media-actions"><a class="media-download" href="${url}" target="_blank" rel="noopener">Открыть файл</a></div></div></div>`;
   chatContainer.appendChild(wrap);
   scrollToBottom();
 }
 
-function attachVideo() {
-  pickMediaFile('video/*', (file) => {
-    appendMessage('user', `🎬 ${file.name}`);
-    const data = new FormData();
-    data.append('file', file);
-    showTyping();
-    fetch('/api/media/upload', {method: 'POST', body: data})
-      .then((response) => response.json())
-      .then((result) => {
-        removeTyping();
-        if (result.error) appendMessage('ai', '❌ ' + result.error);
-        else appendMediaMessage('video', result.url, `Видео: ${file.name}`);
-      })
-      .catch(() => { removeTyping(); appendMessage('ai', '❌ Ошибка загрузки видео'); });
-  });
-}
-
 // ══════════════════════════════════════════
-// ЕДИНАЯ ПАНЕЛЬ МЕДИА-МОДЕЛЕЙ (изображения / аудио / видео)
-// Одна и та же панель открывается из верхней панели чата и кнопкой «Медиа».
+// ЕДИНАЯ ПАНЕЛЬ МЕДИА-МОДЕЛЕЙ
 // ══════════════════════════════════════════
-let activeMediaModel = null;      // выбранная модель (объект из /api/media/selection)
+let activeMediaModel = null;
 let pickerType = 'all';
 let pickerModels = [];
 let mediaSearchTimer = null;
 
-const MEDIA_KIND_ICON = {image: '🖼', audio: '🔊', video: '🎬'};
+const MEDIA_KIND_ICON = { image: '🖼', audio: '🔊', video: '🎬' };
 const PRICING_BADGE = {
-  free:    {cls: 'free',    label: 'FREE'},
-  trial:   {cls: 'trial',   label: 'ПРОБНЫЕ КРЕДИТЫ'},
-  paid:    {cls: 'paid',    label: 'PAID'},
-  unknown: {cls: 'unknown', label: 'ЦЕНА НЕ ПОДТВЕРЖДЕНА'},
+  free:    { cls: 'free',    label: 'FREE' },
+  trial:   { cls: 'trial',   label: 'ПРОБНЫЕ КРЕДИТЫ' },
+  paid:    { cls: 'paid',    label: 'PAID' },
+  unknown: { cls: 'unknown', label: 'ЦЕНА НЕ ПОДТВЕРЖДЕНА' },
 };
 
 function openMediaPicker() {
@@ -317,7 +374,6 @@ function closeMediaPicker() {
   modal.setAttribute('aria-hidden', 'true');
 }
 
-// Кнопка «Медиа» и кнопка в верхней панели открывают один и тот же интерфейс.
 function openMediaStudio() { openMediaPicker(); }
 function closeMediaStudio() { closeMediaPicker(); }
 
@@ -409,34 +465,27 @@ async function pickMediaModel(dataset) {
   const pricing = dataset.pricing;
   const confirm = {};
   if (pricing === 'trial') {
-    const ok = window.confirm('Модель доступна только за счёт пробных кредитов провайдера.\n' +
-      'Генерация может израсходовать эти кредиты. Продолжить?');
-    if (!ok) return;
+    if (!window.confirm('Модель доступна только за счёт пробных кредитов провайдера.\nГенерация может израсходовать эти кредиты. Продолжить?')) return;
     confirm.trial = true;
   } else if (pricing === 'paid') {
-    const ok = window.confirm('Это платная модель: бесплатный API для неё не подтверждён.\n' +
-      'Каждая генерация будет оплачена по тарифу провайдера. Использовать?');
-    if (!ok) return;
+    if (!window.confirm('Это платная модель: бесплатный API для неё не подтверждён.\nКаждая генерация будет оплачена по тарифу провайдера. Использовать?')) return;
     confirm.paid = true;
   } else if (pricing === 'unknown') {
-    const ok = window.confirm('Цену этой модели подтвердить не удалось (свой endpoint из .env).\n' +
-      'Стоимость определяет ваш провайдер. Использовать?');
-    if (!ok) return;
+    if (!window.confirm('Цену этой модели подтвердить не удалось (свой endpoint из .env).\nСтоимость определяет ваш провайдер. Использовать?')) return;
     confirm.unknown = true;
   }
   try {
     const response = await fetch('/api/media/select', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({provider: dataset.provider, model: dataset.pickModel, confirm}),
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ provider: dataset.provider, model: dataset.pickModel, confirm }),
     });
     const data = await response.json();
     if (!response.ok || data.error) throw new Error(data.error || ('HTTP ' + response.status));
     activeMediaModel = data.selection;
     updateMediaChip();
     showNotification(`Медиа: ${data.selection.name}`, 'success');
-    document.getElementById('pickerHint').textContent =
-      `Выбрано: ${data.selection.name}. Напишите промпт в обычном поле чата.`;
+    const hint = document.getElementById('pickerHint');
+    if (hint) hint.textContent = `Выбрано: ${data.selection.name}. Напишите промпт в обычном поле чата.`;
     renderPickerModels();
   } catch (error) {
     showNotification(error.message, 'warn');
@@ -446,7 +495,7 @@ async function pickMediaModel(dataset) {
 async function clearMediaModel() {
   try {
     await fetch('/api/media/select', {
-      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({clear: true}),
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ clear: true }),
     });
   } catch (_) {}
   activeMediaModel = null;
@@ -480,20 +529,20 @@ function updateMediaChip() {
       const badge = PRICING_BADGE[activeMediaModel.pricing_status] || PRICING_BADGE.unknown;
       text.textContent = `${icon} ${activeMediaModel.name} · ${activeMediaModel.provider_name} · ${badge.label}`;
     }
-    if (input) input.placeholder = `Опишите, что создать (${activeMediaModel.media_type}: ${activeMediaModel.name})…`;
+    if (input && !inputMode) input.placeholder = `Опишите, что создать (${activeMediaModel.media_type}: ${activeMediaModel.name})…`;
     mediaBtn?.classList.add('active');
     modelButton?.classList.add('active');
   } else {
     if (label) label.textContent = 'Медиа';
     if (bar) bar.hidden = true;
-    if (input) input.placeholder = 'Напишите сообщение...';
+    if (input && !inputMode) input.placeholder = 'Напишите сообщение...';
     mediaBtn?.classList.remove('active');
     modelButton?.classList.remove('active');
   }
 }
 
 // ══════════════════════════════════════════
-// ВЫВОД МЕДИА В ПЕРЕПИСКЕ (изображение / аудиоплеер / видеоплеер + скачивание)
+// ВЫВОД МЕДИА В ПЕРЕПИСКЕ
 // ══════════════════════════════════════════
 function mediaBubbleHtml(payload) {
   const kind = payload.kind || 'image';
@@ -502,13 +551,9 @@ function mediaBubbleHtml(payload) {
   const provider = payload.provider ? ` · ${escapeHtml(payload.provider)}` : '';
   const seconds = payload.elapsed_ms ? ` · ${(payload.elapsed_ms / 1000).toFixed(1)} c` : '';
   let player;
-  if (kind === 'audio') {
-    player = `<audio controls preload="metadata" src="${escapeHtml(url)}"></audio>`;
-  } else if (kind === 'video') {
-    player = `<video controls playsinline preload="metadata" src="${escapeHtml(url)}"></video>`;
-  } else {
-    player = `<img src="${escapeHtml(url)}" alt="${escapeHtml(title)}" loading="lazy">`;
-  }
+  if (kind === 'audio') player = `<audio controls preload="metadata" src="${escapeHtml(url)}"></audio>`;
+  else if (kind === 'video') player = `<video controls playsinline preload="metadata" src="${escapeHtml(url)}"></video>`;
+  else player = `<img src="${escapeHtml(url)}" alt="${escapeHtml(title)}" loading="lazy">`;
   const downloadName = payload.filename || `novamind_${kind}`;
   return `<div class="msg-name">NovaMind</div>
     <div class="msg-bubble media-bubble">
@@ -566,13 +611,10 @@ async function pollMediaJob(jobId, card) {
       continue;
     }
     if (statusEl) statusEl.textContent = `Статус провайдера: ${data.state} (опросов: ${data.polls})`;
-    if (logEl && (data.events || []).length) {
-      logEl.textContent = data.events[data.events.length - 1].status;
-    }
+    if (logEl && (data.events || []).length) logEl.textContent = data.events[data.events.length - 1].status;
     if (data.state === 'succeeded' && data.media) {
       card.remove();
-      const payload = {...data.media, kind: 'video', title: data.model || 'Видео', provider: data.provider};
-      appendMediaResult(payload);
+      appendMediaResult({ ...data.media, kind: 'video', title: data.model || 'Видео', provider: data.provider });
       return;
     }
     if (['failed', 'cancelled', 'error'].includes(data.state)) {
@@ -583,12 +625,11 @@ async function pollMediaJob(jobId, card) {
   if (statusEl) statusEl.textContent = 'Опрос остановлен: задача всё ещё выполняется у провайдера.';
 }
 
-// Отправка промпта в медиа-движок с реальными статусами выполнения.
 async function sendMediaMessage(message) {
   const response = await fetch('/send_stream', {
     method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({message, media: true, reasoning: false}),
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ message, media: true, reasoning: false }),
   });
 
   if (!response.ok) {
@@ -599,13 +640,14 @@ async function sendMediaMessage(message) {
   }
   if (!response.body) throw new Error('Браузер не поддерживает потоковый ответ');
 
-  removeTyping();
   isTyping = true;
+  setSendBusy(true);
   const started = Date.now();
   const wrap = document.createElement('div');
-  wrap.className = 'message ai';
+  wrap.className = 'message ai is-working';
   wrap.innerHTML = '<div class="msg-avatar">✦</div><div class="msg-body"><div class="msg-name">NovaMind</div>' +
     '<div class="msg-bubble media-bubble media-job"><div class="media-status" data-role="status">Подключение…</div>' +
+    '<div class="lg-bar" style="margin-top:9px"><span></span></div>' +
     '<div class="media-status-log" data-role="log"></div></div></div>';
   chatContainer.appendChild(wrap);
   const statusEl = wrap.querySelector('[data-role="status"]');
@@ -630,12 +672,8 @@ async function sendMediaMessage(message) {
     if (event.media) {
       finished = true;
       wrap.remove();
-      if (event.media.job_id) {
-        const card = appendMediaJobCard(event.media);
-        pollMediaJob(event.media.job_id, card);
-      } else {
-        appendMediaResult(event.media);
-      }
+      if (event.media.job_id) pollMediaJob(event.media.job_id, appendMediaJobCard(event.media));
+      else appendMediaResult(event.media);
       return;
     }
     if (event.done) finished = true;
@@ -643,8 +681,8 @@ async function sendMediaMessage(message) {
 
   try {
     while (true) {
-      const {value, done} = await reader.read();
-      buffer += decoder.decode(value || new Uint8Array(), {stream: !done});
+      const { value, done } = await reader.read();
+      buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
       const lines = buffer.split('\n');
       buffer = lines.pop() || '';
       for (const line of lines) consumeLine(line);
@@ -653,25 +691,407 @@ async function sendMediaMessage(message) {
     if (buffer.trim()) consumeLine(buffer);
   } finally {
     isTyping = false;
-    sendBtn.disabled = !input.value.trim();
+    setSendBusy(false);
   }
 }
 
-
-// ========== РЕЖИМЫ КОМАНД ==========
-function activateMode(mode) {
-  inputMode = mode;
-  input.placeholder = mode.placeholder;
-  input.value = '';
-  input.focus();
+// ══════════════════════════════════════════════════════════════════
+// ASSISTANT TURN — «живой» пузырь ИИ
+//
+// Жизненный цикл:
+//   beginIdle() / beginSearch() → сцена и шаги
+//   reasoningToken()            → панель рассуждений
+//   collapseStage()             → сцена схлопывается при первом токене
+//   appendToken()/appendText()  → печатающийся ответ
+//   setSources()                → источники внизу пузыря
+//   finish() / fail()           → метаданные, действия, история
+// ══════════════════════════════════════════════════════════════════
+function sceneMarkup(scene) {
+  const particles = Array.from({ length: 14 }, (_, i) => {
+    const left = 6 + ((i * 37) % 88);
+    const delay = (i % 7) * 0.42;
+    const duration = 3.4 + (i % 5) * 0.5;
+    return `<i style="left:${left}%;bottom:0;animation-delay:${delay}s;animation-duration:${duration}s"></i>`;
+  }).join('');
+  return `
+    <div class="stage-scene" data-scene="${scene}">
+      <div class="stage-radar"></div>
+      <div class="stage-orbit o1"></div>
+      <div class="stage-orbit o2"></div>
+      <div class="stage-orbit o3"></div>
+      <div class="stage-core"></div>
+      <div class="stage-particles">${particles}</div>
+      <div class="stage-scan"></div>
+    </div>`;
 }
 
-// ========== ОТПРАВКА СООБЩЕНИЙ ==========
-async function streamMessage(message) {
+function createAssistantTurn(options = {}) {
+  const name = options.name || 'NovaMind';
+  hideWelcome();
+
+  const wrap = document.createElement('div');
+  wrap.className = 'message ai is-working';
+  wrap.innerHTML = `
+    <div class="msg-avatar">✦</div>
+    <div class="msg-body">
+      <div class="msg-name">${escapeHtml(name)}</div>
+      <div class="msg-bubble">
+        <div class="stage lg-hidden"></div>
+        <div class="answer"></div>
+      </div>
+      <div class="msg-meta"></div>
+      <div class="msg-actions"></div>
+    </div>`;
+  chatContainer.appendChild(wrap);
+
+  const bubble = wrap.querySelector('.msg-bubble');
+  const stage = wrap.querySelector('.stage');
+  const answerEl = wrap.querySelector('.answer');
+  const metaEl = wrap.querySelector('.msg-meta');
+  const actionsEl = wrap.querySelector('.msg-actions');
+
+  let startedAt = Date.now();
+  let timer = null;
+  let elapsedEl = null;
+  let stepsEl = null;
+  let reasoningBox = null;
+  let reasoningText = '';
+  let answerText = '';
+  let sourcesData = [];
+  let finished = false;
+
+  const startTimer = () => {
+    if (timer) return;
+    timer = setInterval(() => {
+      if (elapsedEl) elapsedEl.textContent = ((Date.now() - startedAt) / 1000).toFixed(1) + ' c';
+    }, 100);
+  };
+  const stopTimer = () => { if (timer) { clearInterval(timer); timer = null; } };
+
+  const ensureStage = (scene, title) => {
+    if (!stage.innerHTML) {
+      stage.innerHTML = `
+        ${scene ? sceneMarkup(scene) : ''}
+        <div class="stage-head lg-hidden">
+          <span class="stage-title">${escapeHtml(title || '')}</span>
+          <span class="stage-elapsed">0.0 c</span>
+        </div>
+        <div class="stage-steps"></div>`;
+      elapsedEl = stage.querySelector('.stage-elapsed');
+      stepsEl = stage.querySelector('.stage-steps');
+    }
+    stage.classList.remove('lg-hidden');
+    stage.classList.remove('collapsed');
+    startTimer();
+    scrollToBottom();
+  };
+
+  const api = {
+    element: wrap,
+
+    /** Пустой пузырь с едва заметным индикатором (поиск выключен). */
+    beginIdle(label = 'Думаю…') {
+      ensureStage(null, label);
+      stage.innerHTML = `
+        <div class="stage-idle">
+          <span class="stage-idle-label">${escapeHtml(label)}</span>
+          <div class="lg-bar"><span></span></div>
+          <span class="stage-elapsed">0.0 c</span>
+        </div>`;
+      elapsedEl = stage.querySelector('.stage-elapsed');
+      startTimer();
+    },
+
+    /** Сцена поиска: сначала анимация, через паузу — подпись. */
+    beginSearch(title = 'Поищу в интернете') {
+      ensureStage('search', title);
+      const head = stage.querySelector('.stage-head');
+      setTimeout(() => {
+        if (head && !stage.classList.contains('collapsed')) {
+          head.classList.remove('lg-hidden');
+          head.classList.add('lg-fade-in');
+          scrollToBottom();
+        }
+      }, 520);
+    },
+
+    /** Смена сцены (search → write) без схлопывания. */
+    setStage(scene, title, text) {
+      ensureStage(scene, title);
+      const sceneEl = stage.querySelector('.stage-scene');
+      if (sceneEl) sceneEl.dataset.scene = scene;
+      const titleEl = stage.querySelector('.stage-title');
+      if (titleEl && title) titleEl.textContent = title;
+      const head = stage.querySelector('.stage-head');
+      if (head) head.classList.remove('lg-hidden');
+      if (text) api.step(scene === 'write' ? '✍️' : '🔎', text);
+    },
+
+    step(icon, text) {
+      ensureStage(null, '');
+      if (!stepsEl) return;
+      const previous = stepsEl.querySelector('.is-last');
+      if (previous) previous.classList.remove('is-last');
+      const row = document.createElement('div');
+      row.className = 'stage-step is-last';
+      row.innerHTML = `<span class="ico">${icon || '•'}</span><span class="txt">${escapeHtml(text || '')}</span>`;
+      stepsEl.appendChild(row);
+      while (stepsEl.children.length > 7) stepsEl.firstChild.remove();
+      scrollToBottom();
+    },
+
+    reasoningToken(token) {
+      if (!token) return;
+      reasoningText += token;
+      if (!reasoningBox) {
+        reasoningBox = document.createElement('div');
+        reasoningBox.className = 'reasoning open';
+        reasoningBox.innerHTML = `
+          <div class="reasoning-head">
+            <svg class="reasoning-brain" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M9.5 2A2.5 2.5 0 0 0 7 4.5v.5a2.5 2.5 0 0 0-2 4.4A2.5 2.5 0 0 0 6.5 14a2.5 2.5 0 0 0 3 3.9V19a2.5 2.5 0 0 0 5 0v-1.1A2.5 2.5 0 0 0 17.5 14a2.5 2.5 0 0 0 1.5-4.6A2.5 2.5 0 0 0 17 5v-.5A2.5 2.5 0 0 0 14.5 2z"/>
+            </svg>
+            <span>Рассуждение</span>
+            <span class="caret">▶</span>
+          </div>
+          <div class="reasoning-body"><div class="reasoning-text"></div></div>`;
+        reasoningBox.querySelector('.reasoning-head').addEventListener('click', () => {
+          reasoningBox.classList.toggle('open');
+        });
+        bubble.insertBefore(reasoningBox, stage);
+      }
+      reasoningBox.querySelector('.reasoning-text').textContent = reasoningText;
+      scrollToBottom();
+    },
+
+    /** Схлопнуть сцену (первый токен ответа уже пошёл). */
+    collapseStage() {
+      if (stage.classList.contains('collapsed')) return;
+      stage.classList.add('collapsed');
+      stopTimer();
+      setTimeout(() => { if (stage.classList.contains('collapsed')) stage.classList.add('lg-hidden'); }, 560);
+    },
+
+    appendToken(token) {
+      if (!token) return;
+      api.collapseStage();
+      answerText += token;
+      answerEl.innerHTML = formatContent(answerText);
+      scrollToBottom();
+    },
+
+    appendText(text) {
+      answerText = text || '';
+      answerEl.innerHTML = formatContent(answerText);
+      scrollToBottom();
+    },
+
+    setSources(sources) {
+      sourcesData = Array.isArray(sources) ? sources.filter((s) => s && s.url) : [];
+      if (!sourcesData.length) return;
+      let box = bubble.querySelector('.sources');
+      if (!box) {
+        box = document.createElement('div');
+        box.className = 'sources';
+        bubble.appendChild(box);
+      }
+      box.innerHTML = `
+        <div class="sources-head">
+          <span>🔗 Источники · ${sourcesData.length}</span>
+          <span class="caret">▼</span>
+        </div>
+        <div class="sources-list">
+          ${sourcesData.map((source, index) => sourceItemHtml(source, index)).join('')}
+        </div>`;
+      box.querySelector('.sources-head').addEventListener('click', () => box.classList.toggle('min'));
+      scrollToBottom();
+    },
+
+    finish(meta = {}) {
+      if (finished) return;
+      finished = true;
+      api.collapseStage();
+      stopTimer();
+      wrap.classList.remove('is-working');
+      if (reasoningBox) {
+        reasoningBox.classList.add('done');
+        reasoningBox.classList.remove('open');
+      }
+
+      const seconds = ((Date.now() - startedAt) / 1000).toFixed(1);
+      const bits = [];
+      if (meta.model) bits.push(`модель: ${escapeHtml(meta.model)}`);
+      if (meta.provider) bits.push(escapeHtml(meta.provider));
+      if (meta.offline) bits.push('офлайн');
+      if (meta.searched) bits.push('с поиском');
+      if (sourcesData.length) bits.push(`источников: ${sourcesData.length}`);
+      bits.push(`${seconds} c`);
+      metaEl.innerHTML = `<span>${bits.join(' · ')}</span>`;
+
+      actionsEl.innerHTML = `
+        <button type="button" data-act="copy" title="Скопировать ответ">📋 Копировать</button>
+        <button type="button" data-act="speak" title="Озвучить ответ">🔊 Озвучить</button>
+        <button type="button" data-act="regen" title="Ответить заново">↻ Заново</button>`;
+      actionsEl.querySelector('[data-act="copy"]').addEventListener('click', () => {
+        copyText(answerText || bubble.innerText);
+      });
+      actionsEl.querySelector('[data-act="speak"]').addEventListener('click', () => speakText(answerText));
+      actionsEl.querySelector('[data-act="regen"]').addEventListener('click', () => {
+        if (lastUserMessage) sendMessage(lastUserMessage);
+      });
+
+      if (!historyReplay && answerText) {
+        historyAddMessage('ai', answerText, {
+          sources: sourcesData.slice(0, 12),
+          model: meta.model || null,
+          elapsed_ms: Date.now() - startedAt,
+          reasoning: reasoningText || null,
+        });
+      }
+      scrollToBottom();
+    },
+
+    fail(message) {
+      finished = true;
+      api.collapseStage();
+      stopTimer();
+      wrap.classList.remove('is-working');
+      answerEl.innerHTML = `<span style="color:var(--err)">❌ ${escapeHtml(message || 'Неизвестная ошибка')}</span>`;
+      actionsEl.innerHTML = `<button type="button" data-act="copy">📋 Копировать</button>
+        <button type="button" data-act="regen">↻ Повторить</button>`;
+      actionsEl.querySelector('[data-act="copy"]').addEventListener('click', () => copyText(message || ''));
+      actionsEl.querySelector('[data-act="regen"]').addEventListener('click', () => {
+        if (lastUserMessage) sendMessage(lastUserMessage);
+      });
+      scrollToBottom();
+    },
+
+    remove() {
+      stopTimer();
+      wrap.remove();
+    },
+
+    get text() { return answerText; },
+    get sources() { return sourcesData; },
+  };
+
+  return api;
+}
+
+function sourceItemHtml(source, index) {
+  const host = source.host || hostFromUrl(source.url);
+  const letter = (source.title || host || '?').trim().charAt(0).toUpperCase();
+  return `
+    <a class="source-item" href="${escapeHtml(source.url)}" target="_blank" rel="noopener noreferrer"
+       title="${escapeHtml(source.title || source.url)}">
+      <span class="source-num">${index + 1}</span>
+      <img class="source-fav" alt="" loading="lazy"
+           src="https://icons.duckduckgo.com/ip3/${encodeURIComponent(host)}.ico"
+           onerror="this.remove()">
+      <span class="source-txt">
+        <span class="source-title">${escapeHtml(source.title || host)}</span>
+        <span class="source-host">${escapeHtml(host)}</span>
+      </span>
+      <span class="source-open">↗</span>
+    </a>`;
+}
+
+function hostFromUrl(url) {
+  try { return new URL(url).hostname.replace(/^www\./, ''); }
+  catch (_) { return String(url || '').slice(0, 40); }
+}
+
+function copyText(text) {
+  const value = String(text || '');
+  if (navigator.clipboard?.writeText) {
+    navigator.clipboard.writeText(value)
+      .then(() => showNotification('Скопировано в буфер обмена', 'ok'))
+      .catch(() => fallbackCopy(value));
+  } else fallbackCopy(value);
+}
+
+function fallbackCopy(value) {
+  const area = document.createElement('textarea');
+  area.value = value;
+  area.style.position = 'fixed';
+  area.style.opacity = '0';
+  document.body.appendChild(area);
+  area.select();
+  try { document.execCommand('copy'); showNotification('Скопировано', 'ok'); }
+  catch (_) { showNotification('Не удалось скопировать', 'warn'); }
+  area.remove();
+}
+
+let speechUtterance = null;
+function speakText(text) {
+  if (!('speechSynthesis' in window)) {
+    showNotification('Браузер не поддерживает озвучку', 'warn');
+    return;
+  }
+  window.speechSynthesis.cancel();
+  const clean = String(text || '').replace(/[*#`|]/g, '').slice(0, 4000);
+  speechUtterance = new SpeechSynthesisUtterance(clean);
+  speechUtterance.lang = 'ru-RU';
+  speechUtterance.rate = 1.02;
+  window.speechSynthesis.speak(speechUtterance);
+  showNotification('🔊 Читаю ответ…', 'info');
+}
+
+// ══════════════════════════════════════════
+// ПОТОКОВАЯ ОБРАБОТКА NDJSON
+// ══════════════════════════════════════════
+async function consumeNdjson(response, onEvent) {
+  if (!response.body) throw new Error('Браузер не поддерживает потоковый ответ');
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  const handle = (line) => {
+    if (!line.trim()) return;
+    let event;
+    try { event = JSON.parse(line); } catch (_) { return; }
+    onEvent(event);
+  };
+  while (true) {
+    const { value, done } = await reader.read();
+    buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
+    const lines = buffer.split('\n');
+    buffer = lines.pop() || '';
+    for (const line of lines) handle(line);
+    if (done) break;
+  }
+  if (buffer.trim()) handle(buffer);
+}
+
+function setSendBusy(busy) {
+  if (!sendBtn) return;
+  sendBtn.classList.toggle('is-stop', busy);
+  sendBtn.disabled = busy ? false : !input.value.trim();
+  sendBtn.title = busy ? 'Остановить генерацию' : 'Отправить (Enter)';
+  sendBtn.innerHTML = busy
+    ? '<svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>'
+    : '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>';
+}
+
+function stopGeneration() {
+  if (activeAbort) {
+    activeAbort.abort();
+    activeAbort = null;
+    showNotification('Генерация остановлена', 'warn');
+  }
+}
+
+// ══════════════════════════════════════════
+// ОБЫЧНЫЙ ЧАТ (поток + рассуждения)
+// ══════════════════════════════════════════
+async function streamMessage(message, turn) {
+  const controller = new AbortController();
+  activeAbort = controller;
+
   const response = await fetch('/send_stream', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ message, reasoning: reasoningOn })
+    body: JSON.stringify({ message, reasoning: reasoningOn }),
+    signal: controller.signal,
   });
 
   if (!response.ok) {
@@ -681,326 +1101,262 @@ async function streamMessage(message) {
       const data = JSON.parse(raw);
       details = data.error || data.message || details;
     } catch (_) {
-      // Flask/proxy can return an HTML error page. Never let JSON.parse/html
-      // errors hide the real HTTP failure.
-      const plain = raw.replace(/<[^>]*>/g, ' ').replace(/\\s+/g, ' ').trim();
-      if (plain) details = `${details}: ${plain.slice(0, 500)}`;
+      const plain = raw.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
+      if (plain) details = `${details}: ${plain.slice(0, 400)}`;
     }
     throw new Error(details);
   }
-  if (!response.body) throw new Error('Браузер не поддерживает потоковый ответ');
 
-  removeTyping();
-  isTyping = true;
-  const wrap = document.createElement('div');
-  wrap.className = 'message ai';
-  wrap.innerHTML = '<div class="msg-avatar">✦</div><div class="msg-body"><div class="msg-name">NovaMind</div><div class="msg-bubble"></div></div>';
-  chatContainer.appendChild(wrap);
-  const bubble = wrap.querySelector('.msg-bubble');
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = '';
-  let fullReply = '';
-  let streamDone = false;
+  let meta = {};
+  let failure = null;
+  await consumeNdjson(response, (event) => {
+    if (event.reasoning) turn.reasoningToken(event.reasoning);
+    if (event.token) turn.appendToken(event.token);
+    if (event.error) failure = event.error;
+    if (event.done) meta = event;
+  });
+  activeAbort = null;
 
-  const consumeLine = (line) => {
-    if (!line.trim()) return false;
-    const data = JSON.parse(line);
-    if (data.error) throw new Error(data.error);
-    if (data.token) {
-      fullReply += data.token;
-      bubble.innerHTML = formatContent(fullReply);
-      scrollToBottom();
-    }
-    if (data.done) streamDone = true;
-    return streamDone;
-  };
-
-  try {
-    while (true) {
-      const {value, done} = await reader.read();
-      buffer += decoder.decode(value || new Uint8Array(), {stream: !done});
-      const lines = buffer.split('\n');
-      buffer = lines.pop() || '';
-      for (const line of lines) {
-        consumeLine(line);
-      }
-      if (done || streamDone) break;
-    }
-    if (buffer.trim()) consumeLine(buffer);
-    if (!fullReply) throw new Error('AI не вернул текст ответа');
-    historyAddMessage('ai', fullReply);
-    return fullReply;
-  } finally {
-    isTyping = false;
-    sendBtn.disabled = !input.value.trim();
-  }
+  if (failure && !turn.text) throw new Error(failure);
+  if (!turn.text) throw new Error('AI не вернул текст ответа');
+  turn.finish({ model: meta.model, provider: meta.provider, offline: meta.offline });
+  return turn.text;
 }
 
+/** Запасной путь: обычный /send, если поток не удалось прочитать. */
+async function sendOnce(message, turn) {
+  const response = await fetch('/send', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ message, reasoning: reasoningOn }),
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok || data.error) throw new Error(data.error || ('HTTP ' + response.status));
+  turn.collapseStage();
+  turn.appendText(data.reply || '');
+  turn.finish({ model: data.model });
+  return data.reply;
+}
+
+// ══════════════════════════════════════════
+// ПОИСК В ИНТЕРНЕТЕ (поток событий)
+// ══════════════════════════════════════════
+async function runSearchTurn(message, turn) {
+  const controller = new AbortController();
+  activeAbort = controller;
+
+  const response = await fetch('/api/auto_search_stream', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ message, force: true, reasoning: reasoningOn }),
+    signal: controller.signal,
+  });
+
+  if (!response.ok) {
+    const raw = await response.text();
+    let details = `HTTP ${response.status}`;
+    try { details = JSON.parse(raw).error || details; } catch (_) { details += ': ' + raw.slice(0, 300); }
+    throw new Error(details);
+  }
+
+  let failure = null;
+  let result = {};
+  await consumeNdjson(response, (event) => {
+    switch (event.type) {
+      case 'stage':
+        if (event.scene === 'search') turn.setStage('search', event.title, event.text);
+        else turn.setStage('write', event.title, event.text);
+        break;
+      case 'step':
+        turn.step(event.icon, event.text);
+        break;
+      case 'sources':
+        turn.setSources(event.sources || []);
+        break;
+      case 'reasoning':
+        turn.reasoningToken(event.token);
+        break;
+      case 'token':
+        turn.appendToken(event.token);
+        break;
+      case 'error':
+        failure = event.text;
+        turn.step('❌', event.text);
+        break;
+      case 'result':
+        result = event;
+        if (Array.isArray(event.sources) && event.sources.length) turn.setSources(event.sources);
+        break;
+      case 'done':
+        break;
+      default:
+        break;
+    }
+  });
+  activeAbort = null;
+
+  if (!turn.text) {
+    throw new Error(failure || 'Поиск завершился без ответа модели');
+  }
+  turn.finish({
+    model: result.model || aiStatus?.model,
+    provider: aiStatus?.provider,
+    offline: result.offline,
+    searched: result.searched,
+  });
+  return turn.text;
+}
+
+// ══════════════════════════════════════════
+// ОТПРАВКА СООБЩЕНИЙ
+// ══════════════════════════════════════════
 async function sendMessage(text) {
-  const msg = (text || input.value).trim();
-  if (!msg || isTyping) return;
+  const msg = String(text ?? input.value).trim();
+  if (!msg) return;
+  if (isTyping) { stopGeneration(); return; }
 
   let finalMsg = msg;
-
-  // Если активен режим — формируем команду
   if (inputMode && !msg.startsWith('/')) {
     finalMsg = inputMode.prefix + msg;
     inputMode = null;
-    input.placeholder = 'Напишите сообщение или нажмите 🎤 для голосового ввода...';
+    input.placeholder = 'Напишите сообщение...';
   }
 
   hideWelcome();
   appendMessage('user', finalMsg);
+  lastUserMessage = finalMsg;
 
   input.value = '';
   input.style.height = 'auto';
-  sendBtn.disabled = true;
-  showTyping();
+  isTyping = true;
+  setSendBusy(true);
+  closeCmdk();
 
-  const isCommand = finalMsg.startsWith('/');
-
-  // Если команда — отправляем на /command
-  if (isCommand) {
-    try {
-      const resp = await fetch('/command', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ command: finalMsg })
-      });
-      const data = await resp.json();
-      removeTyping();
-      if (data.error) {
-        appendMessage('ai', 'Ошибка: ' + data.error);
-      } else {
-        appendMessage('ai', data.result || data.reply || 'Готово');
-      }
-    } catch (e) {
-      removeTyping();
-      appendMessage('ai', 'Ошибка соединения');
-    }
-    return;
-  }
-
-  // Если выбрана медиа-модель — промпт уходит в движок генерации
-  if (activeMediaModel) {
-    try {
-      await sendMediaMessage(finalMsg);
-    } catch (e) {
-      removeTyping();
-      appendMessage('ai', '❌ Ошибка генерации: ' + (e.message || 'неизвестная ошибка'));
-    }
-    return;
-  }
-
-  // Если включён АВТО ПОИСК — SSE с реальными шагами в чате
-  if (autoSearchOn) {
-    try {
-      const done = await autoSearchSSE(finalMsg);
-      if (done) return;
-      // done=false значит поиск не нужен, продолжаем обычный путь
-    } catch (e) {
-      console.error('Auto search SSE error:', e);
-      // При ошибке — продолжаем обычную отправку
-    }
-  }
-
-  // Если включён ручной поиск — используем web_search_groq
-  if (webSearchOn) {
-    try {
-      const resp = await fetch('/api/web_search_groq', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: finalMsg })
-      });
-      const data = await resp.json();
-      removeTyping();
-      if (data.error) {
-        appendMessage('ai', '❌ Ошибка: ' + data.error);
-      } else {
-        appendMessage('ai', data.reply);
-      }
-    } catch (e) {
-      removeTyping();
-      appendMessage('ai', '❌ Ошибка соединения при поиске');
-    }
-    return;
-  }
-
-  // Обычный запрос к ИИ с потоковым выводом
   try {
-    await streamMessage(finalMsg);
-  } catch (e) {
-    // Надёжный fallback: если потоковый endpoint временно недоступен,
-    // используем обычный /send и не теряем сообщение пользователя.
-    console.warn('Streaming chat failed, using /send fallback:', e);
-    try {
-      const resp = await fetch('/send', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: finalMsg, reasoning: reasoningOn })
-      });
-      const data = await resp.json();
-      removeTyping();
-      if (!resp.ok || data.error) {
-        appendMessage('ai', '❌ Ошибка AI: ' + (data.error || ('HTTP ' + resp.status)));
-      } else {
-        appendMessage('ai', data.reply || 'AI не вернул ответ');
+    const isCommand = finalMsg.startsWith('/');
+
+    // ── Команды ──
+    if (isCommand) {
+      const turn = createAssistantTurn();
+      turn.beginIdle('Выполняю команду…');
+      try {
+        const resp = await fetch('/command', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ command: finalMsg }),
+        });
+        const data = await resp.json().catch(() => ({}));
+        turn.collapseStage();
+        if (data.error) turn.appendText('Ошибка: ' + data.error);
+        else turn.appendText(data.result || data.reply || 'Готово');
+        turn.finish({ model: 'command' });
+      } catch (error) {
+        turn.fail(error.message || 'Ошибка соединения');
       }
-    } catch (fallbackError) {
-      removeTyping();
-      appendMessage('ai', '❌ Не удалось подключиться к AI: ' + (fallbackError.message || 'неизвестная ошибка'));
+      return;
     }
+
+    // ── Медиа-модель ──
+    if (activeMediaModel) {
+      try {
+        await sendMediaMessage(finalMsg);
+      } catch (error) {
+        appendMessage('ai', '❌ Ошибка генерации: ' + (error.message || 'неизвестная ошибка'));
+      }
+      return;
+    }
+
+    // ── Поиск в интернете: сцена → шаги → источники → ответ ──
+    if (webSearchOn || autoSearchOn) {
+      const turn = createAssistantTurn();
+      turn.beginSearch('Поищу в интернете');
+      try {
+        await runSearchTurn(finalMsg, turn);
+      } catch (error) {
+        if (error.name === 'AbortError') {
+          turn.collapseStage();
+          turn.appendText(turn.text || '_Генерация остановлена._');
+          turn.finish({ model: aiStatus?.model });
+        } else {
+          turn.step('⚠️', 'Поиск не удался — отвечаю без интернета');
+          try {
+            await streamMessage(finalMsg, turn);
+          } catch (fallbackError) {
+            try {
+              await sendOnce(finalMsg, turn);
+            } catch (lastError) {
+              turn.fail(`${error.message} · затем ${lastError.message}`);
+            }
+          }
+        }
+      }
+      return;
+    }
+
+    // ── Обычный чат: пузырь сначала пустой ──
+    const turn = createAssistantTurn();
+    turn.beginIdle(reasoningOn ? 'Рассуждаю…' : 'Думаю…');
+    try {
+      await streamMessage(finalMsg, turn);
+    } catch (error) {
+      if (error.name === 'AbortError') {
+        turn.collapseStage();
+        turn.appendText(turn.text || '_Генерация остановлена._');
+        turn.finish({ model: aiStatus?.model });
+        return;
+      }
+      try {
+        await sendOnce(finalMsg, turn);
+      } catch (fallbackError) {
+        turn.fail(fallbackError.message || error.message);
+      }
+    }
+  } finally {
+    isTyping = false;
+    setSendBusy(false);
   }
 }
 
 function sendSuggestion(text) { sendMessage(text); }
-// ========== АВТО-ПОИСК С РЕАЛЬНЫМИ ШАГАМИ (SSE) ==========
-async function autoSearchSSE(message) {
-  // Создаём пузырь "поиска" в чате
-  const searchWrap = document.createElement('div');
-  searchWrap.className = 'message ai';
-  searchWrap.id = 'searchProgressMsg';
-  searchWrap.innerHTML = `
-    <div class="msg-avatar">🔍</div>
-    <div class="msg-body">
-      <div class="msg-name">Поиск</div>
-      <div class="msg-bubble search-progress-bubble">
-        <div id="searchSteps" style="display:flex;flex-direction:column;gap:6px;font-size:13px;"></div>
-      </div>
-    </div>`;
-  messages.appendChild(searchWrap);
-  messages.scrollTop = messages.scrollHeight;
 
-  const stepsEl = document.getElementById('searchSteps');
-
-  function addStep(icon, text) {
-    const el = document.createElement('div');
-    el.style.cssText = 'display:flex;align-items:center;gap:8px;padding:4px 0;border-bottom:1px solid rgba(255,255,255,.06);';
-    el.innerHTML = `<span style="font-size:16px;min-width:20px">${icon}</span><span style="color:var(--text-secondary,#aaa)">${escapeHtml(text)}</span>`;
-    stepsEl.appendChild(el);
-    messages.scrollTop = messages.scrollHeight;
-  }
-
-  return new Promise((resolve) => {
-    const evtSource = new EventSource('/api/auto_search_stream?' + new URLSearchParams({message}));
-    // Используем POST через fetch+ReadableStream т.к. EventSource не поддерживает POST
-    evtSource.close();
-
-    // Используем fetch + ReadableStream для SSE с POST
-    fetch('/api/auto_search_stream', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({message})
-    }).then(async resp => {
-      const reader = resp.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = '';
-
-      while (true) {
-        const {done, value} = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, {stream: true});
-        const lines = buffer.split('\n');
-        buffer = lines.pop();
-
-        for (const line of lines) {
-          if (!line.trim()) continue;
-          let eventType = 'message', data = '';
-          if (line.startsWith('event: ')) {
-            eventType = line.slice(7).trim();
-          } else if (line.startsWith('data: ')) {
-            data = line.slice(6);
-            try {
-              const payload = JSON.parse(data);
-              if (eventType === 'step') {
-                addStep(payload.icon || '•', payload.text || '');
-              } else if (eventType === 'result') {
-                // Убираем прогресс, показываем результат
-                searchWrap.remove();
-                removeTyping();
-                if (payload.reply) {
-                  appendMessage('ai', payload.reply);
-                  // Показываем источники если есть
-                  if (payload.sources && payload.sources.length > 0) {
-                    const srcHtml = payload.sources.map((s, i) =>
-                      `<a href="${escapeHtml(s.url)}" target="_blank" rel="noopener" style="color:#10b981;font-size:12px;display:block;margin-top:4px">` +
-                      `[${i+1}] ${escapeHtml(s.title || s.url)}</a>`
-                    ).join('');
-                    const srcWrap = document.createElement('div');
-                    srcWrap.className = 'message ai';
-                    srcWrap.innerHTML = `<div class="msg-avatar">🔗</div><div class="msg-body"><div class="msg-bubble" style="background:rgba(16,185,129,.08);padding:10px 14px">${srcHtml}</div></div>`;
-                    messages.appendChild(srcWrap);
-                    messages.scrollTop = messages.scrollHeight;
-                  }
-                }
-                resolve(true);
-              } else if (eventType === 'error') {
-                addStep('❌', payload.text || 'Ошибка');
-              } else if (eventType === 'done') {
-                if (document.getElementById('searchProgressMsg')) {
-                  searchWrap.remove();
-                  removeTyping();
-                }
-                resolve(payload.searched === false ? false : true);
-              }
-            } catch(e) { /* ignore parse errors */ }
-          }
-        }
-      }
-      resolve(false);
-    }).catch(e => {
-      searchWrap.remove();
-      console.error('SSE fetch error:', e);
-      resolve(false);
-    });
-  });
+// ========== РЕЖИМЫ КОМАНД ==========
+function activateMode(mode) {
+  inputMode = mode;
+  input.placeholder = mode.placeholder;
+  input.value = '';
+  input.focus();
 }
 
 function hideWelcome() { if (welcomeScreen) welcomeScreen.style.display = 'none'; }
 
-// ========== СООБЩЕНИЯ (С ПОДДЕРЖКОЙ ИЗОБРАЖЕНИЙ) ==========
-function appendMessage(role, content) {
+// ══════════════════════════════════════════
+// СООБЩЕНИЯ (история, медиа, composio)
+// ══════════════════════════════════════════
+function appendMessage(role, content, meta = null) {
   msgCount++;
   const isAI = role === 'ai';
   const wrap = document.createElement('div');
   wrap.className = 'message ' + (role === 'user' ? 'user' : 'ai');
 
-  // ══ COMPOSIO КАРТОЧКИ ══
   if (isAI && content.startsWith('COMPOSIO_CARDS:')) {
-    const json = content.replace('COMPOSIO_CARDS:', '');
     try {
-      const cards = JSON.parse(json);
-      wrap.innerHTML = `
-        <div class="msg-avatar">✦</div>
-        <div class="msg-body">
-          <div class="msg-name">NovaMind</div>
-          <div class="msg-bubble">${renderComposioCards(cards)}</div>
-        </div>`;
+      const cards = JSON.parse(content.replace('COMPOSIO_CARDS:', ''));
+      wrap.innerHTML = `<div class="msg-avatar">✦</div><div class="msg-body"><div class="msg-name">NovaMind</div><div class="msg-bubble">${renderComposioCards(cards)}</div></div>`;
       chatContainer.appendChild(wrap);
       scrollToBottom();
       return;
-    } catch(e) {}
+    } catch (e) {}
   }
 
-  // ══ COMPOSIO AUTH КНОПКА ══
   if (isAI && content.startsWith('COMPOSIO_AUTH:')) {
     const withoutPrefix = content.replace('COMPOSIO_AUTH:', '');
     const colonIdx = withoutPrefix.indexOf(':');
-    const toolkit = withoutPrefix.substring(0, colonIdx);
-    const url = withoutPrefix.substring(colonIdx + 1);
-    wrap.innerHTML = `
-      <div class="msg-avatar">✦</div>
-      <div class="msg-body">
-        <div class="msg-name">NovaMind</div>
-        <div class="msg-bubble">${renderComposioAuth(toolkit, url)}</div>
-      </div>`;
+    wrap.innerHTML = `<div class="msg-avatar">✦</div><div class="msg-body"><div class="msg-name">NovaMind</div><div class="msg-bubble">${renderComposioAuth(withoutPrefix.substring(0, colonIdx), withoutPrefix.substring(colonIdx + 1))}</div></div>`;
     chatContainer.appendChild(wrap);
     scrollToBottom();
     return;
   }
 
-  // ══ МЕДИА-РЕЗУЛЬТАТ (изображение / аудиоплеер / видеоплеер) ══
   if (isAI && content.startsWith('MEDIA_RESULT:')) {
     try {
       const payload = JSON.parse(content.replace('MEDIA_RESULT:', ''));
@@ -1013,99 +1369,105 @@ function appendMessage(role, content) {
     } catch (e) {}
   }
 
-  // ══ ОБЫЧНОЕ СООБЩЕНИЕ ══
   let formatted = isAI ? formatContent(content) : escapeHtml(content);
   let imageHtml = '';
-
   const imageMatch = content.match(/!\[Image\]\((.*?)\)/);
   if (imageMatch) {
-    imageHtml = `<img src="${imageMatch[1]}" alt="Generated image" style="max-width:100%;border-radius:12px;margin-top:8px;" onload="scrollToBottom()">`;
+    imageHtml = `<img src="${imageMatch[1]}" alt="Generated image" style="max-width:100%;border-radius:12px;margin-top:8px;">`;
     formatted = formatted.replace(/!\[Image\]\(.*?\)/, '');
   }
+
+  const sources = Array.isArray(meta?.sources) ? meta.sources.filter((s) => s && s.url) : [];
+  const sourcesHtml = sources.length ? `
+    <div class="sources">
+      <div class="sources-head"><span>🔗 Источники · ${sources.length}</span><span class="caret">▼</span></div>
+      <div class="sources-list">${sources.map(sourceItemHtml).join('')}</div>
+    </div>` : '';
 
   wrap.innerHTML = `
     <div class="msg-avatar">${isAI ? '✦' : '👤'}</div>
     <div class="msg-body">
       <div class="msg-name">${isAI ? 'NovaMind' : 'Вы'}</div>
-      <div class="msg-bubble">${formatted}${imageHtml}</div>
+      <div class="msg-bubble">
+        ${meta?.reasoning ? `<div class="reasoning"><div class="reasoning-head"><span>🧠</span><span>Рассуждение</span><span class="caret">▶</span></div><div class="reasoning-body"><div class="reasoning-text">${escapeHtml(meta.reasoning)}</div></div></div>` : ''}
+        <div class="answer">${formatted}${imageHtml}</div>
+        ${sourcesHtml}
+      </div>
+      ${isAI && meta?.model ? `<div class="msg-meta"><span>модель: ${escapeHtml(String(meta.model))}${meta.elapsed_ms ? ' · ' + (meta.elapsed_ms / 1000).toFixed(1) + ' c' : ''}</span></div>` : ''}
+      ${isAI ? `<div class="msg-actions">
+        <button type="button" data-act="copy">📋 Копировать</button>
+        <button type="button" data-act="speak">🔊 Озвучить</button>
+      </div>` : ''}
     </div>`;
+
   chatContainer.appendChild(wrap);
+
+  const answerText = String(content || '');
+  wrap.querySelector('[data-act="copy"]')?.addEventListener('click', () => copyText(answerText));
+  wrap.querySelector('[data-act="speak"]')?.addEventListener('click', () => speakText(answerText));
+  wrap.querySelector('.sources-head')?.addEventListener('click', (event) => {
+    event.currentTarget.parentElement.classList.toggle('min');
+  });
+  wrap.querySelector('.reasoning-head')?.addEventListener('click', (event) => {
+    event.currentTarget.parentElement.classList.toggle('open');
+  });
+
   scrollToBottom();
 
   if (!historyReplay && (role === 'user' || role === 'ai') && content) {
-    historyAddMessage(role, content);
+    historyAddMessage(role, content, meta);
   }
 }
 
 function formatContent(text) {
-  let html = escapeHtml(text);
+  let html = escapeHtml(String(text ?? ''));
 
   // Блоки кода
   html = html.replace(/```(\w+)?\n?([\s\S]*?)```/g, (_, lang, code) => `<pre><code>${code.trim()}</code></pre>`);
-
   // Инлайн-код
   html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
-
-  // Жирный
+  // Заголовки
+  html = html.replace(/^###\s+(.+)$/gm, '<strong style="font-size:14px">$1</strong>');
+  html = html.replace(/^##\s+(.+)$/gm, '<strong style="font-size:15px">$1</strong>');
+  // Жирный / курсив
   html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+  html = html.replace(/(^|[^*])\*([^*\n]+)\*/g, '$1<em>$2</em>');
+  // Ссылки [1]
+  html = html.replace(/\[(\d{1,2})\]/g, '<sup class="lg-chip acc" style="padding:1px 5px;font-size:9px">$1</sup>');
 
-  // Курсив
-  html = html.replace(/\*(.+?)\*/g, '<em>$1</em>');
-
-  // Таблицы — скролл горизонтально с подсказкой
+  // Таблицы
   html = html.replace(/(\|[^\n]+\|\n\|[-| :]+\|\n(?:\|[^\n]+\|\n?)*)/g, (match) => {
     const rows = match.trim().split('\n');
     const colCount = (rows[0].match(/\|/g) || []).length - 1;
     const needsScroll = colCount > 3;
     let tableHtml = '<table>';
     rows.forEach((row, index) => {
-      const cells = row.split('|').filter(c => c.trim() !== '');
-      if (index === 1 && cells.every(c => /^[-| :]+$/.test(c))) return;
+      const cells = row.split('|').filter((c) => c.trim() !== '');
+      if (index === 1 && cells.every((c) => /^[-| :]+$/.test(c))) return;
       const tag = index === 0 ? 'th' : 'td';
-      // Определяем выравнивание по разделителю
-      const alignRow = rows[1] ? rows[1].split('|').filter(c => c.trim() !== '') : [];
+      const alignRow = rows[1] ? rows[1].split('|').filter((c) => c.trim() !== '') : [];
       tableHtml += '<tr>';
       cells.forEach((cell, ci) => {
         const sep = alignRow[ci] || '';
-        const align = sep.startsWith(':') && sep.endsWith(':') ? 'center'
-                    : sep.endsWith(':') ? 'right' : 'left';
+        const align = sep.startsWith(':') && sep.endsWith(':') ? 'center' : sep.endsWith(':') ? 'right' : 'left';
         tableHtml += `<${tag} style="text-align:${align}">${cell.trim()}</${tag}>`;
       });
       tableHtml += '</tr>';
     });
     tableHtml += '</table>';
-    const hint = needsScroll
-      ? '<div class="tbl-scroll-hint show">← прокрути вправо →</div>'
-      : '';
+    const hint = needsScroll ? '<div class="tbl-scroll-hint show">← прокрути вправо →</div>' : '';
     return `<div class="tbl-wrap">${tableHtml}</div>${hint}`;
   });
 
-  // Переносы строк
   html = html.replace(/\n\n/g, '<br><br>');
   html = html.replace(/\n/g, '<br>');
-
   return html;
 }
 
 function escapeHtml(text) {
-  return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-}
-
-// ========== ИНДИКАТОР ПЕЧАТИ ==========
-function showTyping() {
-  isTyping = true;
-  const wrap = document.createElement('div');
-  wrap.className = 'message ai typing-indicator';
-  wrap.id = 'typingIndicator';
-  wrap.innerHTML = '<div class="msg-avatar">✦</div><div class="msg-body"><div class="msg-name">NovaMind</div><div class="msg-bubble"><div class="typing-dots"><span></span><span></span><span></span></div></div></div>';
-  chatContainer.appendChild(wrap);
-  scrollToBottom();
-}
-
-function removeTyping() {
-  const el = document.getElementById('typingIndicator');
-  if (el) el.remove();
-  isTyping = false;
+  return String(text ?? '')
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
 // ========== ГОЛОС ==========
@@ -1141,7 +1503,6 @@ function startRecording() {
     sendBtn.disabled = !input.value.trim();
   };
   recognition.onend = () => {
-    // Браузер может завершить сессию сам после паузы — сохраняем уже распознанный текст.
     if (isRecording) {
       isRecording = false;
       voiceBtn.classList.remove('recording');
@@ -1175,8 +1536,19 @@ function stopRecording() {
 }
 
 // ========== САЙДБАР ==========
-function openSettings() {
-  window.location.href = '/settings';
+function openSettings() { window.location.href = '/settings'; }
+
+const DRAWER_BREAKPOINT = 860;
+// Чуть у́же, чем раньше, чтобы сайдбар не перекрывал чат на телефоне.
+const drawerWidth = () => Math.min(300, Math.max(240, window.innerWidth * 0.84));
+
+/** matchMedia может отсутствовать (старые webview, тестовые окружения) — не падаем. */
+function isDrawerViewport() {
+  try {
+    return window.matchMedia(`(max-width: ${DRAWER_BREAKPOINT}px)`).matches;
+  } catch (_) {
+    return window.innerWidth <= DRAWER_BREAKPOINT;
+  }
 }
 
 function setSidebarOffset(offset, animate = false) {
@@ -1185,24 +1557,21 @@ function setSidebarOffset(offset, animate = false) {
   const overlay = document.getElementById('overlay');
   if (!app || !sidebar) return;
 
-  const width = Math.min(300, Math.max(240, window.innerWidth * 0.82));
+  const width = drawerWidth();
   const x = Math.max(0, Math.min(width, Number(offset) || 0));
 
   app.style.setProperty('--drawer-x', x + 'px');
   app.style.setProperty('--drawer-width', width + 'px');
-
-  if (animate) {
-    app.classList.add('drawer-animate');
-  } else {
-    app.classList.remove('drawer-animate');
-  }
+  app.classList.toggle('drawer-animate', animate);
 
   const isOpen = x > width * 0.5;
   sidebar.classList.toggle('open', isOpen);
+  // Когда сайдбар открыт, чат блокируется — один скролл на экран.
+  document.body.classList.toggle('drawer-open', isOpen);
 
   if (overlay) {
     overlay.classList.toggle('visible', isOpen);
-    overlay.style.opacity = String(Math.min(0.75, (x / width) * 0.75));
+    overlay.style.opacity = String(Math.min(0.7, (x / width) * 0.7));
     overlay.style.pointerEvents = isOpen ? 'auto' : 'none';
   }
 }
@@ -1217,17 +1586,13 @@ function getSidebarOffset() {
 function toggleSidebar() {
   const sidebar = document.getElementById('sidebar');
   if (!sidebar) return;
-
-  // На ПК sidebar постоянно виден.
-  if (!window.matchMedia('(max-width: 768px)').matches) return;
-
-  const width = Math.min(300, Math.max(240, window.innerWidth * 0.82));
-  const current = getSidebarOffset();
-  setSidebarOffset(current > width * 0.5 ? 0 : width, true);
+  if (!isDrawerViewport()) return;
+  const width = drawerWidth();
+  setSidebarOffset(getSidebarOffset() > width * 0.5 ? 0 : width, true);
 }
 
 function closeSidebar() {
-  setSidebarOffset(0, true);
+  if (isDrawerViewport()) setSidebarOffset(0, true);
 }
 
 function initSidebarSwipe() {
@@ -1239,10 +1604,11 @@ function initSidebarSwipe() {
   let swipeEnabled = false;
 
   const enableForViewport = () => {
-    swipeEnabled = window.matchMedia('(max-width: 768px)').matches;
+    swipeEnabled = isDrawerViewport();
     if (!swipeEnabled) {
       app.classList.remove('drawer-animate');
       sidebar.classList.remove('open');
+      document.body.classList.remove('drawer-open');
       if (overlay) {
         overlay.classList.remove('visible');
         overlay.style.pointerEvents = 'none';
@@ -1251,14 +1617,10 @@ function initSidebarSwipe() {
       app.style.removeProperty('--drawer-x');
       app.style.removeProperty('--drawer-width');
     } else {
-      const width = Math.min(300, Math.max(240, window.innerWidth * 0.82));
-      app.style.setProperty('--drawer-width', width + 'px');
-      if (!app.style.getPropertyValue('--drawer-x')) {
-        app.style.setProperty('--drawer-x', '0px');
-      }
+      app.style.setProperty('--drawer-width', drawerWidth() + 'px');
+      if (!app.style.getPropertyValue('--drawer-x')) app.style.setProperty('--drawer-x', '0px');
     }
   };
-
   enableForViewport();
 
   let drag = null;
@@ -1266,37 +1628,21 @@ function initSidebarSwipe() {
   const begin = (e) => {
     if (!swipeEnabled) return;
     if (e.pointerType === 'mouse' && e.button !== 0) return;
-
     const open = getSidebarOffset() > 1;
     const x = e.clientX;
-    const startedOnSidebar = sidebar.contains(e.target);
-
-    // Closed: start only from the left screen edge.
-    // Open: allow closing from anywhere inside the sidebar.
     if (!open && x > 32) return;
-    if (open && !startedOnSidebar) return;
-
+    if (open && !sidebar.contains(e.target)) return;
     drag = {
-      id: e.pointerId,
-      startX: x,
-      startY: e.clientY,
-      startOffset: getSidebarOffset(),
-      lastX: x,
-      lastTime: performance.now(),
-      velocityX: 0,
-      horizontal: false
+      id: e.pointerId, startX: x, startY: e.clientY,
+      startOffset: getSidebarOffset(), lastX: x, lastTime: performance.now(),
+      velocityX: 0, horizontal: false,
     };
-
     app.classList.remove('drawer-animate');
-
-    try {
-      app.setPointerCapture(e.pointerId);
-    } catch (_) {}
+    try { app.setPointerCapture(e.pointerId); } catch (_) {}
   };
 
   const move = (e) => {
     if (!drag || e.pointerId !== drag.id) return;
-
     const dx = e.clientX - drag.startX;
     const dy = e.clientY - drag.startY;
     const now = performance.now();
@@ -1304,69 +1650,43 @@ function initSidebarSwipe() {
 
     if (!drag.horizontal) {
       if (Math.abs(dx) < 8) return;
-
-      // If the gesture is mainly vertical, leave it to the browser for scrolling.
-      if (Math.abs(dy) > Math.abs(dx) * 1.15) {
-        drag = null;
-        return;
-      }
-
+      if (Math.abs(dy) > Math.abs(dx) * 1.15) { drag = null; return; }
       drag.horizontal = true;
     }
-
     e.preventDefault();
 
-    const next = Math.max(0, Math.min(
-      Math.min(300, Math.max(240, window.innerWidth * 0.82)),
-      drag.startOffset + dx
-    ));
-
+    const next = Math.max(0, Math.min(drawerWidth(), drag.startOffset + dx));
     drag.velocityX = (e.clientX - drag.lastX) / dt;
     drag.lastX = e.clientX;
     drag.lastTime = now;
-
     setSidebarOffset(next, false);
   };
 
   const end = (e) => {
     if (!drag || e.pointerId !== drag.id) return;
-
     const currentDrag = drag;
     drag = null;
-
-    try {
-      app.releasePointerCapture(e.pointerId);
-    } catch (_) {}
-
+    try { app.releasePointerCapture(e.pointerId); } catch (_) {}
     if (!currentDrag.horizontal) return;
-
-    const width = Math.min(300, Math.max(240, window.innerWidth * 0.82));
+    const width = drawerWidth();
     const dx = e.clientX - currentDrag.startX;
     const current = getSidebarOffset();
-
-    const shouldOpen =
-      current > width * 0.5 ||
-      dx > 70 ||
-      currentDrag.velocityX > 0.45;
-
+    const shouldOpen = current > width * 0.5 || dx > 70 || currentDrag.velocityX > 0.45;
     setSidebarOffset(shouldOpen ? width : 0, true);
   };
 
-  app.addEventListener('pointerdown', begin, {passive: false});
-  app.addEventListener('pointermove', move, {passive: false});
-  app.addEventListener('pointerup', end, {passive: false});
-  app.addEventListener('pointercancel', end, {passive: false});
-
+  app.addEventListener('pointerdown', begin, { passive: false });
+  app.addEventListener('pointermove', move, { passive: false });
+  app.addEventListener('pointerup', end, { passive: false });
+  app.addEventListener('pointercancel', end, { passive: false });
   window.addEventListener('resize', enableForViewport);
 }
 
-if (document.readyState === 'loading') {
-  document.addEventListener('DOMContentLoaded', initSidebarSwipe);
-} else {
-  initSidebarSwipe();
-}
+if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', initSidebarSwipe);
+else initSidebarSwipe();
+
 function setActive(el) {
-  document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+  document.querySelectorAll('.nav-item').forEach((n) => n.classList.remove('active'));
   el.classList.add('active');
 }
 
@@ -1386,19 +1706,24 @@ function newChat() {
   }
   renderChatList();
 }
+
 function clearChat() {
   newChat();
-  fetch('/api/history/clear', {method: 'DELETE'}).catch(() => {});
+  fetch('/api/history/clear', { method: 'DELETE' }).catch(() => {});
+  showNotification('Чат очищен', 'info');
 }
+
 function shareChat() {
-  navigator.clipboard.writeText(window.location.href).then(() => showNotification('Ссылка скопирована', 'success'));
+  copyText(window.location.href);
 }
+
 function scrollToBottom() {
-  setTimeout(() => chatContainer.scrollTo({ top: chatContainer.scrollHeight, behavior: 'smooth' }), 50);
+  requestAnimationFrame(() => {
+    chatContainer.scrollTo({ top: chatContainer.scrollHeight, behavior: 'smooth' });
+  });
 }
 
 // ========== ИСТОРИЯ ЧАТОВ ==========
-// Локальная история: сохраняет полноценные диалоги на этом устройстве.
 const HISTORY_KEY = 'nova_history_v2';
 const MAX_CHATS = 50;
 const MAX_MSGS = 60;
@@ -1407,18 +1732,18 @@ function historyLoad() {
   try {
     const parsed = JSON.parse(localStorage.getItem(HISTORY_KEY) || '{"chats":[],"activeId":null}');
     const chats = Array.isArray(parsed.chats) ? parsed.chats
-      .filter(chat => chat && chat.id)
-      .map(chat => ({
+      .filter((chat) => chat && chat.id)
+      .map((chat) => ({
         ...chat,
         title: String(chat.title || 'Новый диалог'),
         messages: Array.isArray(chat.messages) ? chat.messages : [],
         createdAt: Number(chat.createdAt) || Number(chat.updatedAt) || Date.now(),
-        updatedAt: Number(chat.updatedAt) || Number(chat.createdAt) || Date.now()
+        updatedAt: Number(chat.updatedAt) || Number(chat.createdAt) || Date.now(),
       })) : [];
-    const activeId = chats.some(chat => chat.id === parsed.activeId) ? parsed.activeId : null;
-    return {chats, activeId};
+    const activeId = chats.some((chat) => chat.id === parsed.activeId) ? parsed.activeId : null;
+    return { chats, activeId };
   } catch (e) {
-    return {chats: [], activeId: null};
+    return { chats: [], activeId: null };
   }
 }
 
@@ -1426,42 +1751,34 @@ function historySave(store) {
   try {
     localStorage.setItem(HISTORY_KEY, JSON.stringify(store));
   } catch (e) {
-    console.warn('[History] localStorage unavailable/full');
+    console.warn('[History] localStorage недоступен или переполнен');
   }
 }
 
-function historyAddMessage(role, content) {
-  if (historyReplay || !content || content.length < 1) return;
+function historyAddMessage(role, content, meta = null) {
+  if (historyReplay || !content) return;
 
   const store = historyLoad();
-  let chat = store.chats.find(c => c.id === store.activeId);
+  let chat = store.chats.find((c) => c.id === store.activeId);
 
   if (!chat) {
     const title = content.slice(0, 55) + (content.length > 55 ? '…' : '');
     chat = {
       id: Date.now().toString(36) + Math.random().toString(36).slice(2, 7),
-      title,
-      messages: [],
-      createdAt: Date.now(),
-      updatedAt: Date.now()
+      title, messages: [], createdAt: Date.now(), updatedAt: Date.now(),
     };
     store.chats.unshift(chat);
     store.activeId = chat.id;
   }
 
-  chat.messages.push({role, content});
+  chat.messages.push(meta ? { role, content, meta } : { role, content });
   chat.updatedAt = Date.now();
 
-  if (role === 'user' && chat.messages.filter(m => m.role === 'user').length === 1) {
+  if (role === 'user' && chat.messages.filter((m) => m.role === 'user').length === 1) {
     chat.title = content.slice(0, 55) + (content.length > 55 ? '…' : '');
   }
-
-  if (chat.messages.length > MAX_MSGS) {
-    chat.messages = chat.messages.slice(-MAX_MSGS);
-  }
-  if (store.chats.length > MAX_CHATS) {
-    store.chats = store.chats.slice(0, MAX_CHATS);
-  }
+  if (chat.messages.length > MAX_MSGS) chat.messages = chat.messages.slice(-MAX_MSGS);
+  if (store.chats.length > MAX_CHATS) store.chats = store.chats.slice(0, MAX_CHATS);
 
   historySave(store);
   renderChatList();
@@ -1473,8 +1790,8 @@ function renderChatList() {
 
   const store = historyLoad();
   const chats = [...(store.chats || [])].sort((a, b) => {
-    const updatedDiff = (Number(b.updatedAt) || 0) - (Number(a.updatedAt) || 0);
-    return updatedDiff || String(b.id).localeCompare(String(a.id));
+    const diff = (Number(b.updatedAt) || 0) - (Number(a.updatedAt) || 0);
+    return diff || String(b.id).localeCompare(String(a.id));
   });
   const active = store.activeId;
   container.innerHTML = '';
@@ -1488,7 +1805,7 @@ function renderChatList() {
   const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
   const yesterdayStart = todayStart - 86400000;
   const weekStart = todayStart - 6 * 86400000;
-  const groups = {'Сегодня': [], 'Вчера': [], 'Последние 7 дней': [], 'Ранее': []};
+  const groups = { 'Сегодня': [], 'Вчера': [], 'Последние 7 дней': [], 'Ранее': [] };
 
   for (const chat of chats) {
     const updatedAt = Number(chat.updatedAt) || Date.now();
@@ -1500,7 +1817,6 @@ function renderChatList() {
 
   for (const [label, group] of Object.entries(groups)) {
     if (!group.length) continue;
-
     const heading = document.createElement('div');
     heading.className = 'history-group-label';
     heading.textContent = label;
@@ -1512,8 +1828,8 @@ function renderChatList() {
       item.title = chat.title || 'Новый диалог';
 
       const updated = new Date(Number(chat.updatedAt) || Number(chat.createdAt) || Date.now());
-      const date = updated.toLocaleDateString('ru-RU', {day: '2-digit', month: '2-digit', year: 'numeric'});
-      const time = updated.toLocaleTimeString('ru-RU', {hour:'2-digit', minute:'2-digit'});
+      const date = updated.toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit', year: 'numeric' });
+      const time = updated.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
       const count = (chat.messages || []).length;
 
       item.innerHTML = `
@@ -1525,19 +1841,16 @@ function renderChatList() {
             <span class="history-item-count">${count} сообщ.</span>
           </div>
         </div>
-        <button class="hist-del-btn" type="button" title="Удалить чат">×</button>
-      `;
+        <button class="hist-del-btn" type="button" title="Удалить чат">×</button>`;
 
       item.addEventListener('click', (e) => {
         if (e.target.closest('.hist-del-btn')) return;
         loadChat(chat.id);
       });
-
       item.querySelector('.hist-del-btn').addEventListener('click', (e) => {
         e.stopPropagation();
         deleteChat(chat.id);
       });
-
       container.appendChild(item);
     }
   }
@@ -1545,7 +1858,7 @@ function renderChatList() {
 
 function loadChat(chatId) {
   const store = historyLoad();
-  const chat = store.chats.find(c => c.id === chatId);
+  const chat = store.chats.find((c) => c.id === chatId);
   if (!chat) return;
 
   store.activeId = chatId;
@@ -1555,7 +1868,7 @@ function loadChat(chatId) {
   try {
     chatContainer.innerHTML = '';
     for (const msg of (chat.messages || [])) {
-      appendMessage(msg.role === 'user' ? 'user' : 'ai', msg.content);
+      appendMessage(msg.role === 'user' ? 'user' : 'ai', msg.content, msg.meta || null);
     }
     if (!chat.messages.length) {
       chatContainer.appendChild(welcomeScreen);
@@ -1573,7 +1886,7 @@ function loadChat(chatId) {
 
 function deleteChat(chatId) {
   const store = historyLoad();
-  store.chats = (store.chats || []).filter(c => c.id !== chatId);
+  store.chats = (store.chats || []).filter((c) => c.id !== chatId);
   if (store.activeId === chatId) store.activeId = null;
   historySave(store);
   renderChatList();
@@ -1590,72 +1903,179 @@ function loadChatList() {
   return Promise.resolve();
 }
 
-(function initChatHistory() {
-  const run = () => renderChatList();
-  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', run);
-  else setTimeout(run, 50);
-})();
+// ══════════════════════════════════════════
+// КОМАНДНАЯ ПАНЕЛЬ (Ctrl+K)
+// ══════════════════════════════════════════
+const CMDK_ACTIONS = [
+  { icon: '🔍', label: 'Включить/выключить поиск в интернете', hint: '', run: () => toggleWebSearch() },
+  { icon: '🧠', label: 'Включить/выключить рассуждения', hint: '', run: () => toggleReasoning() },
+  { icon: '🎨', label: 'Открыть панель медиа-моделей', hint: '', run: () => openMediaPicker() },
+  { icon: '🎭', label: 'Сменить тему стекла', hint: '', run: () => cycleTheme() },
+  { icon: '✨', label: 'Спокойный режим анимаций', hint: '', run: () => toggleCalmMotion() },
+  { icon: '🧹', label: 'Очистить чат', hint: '', run: () => clearChat() },
+  { icon: '➕', label: 'Новый диалог', hint: '', run: () => newChat() },
+  { icon: '⚙️', label: 'Настройки ИИ и провайдеров', hint: '', run: () => openSettings() },
+  { icon: '🩺', label: 'Проверить поиск и модель', hint: '', run: () => checkHealth(true) },
+  { icon: '🔊', label: 'Озвучить последний ответ', hint: '', run: () => speakText(lastAnswerText()) },
+  { icon: '/help', label: 'Команда: список команд', hint: '/help', run: () => sendMessage('/help') },
+  { icon: '🌤', label: 'Режим: погода', hint: '/services weather', run: () => activateMode({ prefix: '/services weather ', placeholder: 'Введите город…' }) },
+  { icon: '💱', label: 'Режим: курс валют', hint: '/services currency', run: () => activateMode({ prefix: '/services currency ', placeholder: 'USD RUB…' }) },
+  { icon: '📚', label: 'Режим: Википедия', hint: '/services wiki', run: () => activateMode({ prefix: '/services wiki ', placeholder: 'Запрос…' }) },
+  { icon: '💻', label: 'Режим: код', hint: '/code', run: () => activateMode({ prefix: '/code ', placeholder: 'Какой код создать…' }) },
+  { icon: '🖼', label: 'Режим: изображение', hint: '/image', run: () => activateMode({ prefix: '/image ', placeholder: 'Опишите изображение…' }) },
+];
 
-// ========== УВЕДОМЛЕНИЯ ==========
-function showNotification(msg, type = 'info') {
-  const colors = {
-    success: { bg: 'rgba(34,197,94,.15)', text: '#4ade80' },
-    warn: { bg: 'rgba(234,179,8,.15)', text: '#facc15' },
-    info: { bg: 'rgba(124,58,237,.15)', text: '#c4b5fd' },
-  };
-  const c = colors[type] || colors.info;
-  const toast = document.createElement('div');
-  toast.style.cssText = `position:fixed;bottom:80px;left:50%;transform:translateX(-50%);background:${c.bg};color:${c.text};padding:8px 18px;border-radius:99px;font-size:12px;font-weight:600;z-index:9999;`;
-  toast.textContent = msg;
-  document.body.appendChild(toast);
-  setTimeout(() => toast.remove(), 2500);
+let cmdkIndex = 0;
+let cmdkFiltered = CMDK_ACTIONS;
+
+function openCmdk() {
+  const box = document.getElementById('cmdk');
+  if (!box) return;
+  box.classList.add('open');
+  box.setAttribute('aria-hidden', 'false');
+  const field = document.getElementById('cmdkInput');
+  if (field) { field.value = ''; field.focus(); }
+  filterCmdk();
 }
 
+function closeCmdk() {
+  const box = document.getElementById('cmdk');
+  if (!box) return;
+  box.classList.remove('open');
+  box.setAttribute('aria-hidden', 'true');
+}
+
+function filterCmdk() {
+  const query = (document.getElementById('cmdkInput')?.value || '').trim().toLowerCase();
+  cmdkFiltered = CMDK_ACTIONS.filter((action) =>
+    !query || action.label.toLowerCase().includes(query) || (action.hint || '').toLowerCase().includes(query));
+  cmdkIndex = 0;
+  renderCmdk();
+}
+
+function renderCmdk() {
+  const list = document.getElementById('cmdkList');
+  if (!list) return;
+  if (!cmdkFiltered.length) {
+    list.innerHTML = '<div class="cmdk-empty">Ничего не найдено</div>';
+    return;
+  }
+  list.innerHTML = cmdkFiltered.map((action, index) => `
+    <div class="cmdk-item ${index === cmdkIndex ? 'sel' : ''}" data-index="${index}">
+      <span class="k">${action.icon}</span>
+      <span>${escapeHtml(action.label)}</span>
+      ${action.hint ? `<span class="hint">${escapeHtml(action.hint)}</span>` : ''}
+    </div>`).join('');
+  list.querySelectorAll('.cmdk-item').forEach((item) => {
+    item.addEventListener('click', () => runCmdk(Number(item.dataset.index)));
+  });
+}
+
+function runCmdk(index) {
+  const action = cmdkFiltered[index];
+  closeCmdk();
+  if (action) action.run();
+}
+
+function cmdkKey(event) {
+  if (event.key === 'ArrowDown') {
+    event.preventDefault();
+    cmdkIndex = (cmdkIndex + 1) % Math.max(1, cmdkFiltered.length);
+    renderCmdk();
+  } else if (event.key === 'ArrowUp') {
+    event.preventDefault();
+    cmdkIndex = (cmdkIndex - 1 + cmdkFiltered.length) % Math.max(1, cmdkFiltered.length);
+    renderCmdk();
+  } else if (event.key === 'Enter') {
+    event.preventDefault();
+    runCmdk(cmdkIndex);
+  } else if (event.key === 'Escape') {
+    closeCmdk();
+  }
+}
+
+function lastAnswerText() {
+  const answers = chatContainer.querySelectorAll('.message.ai .answer, .message.ai .msg-bubble');
+  return answers.length ? answers[answers.length - 1].innerText : '';
+}
 
 // ══════════════════════════════════════════
-// COMPOSIO — рендер карточек и авторизации
+// СОСТОЯНИЕ ИИ И ПОИСКА (индикаторы)
+// ══════════════════════════════════════════
+async function refreshAiStatus() {
+  try {
+    const response = await fetch('/api/ai/status');
+    if (!response.ok) throw new Error('HTTP ' + response.status);
+    aiStatus = await response.json();
+  } catch (error) {
+    aiStatus = null;
+  }
+  paintStatus();
+}
+
+function paintStatus() {
+  const dot = document.getElementById('statusDot');
+  const text = document.getElementById('statusText');
+  const providerLabel = document.getElementById('display-provider');
+  if (!aiStatus) {
+    if (dot) dot.className = 'lg-dot warn';
+    if (text) text.textContent = 'AI Ассистент';
+    return;
+  }
+  const model = aiStatus.model || 'модель';
+  if (dot) dot.className = 'lg-dot ' + (aiStatus.offline ? 'warn' : 'ok') + ' pulse';
+  if (text) text.textContent = aiStatus.offline ? `Офлайн-модель · ${model}` : model;
+  if (providerLabel) providerLabel.textContent = `${aiStatus.provider_name || aiStatus.provider} · ${model}`;
+}
+
+async function checkHealth(notify = false) {
+  const dot = document.getElementById('searchHealthDot');
+  if (dot) dot.className = 'lg-dot';
+  try {
+    const response = await fetch('/api/search/health?refresh=1');
+    const data = await response.json();
+    if (dot) dot.className = 'lg-dot ' + (data.ok ? 'ok' : 'err');
+    if (notify) {
+      showNotification(data.ok
+        ? `Поиск работает: ${data.alive.join(', ')}`
+        : 'Поисковые бэкенды недоступны — проверьте интернет или SEARCH_BACKENDS в .env',
+        data.ok ? 'ok' : 'warn');
+    }
+    return data;
+  } catch (error) {
+    if (dot) dot.className = 'lg-dot err';
+    if (notify) showNotification('Не удалось проверить поиск: ' + error.message, 'warn');
+    return null;
+  }
+}
+
+// ══════════════════════════════════════════
+// COMPOSIO
 // ══════════════════════════════════════════
 const COMPOSIO_ICONS = {
-  github:'🐙', gmail:'📧', notion:'📝', slack:'💬',
-  googlecalendar:'📅', googledrive:'☁️', trello:'📋',
-  twitter:'🐦', discord:'🎮', jira:'🔵', linear:'⚡',
-  youtube:'▶️', shopify:'🛒', hubspot:'🟠', airtable:'🗃️',
-  dropbox:'📦', figma:'🎨', stripe:'💳', zoom:'📹', asana:'🎯'
+  github: '🐙', gmail: '📧', notion: '📝', slack: '💬', googlecalendar: '📅',
+  googledrive: '☁️', trello: '📋', twitter: '🐦', discord: '🎮', jira: '🔵',
+  linear: '⚡', youtube: '▶️', shopify: '🛒', hubspot: '🟠', airtable: '🗃️',
+  dropbox: '📦', figma: '🎨', stripe: '💳', zoom: '📹', asana: '🎯',
 };
 
 function renderComposioCards(cards) {
-  let grid = '';
-  cards.forEach(card => {
+  const grid = cards.map((card) => {
     const icon = COMPOSIO_ICONS[card.slug] || '🔗';
-    const border = card.connected ? '#10b981' : '#3730a3';
-    const statusColor = card.connected ? '#10b981' : '#6b7280';
+    const statusColor = card.connected ? 'var(--ok)' : 'var(--text-3)';
     const statusText = card.connected ? '✅ Подключено' : 'Нажми — подключить';
-    const dot = card.connected
-      ? '<div style="position:absolute;top:5px;right:5px;width:7px;height:7px;background:#10b981;border-radius:50%;"></div>'
-      : '';
-
-    grid += `
-      <div onclick="composioAuthFromChat('${card.slug}')"
-        style="position:relative;background:#0f0f1a;border:1px solid ${border};
-        border-radius:10px;padding:12px 8px;text-align:center;cursor:pointer;
-        transition:transform .2s;"
-        onmouseover="this.style.transform='translateY(-2px)'"
-        onmouseout="this.style.transform='translateY(0)'">
-        ${dot}
-        <div style="font-size:22px;margin-bottom:5px;">${icon}</div>
-        <div style="font-size:11px;font-weight:600;color:#e2e8f0;">${card.name}</div>
-        <div style="font-size:10px;margin-top:3px;color:${statusColor};">${statusText}</div>
+    return `
+      <div onclick="composioAuthFromChat('${card.slug}')" class="suggestion-card" style="text-align:center;cursor:pointer">
+        <div class="card-icon">${icon}</div>
+        <div class="card-title">${escapeHtml(card.name || card.slug)}</div>
+        <div class="card-desc" style="color:${statusColor}">${statusText}</div>
       </div>`;
-  });
+  }).join('');
 
   return `
-    <div style="font-weight:600;color:#a5b4fc;margin-bottom:10px;">
-      🧩 Интеграции Composio — нажми для подключения:
-    </div>
-    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(120px,1fr));gap:8px;">
-      ${grid}
-    </div>
-    <div style="margin-top:10px;font-size:11px;color:#6b7280;">
+    <div style="font-weight:700;margin-bottom:10px">🧩 Интеграции Composio — нажми для подключения:</div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(120px,1fr));gap:8px">${grid}</div>
+    <div style="margin-top:10px;font-size:11px;color:var(--text-4)">
       💡 После подключения используй <code>/composio accounts</code> для проверки
     </div>`;
 }
@@ -1663,51 +2083,76 @@ function renderComposioCards(cards) {
 function renderComposioAuth(toolkit, url) {
   const icon = COMPOSIO_ICONS[toolkit] || '🔗';
   return `
-    <div style="background:#1a1a2e;border:1px solid #3730a3;border-radius:12px;padding:16px;">
-      <div style="font-size:28px;margin-bottom:8px;">${icon}</div>
-      <div style="font-size:14px;font-weight:700;color:#a5b4fc;margin-bottom:6px;">
-        Подключить ${toolkit.toUpperCase()}
-      </div>
-      <div style="font-size:12px;color:#9ca3af;margin-bottom:14px;">
+    <div style="padding:4px 2px">
+      <div style="font-size:26px;margin-bottom:8px">${icon}</div>
+      <div style="font-size:14px;font-weight:700;margin-bottom:6px">Подключить ${escapeHtml(String(toolkit).toUpperCase())}</div>
+      <div style="font-size:12px;color:var(--text-2);margin-bottom:14px">
         Нажми кнопку ниже — откроется страница авторизации.<br>
         После входа вернись и введи <code>/composio accounts</code>
       </div>
-      <a href="${url}" target="_blank"
-        style="display:inline-block;background:linear-gradient(135deg,#4f46e5,#7c3aed);
-        color:#fff;padding:10px 20px;border-radius:9px;font-size:13px;
-        font-weight:600;text-decoration:none;">
-        🔐 Войти в ${toolkit.toUpperCase()} →
-      </a>
-      <div style="margin-top:10px;font-size:11px;color:#6b7280;">
-        После: <code>/composio tools ${toolkit}</code> или
-        <code>/composio do покажи данные из ${toolkit}</code>
+      <a class="media-download" href="${escapeHtml(url)}" target="_blank" rel="noopener">🔐 Войти →</a>
+      <div style="margin-top:10px;font-size:11px;color:var(--text-4)">
+        После: <code>/composio tools ${escapeHtml(toolkit)}</code>
       </div>
     </div>`;
 }
 
 function composioAuthFromChat(toolkit) {
-  hideWelcome();
-  appendMessage('user', `/composio auth ${toolkit}`);
-  showTyping();
-  fetch('/command', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({command: `/composio auth ${toolkit}`})
-  })
-  .then(r => r.json())
-  .then(data => {
-    removeTyping();
-    appendMessage('ai', data.result || data.error || 'Ошибка');
-  })
-  .catch(() => {
-    removeTyping();
-    appendMessage('ai', '❌ Ошибка соединения');
-  });
+  sendMessage(`/composio auth ${toolkit}`);
 }
 
-// ========== ИНИЦИАЛИЗАЦИЯ ==========
-input.focus();
-refreshMediaSelection();
+// ══════════════════════════════════════════
+// ГОРЯЧИЕ КЛАВИШИ
+// ══════════════════════════════════════════
 document.addEventListener('keydown', (event) => {
-  if (event.key === 'Escape') closeMediaPicker();
+  const key = event.key;
+  const mod = event.ctrlKey || event.metaKey;
+
+  if (mod && key.toLowerCase() === 'k') {
+    event.preventDefault();
+    openCmdk();
+    return;
+  }
+  if (key === 'Escape') {
+    closeMediaPicker();
+    closeCmdk();
+    document.getElementById('attachDropdown')?.classList.remove('open');
+    return;
+  }
+  if (mod && key === '/') {
+    event.preventDefault();
+    showNotification('Ctrl+K — команды · Enter — отправить · Shift+Enter — новая строка · Esc — закрыть', 'info');
+    return;
+  }
+  if (mod && key.toLowerCase() === 'b') {
+    event.preventDefault();
+    toggleSidebar();
+  }
 });
+
+// Клик вне меню «Прикрепить» закрывает его
+document.addEventListener('click', (event) => {
+  const dropdown = document.getElementById('attachDropdown');
+  if (!dropdown || !dropdown.classList.contains('open')) return;
+  if (!event.target.closest('#attachDropdown') && !event.target.closest('#btn-attach')) {
+    dropdown.classList.remove('open');
+  }
+});
+
+// ========== ИНИЦИАЛИЗАЦИЯ ==========
+(function init() {
+  setWebSearch(webSearchOn, true);
+  document.getElementById('btn-reasoning')?.classList.toggle('active', reasoningOn);
+  input.focus();
+  refreshMediaSelection();
+  refreshAiStatus();
+  checkHealth(false);
+  renderChatList();
+
+  window.addEventListener('online', () => {
+    showNotification('Соединение восстановлено', 'ok');
+    refreshAiStatus();
+    checkHealth(false);
+  });
+  window.addEventListener('offline', () => showNotification('Нет соединения с интернетом', 'warn'));
+})();

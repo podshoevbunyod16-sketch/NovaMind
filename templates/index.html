@@ -1,12 +1,18 @@
 <!DOCTYPE html>
-<html lang="ru">
+<html lang="ru" data-glass-theme="aurora">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
-  <title>AI Ассистент Khirad</title>
+  <meta name="theme-color" content="#070713" />
+  <title>NovaMind · Liquid Glass</title>
+  <link rel="stylesheet" href="/static/liquid-glass.css">
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
+
+<!-- Живой фон: зерно + виньетка поверх aurora-слоёв -->
+<div class="lg-grain" aria-hidden="true"></div>
+<div class="lg-vignette" aria-hidden="true"></div>
 
 <div class="app">
 
@@ -18,8 +24,10 @@
     <div class="sidebar-header">
       <div class="logo">
         <img src="/static/images/image.png" alt="NovaMind" class="logo-img">
+        <div>
           <div class="logo-text">Khirad</div>
           <div class="logo-sub">Assistant</div>
+        </div>
       </div>
       <button class="btn-new-chat" onclick="newChat()">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
@@ -54,30 +62,20 @@
       <div class="nav-label">Сервисы</div>
 
       <div class="nav-item" onclick="activateMode({prefix: '/services weather ', placeholder: 'Введите город для погоды...'}); closeSidebar();">
-        <span style="font-size:16px;">🌤️</span>
-        Погода
+        <span style="font-size:16px;">🌤️</span> Погода
       </div>
-
       <div class="nav-item" onclick="activateMode({prefix: '/services currency ', placeholder: 'Введите валюты (USD RUB)...'}); closeSidebar();">
-        <span style="font-size:16px;">💱</span>
-        Курс валют
+        <span style="font-size:16px;">💱</span> Курс валют
       </div>
-
       <div class="nav-item" onclick="activateMode({prefix: '/services wiki ', placeholder: 'Введите запрос для Википедии...'}); closeSidebar();">
-        <span style="font-size:16px;">📚</span>
-        Википедия
+        <span style="font-size:16px;">📚</span> Википедия
       </div>
-       
-
-
-
 
       <div style="display:flex;align-items:center;justify-content:space-between;margin-top:6px;">
         <div class="nav-label" style="margin:0;">История чатов</div>
         <button class="history-new-btn" type="button" onclick="startNewChat()" title="Новый чат">+ Новый</button>
       </div>
       <div id="historyContainer"></div>
-
     </div>
 
     <!-- ═══════════════ ФУТЕР БОКОВОЙ ПАНЕЛИ ═══════════════ -->
@@ -94,7 +92,7 @@
         <div class="user-avatar">👤</div>
         <div style="flex: 1;">
           <div class="user-name" id="display-nick">Пользователь</div>
-          <div class="user-plan">Базовый план</div>
+          <div class="user-plan" id="display-provider">Базовый план</div>
         </div>
         <button onclick="event.stopPropagation(); logout()" class="logout-btn">Выйти</button>
       </div>
@@ -107,11 +105,14 @@
 
     <!-- Top Bar -->
     <header class="topbar">
-      <button class="menu-btn" onclick="toggleSidebar()">
+      <button class="menu-btn" onclick="toggleSidebar()" aria-label="Меню">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
       </button>
 
-      <div class="topbar-title">AI Ассистент</div>
+      <div class="topbar-title">
+        <span class="lg-dot pulse" id="statusDot" title="Состояние ИИ-движка"></span>
+        <span id="statusText">AI Ассистент</span>
+      </div>
 
       <div class="topbar-actions">
 
@@ -121,10 +122,15 @@
           <span class="media-model-label" id="mediaModelLabel">Медиа</span>
         </button>
 
-        <button class="icon-btn" title="Настройки AI" onclick="openSettings()">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="14" cy="13" r="2"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-1.7 1.7-.06-.06a1.7 1.7 0 0 0-1.88-.34 1.7 1.7 0 0 0-1 1.55V20h-2.4v-.21a1.7 1.7 0 0 0-1-1.55 1.7 1.7 0 0 0-1.88.34l-.06.06-1.7-1.7.06-.06A1.7 1.7 0 0 0 8.6 15a1.7 1.7 0 0 0-1.55-1H6.8v-2.4h.25a1.7 1.7 0 0 0 1.55-1 1.7 1.7 0 0 0-.34-1.88L8.2 8.66l1.7-1.7.06.06a1.7 1.7 0 0 0 1.88.34 1.7 1.7 0 0 0 1-1.55V5.6h2.4v.21a1.7 1.7 0 0 0 1 1.55 1.7 1.7 0 0 0 1.88-.34l.06-.06 1.7 1.7-.06.06a1.7 1.7 0 0 0-.34 1.88 1.7 1.7 0 0 0 1.55 1h.21V14h-.21a1.7 1.7 0 0 0-1.55 1z"/></svg>
+        <button class="icon-btn" id="btnTheme" title="Сменить тему стекла" onclick="cycleTheme()">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 3a9 9 0 0 0 0 18z" fill="currentColor" stroke="none"/></svg>
         </button>
-        <button class="icon-btn" title="Очистить" onclick="clearChat()">
+
+        <button class="icon-btn" title="Настройки AI" onclick="openSettings()">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-1.7 1.7-.06-.06a1.7 1.7 0 0 0-1.88-.34 1.7 1.7 0 0 0-1 1.55V20h-2.4v-.21a1.7 1.7 0 0 0-1-1.55 1.7 1.7 0 0 0-1.88.34l-.06.06-1.7-1.7.06-.06A1.7 1.7 0 0 0 8.6 15a1.7 1.7 0 0 0-1.55-1H6.8v-2.4h.25a1.7 1.7 0 0 0 1.55-1 1.7 1.7 0 0 0-.34-1.88L8.2 8.66l1.7-1.7.06.06a1.7 1.7 0 0 0 1.88.34 1.7 1.7 0 0 0 1-1.55V5.6h2.4v.21a1.7 1.7 0 0 0 1 1.55 1.7 1.7 0 0 0 1.88-.34l.06-.06 1.7 1.7-.06.06a1.7 1.7 0 0 0-.34 1.88 1.7 1.7 0 0 0 1.55 1h.21V14h-.21a1.7 1.7 0 0 0-1.55 1z"/></svg>
+        </button>
+
+        <button class="icon-btn" title="Очистить чат" onclick="clearChat()">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4h6v2"/></svg>
         </button>
       </div>
@@ -152,10 +158,10 @@
             <div class="card-title">Курс валют</div>
             <div class="card-desc">Актуальные курсы валют</div>
           </div>
-          <div class="suggestion-card" onclick="activateMode({prefix: '/search ', placeholder: 'Введите поисковый запрос...'})">
+          <div class="suggestion-card" onclick="enableWebSearch()">
             <div class="card-icon">🔍</div>
             <div class="card-title">Поиск в интернете</div>
-            <div class="card-desc">Найти информацию через DuckDuckGo</div>
+            <div class="card-desc">Живой поиск с источниками под ответом</div>
           </div>
         </div>
       </div>
@@ -164,12 +170,13 @@
     <!-- Input Area -->
     <div class="input-area">
       <div class="input-toolbar">
-        <button class="toolbar-btn" id="btn-web-search" onclick="toggleWebSearch()">
+        <button class="toolbar-btn" id="btn-web-search" onclick="toggleWebSearch()" title="Живой поиск в интернете с источниками">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
           <span id="searchBtnText">Поиск в интернете</span>
+          <span class="lg-dot" id="searchHealthDot" title="Состояние поисковых бэкендов"></span>
         </button>
 
-        <button class="toolbar-btn" id="btn-reasoning" onclick="toggleReasoning()">
+        <button class="toolbar-btn" id="btn-reasoning" onclick="toggleReasoning()" title="Показывать ход рассуждений модели">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/><circle cx="12" cy="12" r="10"/></svg>
           <span id="reasoningBtnText">Рассуждение</span>
         </button>
@@ -191,7 +198,9 @@
           <button class="toolbar-btn" onclick="attachAudio()">🎧 Аудио</button>
           <button class="toolbar-btn" onclick="attachVideo()">🎬 Видео</button>
         </div>
+
         <button class="toolbar-btn" id="btn-media" onclick="openMediaPicker()">🎨 Медиа</button>
+        <button class="toolbar-btn" id="btn-calm" onclick="toggleCalmMotion()" title="Отключить фоновые анимации">✨ Анимации</button>
       </div>
 
       <div class="media-active" id="mediaActiveBar" hidden>
@@ -199,7 +208,6 @@
         <span class="media-active-text" id="mediaActiveText">Медиа-модель не выбрана</span>
         <button class="media-active-clear" type="button" onclick="clearMediaModel()" title="Вернуться к обычному чату">×</button>
       </div>
-
 
       <div class="input-wrapper">
         <textarea id="chat-input" placeholder="Напишите сообщение..." rows="1" onkeydown="handleKey(event)" oninput="autoResize(this); document.getElementById('sendBtn').disabled = !this.value.trim()"></textarea>
@@ -215,7 +223,7 @@
             <div class="voice-tooltip" id="voiceTooltip">Нажмите для записи</div>
           </button>
 
-          <button class="send-btn" id="sendBtn" onclick="sendMessage()">
+          <button class="send-btn" id="sendBtn" onclick="sendMessage()" title="Отправить (Enter)">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
               <line x1="22" y1="2" x2="11" y2="13"/>
               <polygon points="22 2 15 22 11 13 2 9 22 2"/>
@@ -224,11 +232,14 @@
         </div>
       </div>
 
-      <div class="input-footer">Khirad может ошибаться. Проверяйте важную информацию.</div>
+      <div class="input-footer">
+        Khirad может ошибаться. Проверяйте важную информацию · <b>Ctrl+K</b> — команды
+      </div>
     </div>
 
   </main>
 </div>
+
 <!-- ═══════════ ЕДИНАЯ ПАНЕЛЬ ВЫБОРА МЕДИА-МОДЕЛЕЙ ═══════════ -->
 <div class="media-modal" id="mediaPicker" aria-hidden="true" onclick="if(event.target===this)closeMediaPicker()">
   <div class="media-dialog media-picker" role="dialog" aria-label="Модели генерации медиа">
@@ -267,48 +278,18 @@
     </div>
   </div>
 </div>
-<script>
-  function openComposio() {
-      window.open('/composio', 'composio_window', 'width=1000,height=800');
-  }
-</script>
+
+<!-- ═══════════ КОМАНДНАЯ ПАНЕЛЬ (Ctrl+K) ═══════════ -->
+<div class="cmdk" id="cmdk" aria-hidden="true" onclick="if(event.target===this)closeCmdk()">
+  <div class="cmdk-panel" role="dialog" aria-label="Команды">
+    <input class="cmdk-input" id="cmdkInput" type="text" placeholder="Команда, режим или действие…"
+           oninput="filterCmdk()" onkeydown="cmdkKey(event)" autocomplete="off">
+    <div class="cmdk-list" id="cmdkList"></div>
+  </div>
+</div>
+
+<div class="lg-toast-stack" id="toastStack" aria-live="polite"></div>
+
 <script src="/static/app.js"></script>
-<!-- Google Sign-In -->
-<script src="https://accounts.google.com/gsi/client" async defer></script>
-<script>
-    const GOOGLE_CLIENT_ID = "{{ google_client_id }}";
-
-    window.onload = function() {
-        google.accounts.id.initialize({
-            client_id: GOOGLE_CLIENT_ID,
-            callback: handleGoogleResponse,
-            auto_select: false,
-            cancel_on_tap_outside: true
-        });
-
-        document.getElementById('googleSignInBtn').addEventListener('click', function() {
-            google.accounts.id.prompt();
-        });
-    };
-
-    function handleGoogleResponse(response) {
-        // Декодируем JWT-токен от Google
-        const payload = JSON.parse(atob(response.credential.split('.')[1]));
-
-        const nick = payload.name || payload.email.split('@')[0];
-        const email = payload.email;
-
-        // Сохраняем данные
-        localStorage.setItem('nova_user_nick', nick);
-        localStorage.setItem('nova_user_email', email);
-        localStorage.setItem('nova_user_avatar', payload.picture || '');
-        localStorage.setItem('nova_is_admin', 'false');
-        localStorage.setItem('nova_google_login', 'true');
-
-        // Перенаправляем в чат
-        window.location.href = '/chat';
-    }
-
-</script>
 </body>
 </html>

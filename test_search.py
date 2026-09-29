@@ -30,14 +30,28 @@ class TestFetchPageText(unittest.TestCase):
         self.assertEqual(len(tags), 0, f"Найдены HTML теги: {tags[:3]}")
 
 class TestSearchWeb(unittest.TestCase):
-    def test_duckduckgo_fallback(self):
-        # DuckDuckGo без ключа
+    def test_all_backends_are_tried_without_crash(self):
+        """search_web возвращает (results, trace): список результатов и отчёт
+        по каждому бэкенду. Без сети результаты пустые, но падения нет."""
         os.environ.pop("APILAYER_KEY", None)
         os.environ.pop("SERPER_KEY", None)
-        results, err = search_web("Python programming", num=3)
-        # Результаты могут быть пустыми без сети, но не должно падать
+        results, trace = search_web("Python programming", num=3)
+
         self.assertIsInstance(results, list)
-        self.assertIsInstance(err, (str, type(None)))
+        self.assertIsInstance(trace, list)
+        self.assertTrue(trace, "должен быть отчёт хотя бы по одному бэкенду")
+        for entry in trace:
+            self.assertEqual(
+                set(entry), {"backend", "ok", "count", "ms", "error"},
+                f"неполный отчёт бэкенда: {entry}")
+            self.assertIsInstance(entry["ok"], bool)
+            if entry["ok"]:
+                self.assertIsNone(entry["error"])
+                self.assertGreater(entry["count"], 0)
+        # Ключевые бэкенды без API-ключей обязаны быть в цепочке
+        backends = [entry["backend"] for entry in trace]
+        for expected in ("searxng", "ddg", "wiki"):
+            self.assertIn(expected, backends)
 
 if __name__ == "__main__":
     result = unittest.main(verbosity=2, exit=False)

@@ -41,8 +41,8 @@ function providerName(id) { return state.providers.find((item) => item.id === id
 function renderProviders() {
   $('providerGrid').innerHTML = state.providers.map((provider) => `
     <button class="provider-card ${provider.id === state.activeProvider ? 'active' : ''} ${provider.configured ? '' : 'disabled'}" data-provider="${escapeHtml(provider.id)}" type="button">
-      <span class="provider-mark">${provider.id === 'openrouter' ? '◈' : provider.id === 'groq' ? 'G' : provider.id === 'cerebras' ? 'C' : provider.id === 'google_ai_studio' ? '✦' : provider.id === 'pollinations' ? '✺' : '⌘'}</span>
-      <span class="provider-copy"><strong>${escapeHtml(provider.name)}</strong><small>${provider.id === 'openai_compatible' ? 'Локальный endpoint · API ключ не обязателен' : (provider.configured ? 'Ключ найден · каталог доступен' : 'Нет ключа в .env')}</small></span>
+      <span class="provider-mark">${provider.id === 'openrouter' ? '◈' : provider.id === 'groq' ? 'G' : provider.id === 'cerebras' ? 'C' : provider.id === 'google_ai_studio' ? '✦' : provider.id === 'pollinations' ? '✺' : provider.id === 'local_demo' ? '◉' : '⌘'}</span>
+      <span class="provider-copy"><strong>${escapeHtml(provider.name)}</strong><small>${escapeHtml(provider.hint || (provider.configured ? 'Ключ найден · каталог доступен' : 'Нет ключа в .env'))}</small></span>
       <span class="provider-state ${provider.configured ? 'ok' : ''}">${provider.configured ? '●' : '○'}</span>
     </button>`).join('') || '<div class="empty-card">Провайдеры не найдены</div>';
   document.querySelectorAll('.provider-card').forEach((button) => button.addEventListener('click', () => {
@@ -215,3 +215,47 @@ function initMediaCatalog() {
 }
 if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', initMediaCatalog);
 else initMediaCatalog();
+
+/* ========== ТЕМА СТЕКЛА ========== */
+const GLASS_THEMES = ['aurora', 'midnight', 'sunset', 'light'];
+function applyGlassTheme(theme) {
+  document.documentElement.setAttribute('data-glass-theme', theme);
+  localStorage.setItem('nova_theme', theme);
+}
+function cycleGlassTheme() {
+  const current = document.documentElement.getAttribute('data-glass-theme') || 'aurora';
+  applyGlassTheme(GLASS_THEMES[(GLASS_THEMES.indexOf(current) + 1) % GLASS_THEMES.length]);
+}
+applyGlassTheme(localStorage.getItem('nova_theme') || 'aurora');
+$('themeBtn')?.addEventListener('click', cycleGlassTheme);
+
+/* ========== ДИАГНОСТИКА ПОИСКА ========== */
+async function loadSearchHealth(force = false) {
+  const grid = $('healthGrid');
+  const status = $('healthStatus');
+  if (!grid) return;
+  status.textContent = 'Проверяю поисковые бэкенды…';
+  grid.innerHTML = '<div class="empty-card loading-card">Опрашиваю SearXNG, DuckDuckGo, Википедию…</div>';
+  try {
+    const response = await fetch('/api/search/health' + (force ? '?refresh=1' : ''));
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || ('HTTP ' + response.status));
+    const alive = (data.alive || []).length;
+    status.textContent = data.ok
+      ? `Поиск работает: доступно ${alive} из ${data.backends.length} бэкендов`
+      : 'Ни один поисковый бэкенд не ответил. Проверьте интернет или задайте SEARCH_BACKENDS / SEARXNG_INSTANCES в .env';
+    grid.innerHTML = (data.backends || []).map((item) => `
+      <div class="health-item">
+        <div>
+          <strong>${escapeHtml(item.backend)}</strong>
+          <small>${item.ok ? `${item.count} результатов · ${item.ms} мс` : escapeHtml(item.error || 'нет ответа')}</small>
+        </div>
+        <span class="lg-dot ${item.ok ? 'ok' : 'err'}"></span>
+      </div>`).join('') || '<div class="empty-card">Бэкенды не настроены</div>';
+  } catch (error) {
+    status.textContent = error.message;
+    grid.innerHTML = `<div class="empty-card error-card">${escapeHtml(error.message)}</div>`;
+  }
+}
+$('refreshHealth')?.addEventListener('click', () => loadSearchHealth(true));
+loadSearchHealth(false);

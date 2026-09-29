@@ -186,6 +186,275 @@ def groq_request_with_rotation(url, payload, headers, timeout=90, max_retries=3)
     return None, "Все Groq ключи исчерпаны или недоступны"
 
 
+# ══════════════════════════════════════════════════════════════════
+# ЕДИНЫЙ СЛОЙ ДОСТУПА К МОДЕЛЯМ
+# Один вход для всех провайдеров: cloud, локальный llama-server и
+# встроенная офлайн-модель. Раньше каждый маршрут дёргал transport
+# вручную и ломался на Gemini (в URL провайдера плейсхолдер {model}).
+# ══════════════════════════════════════════════════════════════════
+
+REASONING_MODELS_HINT = ("gpt-oss", "deepseek-r1", "qwen-3", "glm-4.5", "o1", "o3")
+
+
+def provider_headers(provider: str) -> dict:
+    """Заголовки для провайдера (ключ подставляется на сервере, не в браузере)."""
+    import config
+    headers = dict(PROVIDERS_HEADERS.get(provider) or config.PROVIDERS.get(provider, {}).get("headers") or {})
+    if provider == "groq":
+        key = get_groq_key()
+        if key:
+            headers["Authorization"] = f"Bearer {key}"
+    headers.setdefault("Content-Type", "application/json")
+    return headers
+
+
+# Заголовки из config.PROVIDERS собираются один раз, но ключ Groq — всегда свежий.
+PROVIDERS_HEADERS: dict = {}
+
+
+def supports_reasoning(model: str) -> bool:
+    model_id = str(model or "").lower()
+    return any(hint in model_id for hint in REASONING_MODELS_HINT)
+
+
+def resolve_target(provider: str = None, model: str = None):
+    """(provider, model, provider_cfg) — с откатом на рабочий провайдер."""
+    import config
+    provider = provider or config.current_provider
+    model = model or config.current_model
+    cfg = config.PROVIDERS.get(provider) or config.PROVIDERS["local_demo"]
+    if not config.has_credentials(provider):
+        fallback = config.first_available_provider()
+        if fallback != provider:
+            models = config.PROVIDERS.get(fallback, {}).get("models") or []
+            return fallback, (models[0]["id"] if models else "nova-local-1"), config.PROVIDERS[fallback]
+    return provider, model, cfg
+
+
+def chat_completion(messages, provider=None, model=None, system=None,
+                    temperature=0.7, max_tokens=None, timeout=90, extra=None):
+    """
+    Синхронный запрос к текущей модели.
+    Возвращает (text, meta) или (None, error_string).
+    """
+    provider, model, cfg = resolve_target(provider, model)
+
+    if provider == "local_demo":
+        import local_llm
+        payload_messages = ([{"role": "system", "content": system}] if system else []) + list(messages or [])
+        text = local_llm.complete(payload_messages)
+        return text, {"provider": provider, "model": local_llm.MODEL_ID,
+                      "model_name": local_llm.MODEL_NAME, "offline": True}
+
+    payload = {
+        "model": model,
+        "messages": ([{"role": "system", "content": system}] if system else []) + list(messages or []),
+        "temperature": temperature,
+        "max_tokens": int(max_tokens or cfg.get("max_tokens", 8192)),
+    }
+    if extra:
+        payload.update(extra)
+
+    if provider == "google_ai_studio":
+        data, error = gemini_request(model, payload, timeout=timeout)
+    elif provider == "groq":
+        data, error = groq_request_with_rotation(cfg["url"], payload, provider_headers("groq"), timeout=timeout)
+    else:
+        data, error = openai_compatible_request(
+            cfg["url"], payload, provider_headers(provider), timeout=timeout
+        )
+
+    if error:
+        return None, error
+    try:
+        text = (data.get("choices") or [{}])[0].get("message", {}).get("content") or ""
+    except (AttributeError, IndexError, TypeError):
+        return None, "Провайдер вернул ответ в неожиданном формате"
+    if not text.strip():
+        return None, "Провайдер вернул пустой ответ"
+    return text, {"provider": provider, "model": model, "offline": False}
+
+
+def chat_stream(messages, provider=None, model=None, system=None, temperature=0.7,
+                max_tokens=None, timeout=90, reasoning=False, reasoning_effort="medium"):
+    """
+    Потоковый ответ. Генератор кортежей (kind, text), где kind:
+      "reasoning" — ход мыслей модели (если провайдер его отдаёт),
+      "token"     — текст ответа,
+      "error"     — ошибка (текст),
+      "done"      — конец потока.
+
+    Если модель не умеет отдавать рассуждения, а режим включён — сначала
+    выполняется короткий «план рассуждений», затем основной ответ.
+    """
+    provider, model, cfg = resolve_target(provider, model)
+    want_reasoning = bool(reasoning)
+
+    if provider == "local_demo":
+        import local_llm
+        payload_messages = ([{"role": "system", "content": system}] if system else []) + list(messages or [])
+        for kind, chunk in local_llm.stream(payload_messages, reasoning=want_reasoning):
+            yield kind, chunk
+        yield "done", ""
+        return
+
+    payload = {
+        "model": model,
+        "messages": ([{"role": "system", "content": system}] if system else []) + list(messages or []),
+        "temperature": temperature,
+        "max_tokens": int(max_tokens or cfg.get("max_tokens", 8192)),
+        "stream": True,
+    }
+    # Groq отдаёт reasoning только для gpt-oss; остальным такой параметр не шлём,
+    # иначе часть провайдеров отвечает 400 на неизвестное поле.
+    if want_reasoning and provider == "groq" and supports_reasoning(model):
+        payload["reasoning"] = {"effort": reasoning_effort}
+
+    # Предварительный «план рассуждений» для моделей без нативного reasoning.
+    prepass_needed = want_reasoning and not (provider == "groq" and supports_reasoning(model))
+    produced_reasoning = False
+
+    if prepass_needed:
+        plan_messages = list(messages or []) + [{
+            "role": "user",
+            "content": (
+                "Перед ответом кратко (3-6 пунктов) распиши ход рассуждений: "
+                "что важно учесть, какие есть варианты, что проверить. Без вступлений."
+            ),
+        }]
+        plan_payload = dict(payload)
+        plan_payload["messages"] = ([{"role": "system", "content": system}] if system else []) + plan_messages
+        plan_payload["max_tokens"] = 400
+        plan_payload["temperature"] = 0.4
+        for kind, chunk in _raw_stream(provider, model, plan_payload, cfg, timeout):
+            if kind == "token":
+                produced_reasoning = True
+                yield "reasoning", chunk
+            elif kind == "error":
+                # План не получился — не роняем основной ответ.
+                print(f"[reasoning prepass] {chunk}")
+                break
+
+    for kind, chunk in _raw_stream(provider, model, payload, cfg, timeout):
+        if kind == "reasoning":
+            produced_reasoning = True
+        yield kind, chunk
+
+    if want_reasoning and not produced_reasoning:
+        yield "reasoning", (
+            "Модель не передала внутренний ход рассуждений — "
+            "сразу сформировала ответ. Включите модель с поддержкой reasoning "
+            "(например, gpt-oss-120b), чтобы видеть развёрнутую цепочку мыслей."
+        )
+    yield "done", ""
+
+
+def _raw_stream(provider, model, payload, cfg, timeout):
+    """Низкоуровневый поток токенов конкретного провайдера."""
+    if provider == "google_ai_studio":
+        upstream, error = gemini_stream_request(model, payload, timeout=timeout)
+        if upstream is None:
+            data, fallback_error = gemini_request(model, payload, timeout=timeout)
+            if fallback_error:
+                yield "error", f"{error}. Fallback: {fallback_error}"
+                return
+            text = ((data.get("choices") or [{}])[0].get("message") or {}).get("content", "")
+            if text:
+                yield "token", text
+            return
+        try:
+            for raw in upstream.iter_lines(decode_unicode=True):
+                if not raw:
+                    continue
+                line = raw.strip()
+                if line.startswith("data:"):
+                    line = line[5:].strip()
+                if line == "[DONE]":
+                    break
+                try:
+                    chunk = json.loads(line)
+                except (TypeError, ValueError):
+                    continue
+                for candidate in chunk.get("candidates", []):
+                    for part in (candidate.get("content") or {}).get("parts", []):
+                        if part.get("thought"):
+                            if part.get("text"):
+                                yield "reasoning", part["text"]
+                            continue
+                        if part.get("text"):
+                            yield "token", part["text"]
+        finally:
+            upstream.close()
+        return
+
+    headers = provider_headers(provider)
+    if provider == "groq":
+        attempts = max(1, min(len(GROQ_KEYS_LIST()), 4))
+    else:
+        attempts = 1
+
+    last_error = None
+    for _ in range(attempts):
+        try:
+            response = requests.post(cfg["url"], json=payload, headers=headers, timeout=timeout, stream=True)
+        except requests.exceptions.RequestException as exc:
+            last_error = str(exc)
+            if provider == "groq":
+                mark_groq_key_exhausted()
+                headers = provider_headers("groq")
+            continue
+
+        if response.status_code in (401, 429) and provider == "groq":
+            last_error = f"Groq HTTP {response.status_code}"
+            mark_groq_key_exhausted(permanent=response.status_code == 401)
+            response.close()
+            headers = provider_headers("groq")
+            continue
+
+        if response.status_code >= 400:
+            detail = (response.text or "")[:600]
+            response.close()
+            last_error = f"HTTP {response.status_code}: {detail}"
+            if provider == "groq":
+                mark_groq_key_exhausted()
+                headers = provider_headers("groq")
+                continue
+            break
+
+        response.encoding = "utf-8"
+        try:
+            for raw in response.iter_lines(decode_unicode=True):
+                if not raw:
+                    continue
+                line = raw.strip()
+                if line.startswith("data:"):
+                    line = line[5:].strip()
+                if line == "[DONE]":
+                    break
+                try:
+                    chunk = json.loads(line)
+                except (TypeError, ValueError):
+                    continue
+                choice = (chunk.get("choices") or [{}])[0]
+                delta = choice.get("delta") or {}
+                thought = delta.get("reasoning") or delta.get("reasoning_content") or ""
+                if thought:
+                    yield "reasoning", thought
+                token = delta.get("content") or choice.get("text") or ""
+                if token:
+                    yield "token", token
+        finally:
+            response.close()
+        return
+
+    yield "error", last_error or "Не удалось получить поток от провайдера"
+
+
+def GROQ_KEYS_LIST():
+    from groq_rotation import GROQ_KEYS
+    return GROQ_KEYS
+
+
 import re
 
 # ---------- Метки провайдеров ----------
@@ -197,6 +466,7 @@ PROVIDER_LABELS = {
     "google_ai_studio": "Google AI Studio",
     "openai_compatible":"OpenAI-compatible / Local",
     "pollinations":       "Pollinations.ai",
+    "local_demo":         "Локальная демо-модель (офлайн)",
 }
 
 # ---------- Вспомогательные функции моделей ----------
@@ -289,22 +559,27 @@ def _local_model_fallback():
     ]
 
 def _local_catalog_urls():
-    """Возвращает возможные /models endpoints для llama-server и совместимых API."""
+    """Возвращает /models endpoints для llama-server и совместимых API.
+
+    FIX: раньше к базе вида http://host:8080/v1 добавлялся ещё и суффикс
+    /v1/models, из-за чего каталог искался по несуществующему /v1/v1/models.
+    """
+    from config import PROVIDERS
     configured = (
-        os.getenv("OPENAI_COMPATIBLE_URL")
+        PROVIDERS.get("openai_compatible", {}).get("url")
+        or os.getenv("OPENAI_COMPATIBLE_URL")
         or os.getenv("OPENAI_BASE_URL")
         or "http://127.0.0.1:8080/v1"
-    ).rstrip("/")
-    candidates = []
-    for suffix in ("/models", "/v1/models"):
-        if configured.endswith("/chat/completions"):
-            base = configured[:-len("/chat/completions")].rstrip("/")
-            candidates.append(base + suffix if suffix != "/models" else base + "/models")
-        elif configured.endswith("/models"):
-            candidates.append(configured)
-        else:
-            candidates.append(configured + suffix)
-    # Deduplicate while preserving order.
+    )
+    base = configured.rstrip("/")
+    if base.endswith("/chat/completions"):
+        base = base[: -len("/chat/completions")].rstrip("/")
+    if base.endswith("/models"):
+        base = base[: -len("/models")].rstrip("/")
+
+    candidates = [base + "/models"]
+    if not base.endswith("/v1"):
+        candidates.append(base + "/v1/models")
     return list(dict.fromkeys(candidates))
 
 def fetch_available_models(provider, force=False):
@@ -330,6 +605,12 @@ def fetch_available_models(provider, force=False):
         # llama-server, Ollama, LM Studio, vLLM, LocalAI и другие
         # OpenAI-compatible runtimes обычно отдают каталог через /v1/models.
         urls = _local_catalog_urls()
+    elif provider == "local_demo":
+        import local_llm
+        models = local_llm.models_catalog()
+        MODEL_CACHE[provider] = models
+        MODEL_ERRORS.pop(provider, None)
+        return models
     else:
         return [normalize_model(m, provider) for m in PROVIDERS[provider]["models"]]
 
@@ -419,12 +700,6 @@ def media_models_catalog(media_type="all", provider="all", force=False):
 
 
 def provider_status():
-    from groq_rotation import GROQ_KEYS
-    return {
-        "groq":             bool(GROQ_KEYS),
-        "cerebras":         bool(os.getenv("CEREBRAS_API_KEY")),
-        "openrouter":       bool(os.getenv("OPENROUTER_API_KEY")),
-        "google_ai_studio": bool(os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_AI_STUDIO_KEY")),
-        "pollinations":     bool(os.getenv("POLLINATIONS_API_KEY") or os.getenv("POLLINATIONS_KEY") or os.getenv("POLLINATIONS_TOKEN")),
-        "openai_compatible": True,
-    }
+    """Какие провайдеры реально подключены (есть ключ или ключ не нужен)."""
+    from config import PROVIDERS, has_credentials
+    return {provider: has_credentials(provider) for provider in PROVIDERS}

@@ -1,22 +1,33 @@
 """
-routes/search.py — Веб-поиск с реальными результатами.
-Приоритет: Groq compound-beta → SearXNG → DDG HTML → AI из знаний
+routes/search.py — Веб-поиск с реальными результатами и живым стримом шагов.
+
+Порядок бэкендов (настраивается через SEARCH_BACKENDS в .env):
+  apilayer → serper → searxng → ddg → ddg_lite → wiki
+
+Ключевые отличия от прошлой версии:
+  * нет привязки к Groq: ответы генерирует единый слой ai_providers.chat_*;
+  * поток событий — NDJSON, чтобы фронт показывал сцену поиска, шаги,
+    найденные источники и печатающийся ответ;
+  * каждый бэкенд логируется (время, ошибка) → /api/search/health.
 """
-from flask import Blueprint, request, jsonify, session, Response
-import requests
+from flask import Blueprint, request, jsonify, Response, stream_with_context
 import json
 import os
 import re
 import time
+import threading
+from urllib.parse import urlparse, quote_plus
 
-from ai_providers import groq_request_with_rotation
-from groq_rotation import get_groq_key, GROQ_KEYS
+import requests
+
 import config
+import local_llm
+from ai_providers import chat_completion, chat_stream, resolve_target, PROVIDER_LABELS
 
 search_bp = Blueprint("search", __name__)
 
-APILAYER_KEY = os.getenv("APILAYER_KEY", "")
-SERPER_KEY   = os.getenv("SERPER_KEY", "")
+APILAYER_KEY = os.getenv("APILAYER_KEY", "").strip()
+SERPER_KEY = os.getenv("SERPER_KEY", "").strip()
 
 _HEADERS = {
     "User-Agent": "Mozilla/5.0 (Linux; Android 12; Pixel 6) AppleWebKit/537.36 "
@@ -25,551 +36,727 @@ _HEADERS = {
     "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
 }
 
-# ═══ Groq compound-beta — встроенный поиск (бесплатно!) ═══
-
-def provider_web_search(query, max_tokens=8192):
-    """
-    Использует Groq compound-beta-mini с встроенным web search.
-    Возвращает (answer, sources_list) или (None, error).
-    """
-    key = get_groq_key()
-    if not key:
-        return None, "Нет Groq ключа"
-    try:
-        resp = requests.post(
-            "https://api.groq.com/openai/v1/chat/completions",
-            headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
-            json={
-                "model": "compound-beta-mini",
-                "messages": [
-                    {
-                        "role": "system",
-                        "content": (
-                            "Ты — поисковый ассистент. Отвечай ПОДРОБНО на русском языке. "
-                            "Давай конкретные цифры, факты, источники. "
-                            "Если вопрос о ценах — указывай диапазон, год выпуска, состояние авто. "
-                            "Структурируй ответ: заголовки, списки, конкретные данные. "
-                            "В конце всегда перечисляй источники."
-                        )
-                    },
-                    {"role": "user", "content": query}
-                ],
-                "max_tokens": min(max_tokens, 8192),
-                "temperature": 0.3,
-                "tools": [{"type": "web_search_preview"}],
-            },
-            timeout=40
-        )
-        if resp.status_code == 200:
-            data = resp.json()
-            choice = data.get("choices", [{}])[0]
-            answer = choice.get("message", {}).get("content", "")
-            # Собираем источники из tool_calls если есть
-            sources = []
-            for msg in data.get("choices", [{}])[0].get("message", {}).get("tool_calls", []):
-                if isinstance(msg, dict):
-                    inp = msg.get("function", {}).get("arguments", "{}")
-                    try:
-                        args = json.loads(inp)
-                        if args.get("url"):
-                            sources.append({"title": args.get("query", ""), "url": args["url"]})
-                    except Exception:
-                        pass
-            return answer, sources
-        elif resp.status_code == 422:
-            # compound-beta не поддерживается для этого ключа
-            return None, f"compound-beta недоступен: {resp.status_code}"
-        else:
-            return None, f"Groq compound error: {resp.status_code} {resp.text[:100]}"
-    except Exception as e:
-        return None, str(e)
-
-def pollinations_web_search(query, max_tokens=8192):
-    """Web-search через Pollinations-модель с заявленной capability web_search."""
-    provider = config.PROVIDERS.get("pollinations")
-    key = (os.getenv("POLLINATIONS_API_KEY")
-           or os.getenv("POLLINATIONS_KEY")
-           or os.getenv("POLLINATIONS_TOKEN") or "").strip()
-    if not provider or not key:
-        return None, "Pollinations: API key не настроен"
-    model = config.current_model
-    try:
-        resp = requests.post(
-            provider["url"],
-            headers={
-                "Authorization": f"Bearer {key}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": model,
-                "messages": [
-                    {"role": "system", "content":
-                     "Ты поисковый ассистент NovaMind. Отвечай подробно на русском, "
-                     "используй web search и указывай источники."},
-                    {"role": "user", "content": query},
-                ],
-                "max_tokens": min(int(max_tokens), 32768),
-                "temperature": 0.2,
-                "tools": [{"type": "web_search_preview"}],
-            },
-            timeout=60,
-        )
-        if resp.status_code >= 400:
-            return None, f"Pollinations web search HTTP {resp.status_code}: {resp.text[:500]}"
-        data = resp.json()
-        choice = (data.get("choices") or [{}])[0]
-        answer = (choice.get("message") or {}).get("content") or ""
-        sources = []
-        for tool_call in (choice.get("message") or {}).get("tool_calls") or []:
-            if not isinstance(tool_call, dict):
-                continue
-            args = (tool_call.get("function") or {}).get("arguments") or "{}"
-            try:
-                parsed = json.loads(args)
-                if parsed.get("url"):
-                    sources.append({"title": parsed.get("query") or parsed["url"], "url": parsed["url"]})
-            except (TypeError, ValueError):
-                continue
-        return answer, sources
-    except (requests.RequestException, ValueError, TypeError) as exc:
-        return None, f"Pollinations web search: {exc}"
-
-
-def provider_web_search(query, max_tokens=8192):
-    if config.current_provider == "pollinations":
-        return pollinations_web_search(query, max_tokens=max_tokens)
-    return groq_web_search(query, max_tokens=max_tokens)
-
-
-# ═══ SearXNG — поиск без ключа ═══
+DEFAULT_BACKENDS = ["apilayer", "serper", "searxng", "ddg", "ddg_lite", "wiki"]
 
 SEARXNG_INSTANCES = [
-    "https://searx.be",
-    "https://search.inetol.net",
-    "https://searxng.site",
-    "https://search.mdosch.de",
-    "https://priv.au",
-    "https://search.ononoki.org",
+    item.strip()
+    for item in os.getenv(
+        "SEARXNG_INSTANCES",
+        "https://searx.be,https://search.inetol.net,https://searxng.site,"
+        "https://search.mdosch.de,https://priv.au,https://search.ononoki.org,"
+        "https://baresearch.org,https://search.rhscz.eu",
+    ).split(",")
+    if item.strip()
 ]
 
-def searxng_search(query, num=8):
-    """Пробует несколько SearXNG инстансов по очереди."""
-    for inst in SEARXNG_INSTANCES:
+SEARCH_TIMEOUT = float(os.getenv("SEARCH_TIMEOUT", "9"))
+READER_TIMEOUT = float(os.getenv("READER_TIMEOUT", "14"))
+
+
+def search_backends():
+    configured = os.getenv("SEARCH_BACKENDS", "").strip()
+    if not configured:
+        return list(DEFAULT_BACKENDS)
+    return [name.strip() for name in configured.split(",") if name.strip()]
+
+
+# ══════════════════════════════════════════════════════════════════
+# БЭКЕНДЫ ПОИСКА
+# ══════════════════════════════════════════════════════════════════
+
+def _norm_result(title, url, snippet=""):
+    return {
+        "title": (title or "").strip()[:220],
+        "url": (url or "").strip(),
+        "snippet": (snippet or "").strip()[:600],
+        "host": urlparse(url or "").netloc,
+    }
+
+
+def search_web_apilayer(query, num=8):
+    if not APILAYER_KEY:
+        return [], "нет ключа APILAYER_KEY"
+    resp = requests.get(
+        "https://api.apilayer.com/google_search",
+        headers={"apikey": APILAYER_KEY},
+        params={"q": query, "hl": "ru", "gl": "ru", "num": num},
+        timeout=SEARCH_TIMEOUT,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    results = []
+    box = (data.get("answer_box") or {}).get("snippet")
+    if box:
+        results.append({**_norm_result("Быстрый ответ", (data.get("answer_box") or {}).get("link", ""), box),
+                        "quick": True})
+    for item in (data.get("organic_results") or [])[:num]:
+        results.append(_norm_result(item.get("title"), item.get("link"), item.get("snippet")))
+    return [r for r in results if r["title"]], None
+
+
+def search_web_serper(query, num=8):
+    if not SERPER_KEY:
+        return [], "нет ключа SERPER_KEY"
+    resp = requests.post(
+        "https://google.serper.dev/search",
+        headers={"X-API-KEY": SERPER_KEY, "Content-Type": "application/json"},
+        json={"q": query, "num": num, "gl": "ru", "hl": "ru"},
+        timeout=SEARCH_TIMEOUT,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    results = []
+    box = (data.get("answerBox") or {}).get("snippet")
+    if box:
+        results.append({**_norm_result("Быстрый ответ", (data.get("answerBox") or {}).get("link", ""), box),
+                        "quick": True})
+    for item in (data.get("organic") or [])[:num]:
+        results.append(_norm_result(item.get("title"), item.get("link"), item.get("snippet")))
+    return [r for r in results if r["title"]], None
+
+
+def search_web_searxng(query, num=8):
+    last_error = "нет доступных инстансов"
+    for instance in SEARXNG_INSTANCES:
         try:
             resp = requests.get(
-                f"{inst}/search",
+                f"{instance.rstrip('/')}/search",
                 params={"q": query, "format": "json", "language": "ru-RU",
-                        "time_range": "", "categories": "general", "pageno": 1},
+                        "categories": "general", "pageno": 1},
                 headers={**_HEADERS, "Accept": "application/json"},
-                timeout=8
+                timeout=SEARCH_TIMEOUT,
             )
-            if resp.status_code == 200:
-                try:
-                    data = resp.json()
-                    results = data.get("results", [])
-                    if results:
-                        return [
-                            {
-                                "title": r.get("title", ""),
-                                "snippet": r.get("content", r.get("snippet", ""))[:500],
-                                "url": r.get("url", ""),
-                            }
-                            for r in results[:num] if r.get("title")
-                        ], None
-                except Exception:
-                    continue
-        except Exception:
+        except requests.RequestException as exc:
+            last_error = f"{instance}: {exc.__class__.__name__}"
             continue
-    return [], "SearXNG: все инстансы недоступны"
-
-# ═══ DuckDuckGo HTML ═══
-
-def ddg_html_search(query, num=6):
-    """DuckDuckGo через HTML без API."""
-    try:
-        resp = requests.post(
-            "https://html.duckduckgo.com/html/",
-            data={"q": query, "kl": "ru-ru"},
-            headers=_HEADERS,
-            timeout=10,
-            allow_redirects=True
-        )
         if resp.status_code != 200:
-            return [], f"DDG HTTP {resp.status_code}"
-        html = resp.text
-        results = []
-        # Парсим заголовки
-        titles  = re.findall(r'class="result__a"[^>]*href="([^"]+)"[^>]*>([^<]+)', html)
-        snippets = re.findall(r'class="result__snippet"[^>]*>(.*?)</a>', html, re.DOTALL)
-        clean_snip = [re.sub(r'<[^>]+>', '', s).strip() for s in snippets]
-        for i, (url, title) in enumerate(titles[:num]):
-            results.append({
-                "title": title.strip(),
-                "snippet": clean_snip[i] if i < len(clean_snip) else "",
-                "url": url,
-            })
-        return results, None if results else "DDG: пустой ответ"
-    except Exception as e:
-        return [], f"DDG error: {e}"
+            last_error = f"{instance}: HTTP {resp.status_code}"
+            continue
+        try:
+            data = resp.json()
+        except ValueError:
+            last_error = f"{instance}: ответ не JSON"
+            continue
+        results = [_norm_result(r.get("title"), r.get("url"),
+                                r.get("content") or r.get("snippet") or "")
+                   for r in (data.get("results") or [])[:num]]
+        results = [r for r in results if r["title"] and r["url"]]
+        if results:
+            return results, None
+        last_error = f"{instance}: пустая выдача"
+    return [], last_error
 
-# ═══ APILayer / Serper ═══
 
-def search_web_apilayer(query, num=6):
-    try:
-        resp = requests.get(
-            "https://api.apilayer.com/google_search",
-            headers={"apikey": APILAYER_KEY},
-            params={"q": query, "hl": "ru", "gl": "ru", "num": num},
-            timeout=15
+def search_web_ddg(query, num=8):
+    resp = requests.post(
+        "https://html.duckduckgo.com/html/",
+        data={"q": query, "kl": "ru-ru"},
+        headers=_HEADERS,
+        timeout=SEARCH_TIMEOUT,
+        allow_redirects=True,
+    )
+    if resp.status_code != 200:
+        return [], f"DDG HTTP {resp.status_code}"
+    return _parse_ddg(resp.text, num)
+
+
+def search_web_ddg_lite(query, num=8):
+    resp = requests.post(
+        "https://lite.duckduckgo.com/lite/",
+        data={"q": query, "kl": "ru-ru"},
+        headers=_HEADERS,
+        timeout=SEARCH_TIMEOUT,
+        allow_redirects=True,
+    )
+    if resp.status_code != 200:
+        return [], f"DDG Lite HTTP {resp.status_code}"
+    return _parse_ddg(resp.text, num)
+
+
+def _parse_ddg(html, num=8):
+    """Общий парсер HTML-выдачи DuckDuckGo (html и lite версии)."""
+    links = re.findall(
+        r'<a[^>]+class="[^"]*result-link[^"]*"[^>]+href="([^"]+)"[^>]*>(.*?)</a>',
+        html, re.DOTALL | re.IGNORECASE,
+    )
+    if not links:
+        links = re.findall(
+            r'<a[^>]+rel="nofollow"[^>]+href="([^"]+)"[^>]*>(.*?)</a>',
+            html, re.DOTALL | re.IGNORECASE,
         )
-        resp.raise_for_status()
-        data = resp.json()
-        results = []
-        if data.get("answer_box", {}).get("snippet"):
-            box = data["answer_box"]
-            results.append({"title": "Быстрый ответ", "snippet": box.get("snippet",""),
-                             "url": box.get("link",""), "quick": True})
-        for item in data.get("organic_results", [])[:num]:
-            results.append({"title": item.get("title",""), "snippet": item.get("snippet",""),
-                             "url": item.get("link","")})
-        return results, None
-    except Exception as e:
-        return [], str(e)
+    snippets = re.findall(r'class="[^"]*result-snippet[^"]*"[^>]*>(.*?)</(?:a|td|div)>',
+                          html, re.DOTALL | re.IGNORECASE)
+    clean_snippets = [re.sub(r"<[^>]+>", "", s).strip() for s in snippets]
 
-def search_web_serper(query, num=6):
-    try:
-        resp = requests.post(
-            "https://google.serper.dev/search",
-            headers={"X-API-KEY": SERPER_KEY, "Content-Type": "application/json"},
-            json={"q": query, "num": num, "gl": "ru", "hl": "ru"},
-            timeout=15
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        results = []
-        if data.get("answerBox", {}).get("snippet"):
-            box = data["answerBox"]
-            results.append({"title": "Быстрый ответ", "snippet": box.get("snippet",""),
-                             "url": box.get("link",""), "quick": True})
-        for item in data.get("organic", [])[:num]:
-            results.append({"title": item.get("title",""), "snippet": item.get("snippet",""),
-                             "url": item.get("link","")})
-        return results, None
-    except Exception as e:
-        return [], str(e)
+    results = []
+    for index, (raw_url, raw_title) in enumerate(links):
+        url = _unwrap_ddg_url(raw_url)
+        title = re.sub(r"<[^>]+>", "", raw_title).strip()
+        if not url or not title or "duckduckgo.com/y.js" in url:
+            continue
+        results.append(_norm_result(title, url,
+                                    clean_snippets[index] if index < len(clean_snippets) else ""))
+        if len(results) >= num:
+            break
+    if not results:
+        return [], "DDG: пустая выдача"
+    return results, None
 
-def search_web(query, num=8):
-    """Основная функция: перебирает бэкенды до первого успеха."""
-    if APILAYER_KEY:
-        r, e = search_web_apilayer(query, num)
-        if r:
-            return r, None
-    if SERPER_KEY:
-        r, e = search_web_serper(query, num)
-        if r:
-            return r, None
-    r, e = searxng_search(query, num)
-    if r:
-        return r, None
-    r, e = ddg_html_search(query, num)
-    if r:
-        return r, None
-    return [], "Все поисковые бэкенды недоступны"
 
-# ═══ Скрапинг страниц через Jina Reader ═══
+def _unwrap_ddg_url(raw_url):
+    """DuckDuckGo отдаёт /l/?uddg=<encoded> — достаём настоящий адрес."""
+    raw_url = raw_url.strip()
+    if "uddg=" in raw_url:
+        from urllib.parse import parse_qs, unquote
+        query = urlparse(raw_url).query
+        target = parse_qs(query).get("uddg", [""])[0]
+        return unquote(target) if target else raw_url
+    if raw_url.startswith("//"):
+        return "https:" + raw_url
+    return raw_url
+
+
+def wiki_api_bases():
+    """Базы MediaWiki API. Через WIKI_API_BASES можно указать свои (зеркало, тест)."""
+    configured = os.getenv("WIKI_API_BASES", "").strip()
+    if configured:
+        return [item.strip() for item in configured.split(",") if item.strip()]
+    return ["https://ru.wikipedia.org/w/api.php", "https://en.wikipedia.org/w/api.php"]
+
+
+def _wiki_site_root(api_url: str) -> str:
+    """https://ru.wikipedia.org/w/api.php → https://ru.wikipedia.org"""
+    parsed = urlparse(api_url)
+    path = parsed.path
+    # Порядок важен: /w/api.php длиннее /api.php, иначе останется лишний /w
+    # и ссылки на статьи поедут на https://ru.wikipedia.org/w/wiki/...
+    for suffix in ("/w/api.php", "/w/rest.php", "/api.php", "/rest.php"):
+        if path.endswith(suffix):
+            path = path[: -len(suffix)]
+            break
+    return f"{parsed.scheme}://{parsed.netloc}{path}".rstrip("/")
+
+
+def search_web_wiki(query, num=6):
+    """Википедия: работает без ключа и почти всегда доступна."""
+    results = []
+    for api_url in wiki_api_bases():
+        site_root = _wiki_site_root(api_url)
+        try:
+            resp = requests.get(
+                api_url,
+                params={"action": "query", "list": "search", "srsearch": query,
+                        "srlimit": num, "format": "json", "utf8": 1},
+                headers={"User-Agent": "NovaMind/1.0 (research assistant)"},
+                timeout=SEARCH_TIMEOUT,
+            )
+            resp.raise_for_status()
+            for item in (resp.json().get("query", {}).get("search") or [])[:num]:
+                title = item.get("title")
+                if not title:
+                    continue
+                snippet = re.sub(r"<[^>]+>", "", item.get("snippet") or "").strip()
+                results.append(_norm_result(
+                    f"{title} — Википедия",
+                    f"{site_root}/wiki/{quote_plus(title.replace(' ', '_'))}",
+                    snippet,
+                ))
+        except (requests.RequestException, ValueError):
+            continue
+        if results:
+            break
+    if not results:
+        return [], "Википедия: ничего не найдено"
+    return results, None
+
+
+BACKENDS = {
+    "apilayer": search_web_apilayer,
+    "serper": search_web_serper,
+    "searxng": search_web_searxng,
+    "ddg": search_web_ddg,
+    "ddg_lite": search_web_ddg_lite,
+    "wiki": search_web_wiki,
+}
+
+
+def search_web(query, num=8, backends=None, on_progress=None):
+    """
+    Перебирает бэкенды до первой успешной выдачи.
+    Возвращает (results, trace) — trace нужен для UI и диагностики.
+    """
+    trace = []
+    for name in (backends or search_backends()):
+        handler = BACKENDS.get(name)
+        if handler is None:
+            continue
+        started = time.time()
+        try:
+            results, error = handler(query, num)
+        except requests.RequestException as exc:
+            results, error = [], f"{exc.__class__.__name__}: {exc}"
+        except Exception as exc:  # бэкенд не должен ронять весь поиск
+            results, error = [], f"{exc.__class__.__name__}: {exc}"
+        entry = {
+            "backend": name,
+            "ok": bool(results),
+            "count": len(results),
+            "ms": int((time.time() - started) * 1000),
+            "error": None if results else (error or "пусто"),
+        }
+        trace.append(entry)
+        if on_progress:
+            try:
+                on_progress(entry)
+            except Exception:
+                pass
+        if results:
+            return results, trace
+    return [], trace
+
+
+# ══════════════════════════════════════════════════════════════════
+# ЧТЕНИЕ СТРАНИЦ
+# ══════════════════════════════════════════════════════════════════
+
+def _html_to_text(html):
+    html = re.sub(r"<(script|style|svg|noscript|head)[^>]*>.*?</\1>", " ", html,
+                  flags=re.DOTALL | re.IGNORECASE)
+    html = re.sub(r"<br\s*/?>", "\n", html, flags=re.IGNORECASE)
+    html = re.sub(r"</(p|div|li|h[1-6]|tr)>", "\n", html, flags=re.IGNORECASE)
+    text = re.sub(r"<[^>]+>", " ", html)
+    text = (text.replace("&nbsp;", " ").replace("&amp;", "&")
+                .replace("&lt;", "<").replace("&gt;", ">")
+                .replace("&quot;", '"').replace("&#39;", "'"))
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
 
 def fetch_page_text(url, max_chars=6000):
-    """Читает страницу через Jina AI Reader (обходит блокировки)."""
-    # Сначала пробуем Jina (надёжнее обходит защиту)
-    try:
-        jina_url = f"https://r.jina.ai/{url}"
-        resp = requests.get(jina_url,
-            headers={"User-Agent": "Mozilla/5.0", "Accept": "text/plain,*/*"},
-            timeout=15)
-        if resp.status_code == 200 and len(resp.text) > 200:
-            text = resp.text
-            # Убираем markdown изображения
-            text = re.sub(r'!\[.*?\]\(.*?\)', '', text)
-            text = re.sub(r'\n{3,}', '\n\n', text).strip()
-            return text[:max_chars], None
-    except Exception:
-        pass
-    # Fallback: прямой запрос
-    try:
-        resp = requests.get(url, headers=_HEADERS, timeout=12, allow_redirects=True)
-        resp.raise_for_status()
-        ct = resp.headers.get("Content-Type", "")
-        if "html" not in ct and "text" not in ct:
-            return None, "Не текстовая страница"
-        html = resp.text
-        html = re.sub(r'<(script|style|svg|noscript)[^>]*>.*?</\1>', '', html,
-                      flags=re.DOTALL | re.IGNORECASE)
-        text = re.sub(r'<[^>]+>', ' ', html)
-        text = re.sub(r'[ \t]+', ' ', text)
-        text = re.sub(r'\n{3,}', '\n\n', text).strip()
-        return text[:max_chars], None
-    except Exception as e:
-        return None, str(e)
+    """Читает страницу: сначала Jina Reader (обходит защиту), потом напрямую."""
+    if not url or not url.lower().startswith(("http://", "https://")):
+        return None, "некорректный URL"
 
-# ═══ ДЕТАЛЬНЫЙ СИСТЕМНЫЙ ПРОМПТ ═══
+    try:
+        resp = requests.get(
+            f"https://r.jina.ai/{url}",
+            headers={"User-Agent": "Mozilla/5.0", "Accept": "text/plain,*/*"},
+            timeout=READER_TIMEOUT,
+        )
+        if resp.status_code == 200 and len(resp.text) > 200:
+            text = re.sub(r"!\[.*?\]\(.*?\)", "", resp.text)
+            text = re.sub(r"\n{3,}", "\n\n", text).strip()
+            if text:
+                return text[:max_chars], None
+    except requests.RequestException:
+        pass
+
+    try:
+        resp = requests.get(url, headers=_HEADERS, timeout=READER_TIMEOUT, allow_redirects=True)
+        resp.raise_for_status()
+        content_type = resp.headers.get("Content-Type", "")
+        if "html" not in content_type and "text" not in content_type:
+            return None, "не текстовая страница"
+        text = _html_to_text(resp.text)
+        if not text:
+            return None, "пустая страница"
+        return text[:max_chars], None
+    except requests.RequestException as exc:
+        return None, f"{exc.__class__.__name__}"
+
+
+# ══════════════════════════════════════════════════════════════════
+# ПРОМПТЫ
+# ══════════════════════════════════════════════════════════════════
 
 SEARCH_SYSTEM_PROMPT = """Ты — умный поисковый ассистент NovaMind. Отвечай ПОДРОБНО и КОНКРЕТНО на русском языке.
 
 ПРАВИЛА:
-1. Давай развёрнутые ответы с конкретными фактами, цифрами, датами
-2. Если вопрос о ценах — укажи диапазон цен, год выпуска, состояние, пробег
-3. Если вопрос о событиях — укажи дату, место, участников
-4. Структурируй ответ: используй заголовки (##), списки (-), таблицы
-5. Цитируй источники как [1], [2] в тексте
-6. Если данных недостаточно — скажи что известно и что нет
-7. НЕ говори "на основе предоставленных данных невозможно ответить" — всегда давай максимум информации
-8. Если поиск не дал результатов — отвечай из своих знаний с пометкой (из базы знаний)"""
+1. Опирайся на данные из интернета, которые идут ниже вопроса.
+2. Давай развёрнутые ответы с конкретными фактами, цифрами и датами.
+3. Если вопрос о ценах — укажи диапазон цен, год, состояние.
+4. Структурируй ответ: заголовки (##), списки (-), таблицы.
+5. Цитируй источники как [1], [2] — номера соответствуют списку источников под ответом.
+6. Если данных недостаточно — скажи, что известно, а что нет.
+7. НЕ пиши «на основе предоставленных данных невозможно ответить» — давай максимум информации.
+8. Если поиск не дал результатов — отвечай из своих знаний с пометкой (из базы знаний)."""
 
-# ═══ SSE авто-поиск ═══
+DIRECT_SYSTEM_PROMPT = ("Отвечай подробно, структурированно и на русском языке. "
+                        "Давай конкретные факты, примеры и пошаговые объяснения.")
+
+
+# ══════════════════════════════════════════════════════════════════
+# ПОТОКОВЫЙ ПОИСК (NDJSON)
+# ══════════════════════════════════════════════════════════════════
+
+def _ndjson(payload):
+    return json.dumps(payload, ensure_ascii=False) + "\n"
+
+
+def needs_web_search(user_message):
+    """Быстрая эвристика + мнение модели: нужен ли интернет для вопроса."""
+    text = (user_message or "").lower()
+    strong = ("цена", "сколько стоит", "новости", "погода", "курс", "сегодня", "сейчас",
+              "последни", "актуальн", "прогноз", "результат матча", "вышла", "релиз",
+              "кто выиграл", "date", "price", "news", "weather", "today", "latest")
+    if any(word in text for word in strong):
+        return True
+    provider, model, _ = resolve_target()
+    answer, error = chat_completion(
+        [{"role": "user", "content":
+            f'"{user_message}"\nНужен ли поиск в интернете для ответа? Ответь одним словом: SEARCH или DIRECT.\n'
+            'SEARCH — цены, новости, погода, события, текущий статус, свежие данные.\n'
+            'DIRECT — теория, математика, код, перевод, объяснение.'}],
+        provider=provider, model=model, temperature=0, max_tokens=8, timeout=15,
+    )
+    if error:
+        return True  # не уверены — лучше поискать
+    verdict = (answer or "").upper()
+    return "SEARCH" in verdict or "DIRECT" not in verdict
+
+
+def build_search_query(user_message):
+    """Короткий поисковый запрос из вопроса пользователя."""
+    provider, model, _ = resolve_target()
+    answer, error = chat_completion(
+        [{"role": "user", "content":
+            f'Сделай из вопроса короткий поисковый запрос (до 8 слов, без кавычек и пояснений).\n'
+            f'Вопрос: "{user_message}"'}],
+        provider=provider, model=model, temperature=0, max_tokens=40, timeout=15,
+    )
+    if error:
+        return user_message
+    candidate = (answer or "").strip().strip('"').splitlines()[0] if answer else ""
+    if candidate and len(candidate) < 120:
+        return candidate
+    return user_message
+
+
+def search_pipeline(user_message, force_search=True, reasoning=False, max_pages=3):
+    """
+    Генератор событий поиска + ответа. Все события — словари для NDJSON.
+
+    Сценарий (как в интерфейсе):
+      stage(search) → шаги → sources → stage(write) → токены ответа → result → done
+    """
+    started = time.time()
+    provider, model, _ = resolve_target()
+
+    def emit(**payload):
+        payload.setdefault("elapsed_ms", int((time.time() - started) * 1000))
+        return payload
+
+    yield emit(type="stage", scene="search", title="Поищу в интернете",
+               text="Подключаюсь к поисковым системам…")
+    yield emit(type="step", icon="🧭", text="Анализирую запрос")
+
+    if not force_search:
+        yield emit(type="step", icon="🤔", text="Проверяю, нужен ли интернет…")
+        if not needs_web_search(user_message):
+            yield emit(type="stage", scene="write", title="Отвечаю без поиска",
+                       text="Свежие данные не нужны — отвечаю по знаниям модели")
+            for chunk in _stream_answer(
+                [{"role": "user", "content": user_message}],
+                system=DIRECT_SYSTEM_PROMPT, provider=provider, model=model, reasoning=reasoning,
+            ):
+                yield chunk
+            yield emit(type="result", reply="", searched=False, sources=[], query=None,
+                       model=model, offline=provider == "local_demo")
+            yield emit(type="done", searched=False)
+            return
+
+    query = build_search_query(user_message)
+    yield emit(type="step", icon="🔎", text=f"Поисковый запрос: {query[:90]}")
+
+    results = []
+    trace = []
+
+    for name in search_backends():
+        handler = BACKENDS.get(name)
+        if handler is None:
+            continue
+        yield emit(type="step", icon="🌐", text=f"Ищу через {name}…")
+        entry_started = time.time()
+        try:
+            results, error = handler(query, 8)
+        except Exception as exc:
+            results, error = [], f"{exc.__class__.__name__}"
+        entry = {"backend": name, "ok": bool(results), "count": len(results),
+                 "ms": int((time.time() - entry_started) * 1000),
+                 "error": None if results else (error or "пусто")}
+        trace.append(entry)
+        if results:
+            yield emit(type="step", icon="✅",
+                       text=f"{name}: найдено {len(results)} результатов за {entry['ms']} мс")
+            break
+        yield emit(type="step", icon="⚠️", text=f"{name} не ответил: {entry['error']}")
+
+    sources = [{"title": r["title"], "url": r["url"], "snippet": r.get("snippet", ""),
+                "host": r.get("host", "")} for r in results if r.get("url")]
+
+    if not results:
+        yield emit(type="stage", scene="write", title="Поиск не дал результатов",
+                   text="Отвечаю из базы знаний модели")
+        for chunk in _stream_answer(
+            [{"role": "user", "content":
+                f"{user_message}\n\n[Поиск в интернете не дал результатов. "
+                f"Отвечай из своих знаний с пометкой (из базы знаний) и предупреди, "
+                f"что данные могут быть устаревшими.]"}],
+            system=SEARCH_SYSTEM_PROMPT, provider=provider, model=model, reasoning=reasoning,
+        ):
+            yield chunk
+        yield emit(type="result", reply="", searched=False, sources=[], query=query,
+                   model=model, offline=provider == "local_demo", trace=trace)
+        yield emit(type="done", searched=False)
+        return
+
+    yield emit(type="sources", sources=sources)
+
+    # Читаем страницы параллельно — заметно быстрее последовательного обхода.
+    yield emit(type="step", icon="📄", text=f"Читаю {min(max_pages, len(sources))} страницы…")
+    scraped = _read_pages(sources[:max_pages])
+    for item in scraped:
+        icon = "✅" if item["chars"] > 200 else "📝"
+        label = f"{item['title'][:60]} — {item['chars']} симв."
+        yield emit(type="step", icon=icon, text=label)
+
+    context = "\n\n".join(
+        f"### [{i + 1}] {item['title']}\nURL: {item['url']}\n{item['text']}"
+        for i, item in enumerate(scraped) if item["text"]
+    )
+    if not context:
+        context = "\n\n".join(
+            f"### [{i + 1}] {s['title']}\nURL: {s['url']}\n{s.get('snippet', '')}"
+            for i, s in enumerate(sources)
+        )
+
+    yield emit(type="stage", scene="write", title="Собираю ответ",
+               text=f"Обрабатываю {len(scraped)} источника")
+
+    for chunk in _stream_answer(
+        [{"role": "user", "content": f"Вопрос: {user_message}\n\nДанные из интернета:\n{context}"}],
+        system=SEARCH_SYSTEM_PROMPT, provider=provider, model=model, reasoning=reasoning,
+    ):
+        yield chunk
+
+    yield emit(type="result", reply="", searched=True, sources=sources, query=query,
+               model=model, offline=provider == "local_demo", trace=trace)
+    yield emit(type="done", searched=True)
+
+
+def _read_pages(sources):
+    """Параллельное чтение страниц с сохранением порядка."""
+    if not sources:
+        return []
+    results = [None] * len(sources)
+
+    def worker(index, source):
+        text, _error = fetch_page_text(source.get("url", ""))
+        body = text if text and len(text) > 100 else (source.get("snippet") or "")
+        results[index] = {
+            "title": source.get("title", ""),
+            "url": source.get("url", ""),
+            "text": body[:3000],
+            "chars": len(body or ""),
+        }
+
+    threads = [threading.Thread(target=worker, args=(i, s), daemon=True)
+               for i, s in enumerate(sources)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=READER_TIMEOUT + 4)
+    return [item for item in results if item]
+
+
+def _stream_answer(messages, system, provider, model, reasoning=False):
+    """Потоковый ответ модели → события reasoning/token/error."""
+    seen_error = False
+    for kind, chunk in chat_stream(messages, provider=provider, model=model,
+                                   system=system, temperature=0.3, reasoning=reasoning):
+        if kind == "reasoning":
+            yield {"type": "reasoning", "token": chunk}
+        elif kind == "token":
+            yield {"type": "token", "token": chunk}
+        elif kind == "error":
+            seen_error = True
+            yield {"type": "error", "text": chunk}
+        elif kind == "done":
+            break
+    if seen_error:
+        return
+
 
 @search_bp.route("/api/auto_search_stream", methods=["POST"])
 def auto_search_stream():
-    data = request.get_json() or {}
-    user_message = data.get("message", "").strip()
+    """Живой поток поиска: сцена → шаги → источники → печатающийся ответ."""
+    data = request.get_json(silent=True) or {}
+    user_message = (data.get("message") or "").strip()
     if not user_message:
         return jsonify({"error": "Пустое сообщение"}), 400
 
+    force_search = bool(data.get("force", True))
+    reasoning = bool(data.get("reasoning", False))
+
+    @stream_with_context
     def generate():
-        def send(event, payload):
-            return f"event: {event}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+        try:
+            for event in search_pipeline(user_message, force_search=force_search,
+                                         reasoning=reasoning):
+                yield _ndjson(event)
+        except GeneratorExit:
+            raise
+        except Exception as exc:
+            yield _ndjson({"type": "error", "text": f"{exc.__class__.__name__}: {exc}"})
+            yield _ndjson({"type": "done", "searched": False})
 
-        yield send("step", {"icon": "🤔", "text": "Анализирую запрос..."})
-
-        provider = config.PROVIDERS[config.current_provider]
-        p_headers = {**provider["headers"]}
-        key = get_groq_key()
-        if key and "groq" in provider["url"]:
-            p_headers["Authorization"] = f"Bearer {key}"
-
-        # Определяем нужен ли поиск
-        dec_payload = {
-            "model": config.current_model,
-            "messages": [{"role": "user", "content":
-                f'"{user_message}"\nНужен поиск в интернете? ТОЛЬКО: SEARCH или DIRECT\n'
-                'SEARCH: цены, новости, погода, события, текущий статус\n'
-                'DIRECT: теория, математика, код, переводы, объяснения'}],
-            "max_tokens": 10, "temperature": 0,
-        }
-        dec_data, dec_err = groq_request_with_rotation(provider["url"], dec_payload, p_headers, timeout=10)
-        needs_search = True  # По умолчанию ищем
-        if not dec_err:
-            dec = (dec_data.get("choices",[{}])[0].get("message",{}).get("content","") or "").upper()
-            needs_search = "SEARCH" in dec or "DIRECT" not in dec
-
-        if not needs_search:
-            yield send("step", {"icon": "💬", "text": "Готовлю подробный ответ..."})
-            ans_payload = {
-                "model": config.current_model,
-                "messages": [
-                    {"role": "system", "content": "Отвечай подробно, структурированно, на русском. Давай конкретные факты."},
-                    {"role": "user", "content": user_message},
-                ],
-                "max_tokens": provider.get("max_tokens", 8192),
-                "temperature": 0.5,
-            }
-            ans, ans_err = groq_request_with_rotation(provider["url"], ans_payload, p_headers, timeout=60)
-            if ans_err:
-                yield send("error", {"text": f"Ошибка: {ans_err}"})
-            else:
-                reply = ans["choices"][0]["message"]["content"]
-                yield send("result", {"reply": reply, "searched": False, "sources": []})
-            yield send("done", {})
-            return
-
-        # === ПОИСК ===
-        # Попытка 1: Groq compound-beta (встроенный поиск)
-        yield send("step", {"icon": "🔍", "text": "Ищу через Groq Web Search..."})
-        compound_answer, compound_sources = groq_web_search(
-            user_message,
-            max_tokens=provider.get("max_tokens", 8192)
-        )
-
-        if compound_answer and len(compound_answer) > 100:
-            yield send("step", {"icon": "✅", "text": "Groq Web Search вернул результаты!"})
-            sources = compound_sources if isinstance(compound_sources, list) else []
-            yield send("result", {"reply": compound_answer, "searched": True, "sources": sources, "query": user_message})
-            yield send("done", {})
-            return
-
-        # Попытка 2: SearXNG + скрапинг
-        yield send("step", {"icon": "🌐", "text": "Ищу через SearXNG..."})
-
-        # Формируем поисковый запрос
-        q_payload = {
-            "model": config.current_model,
-            "messages": [{"role": "user", "content":
-                f'Запрос для Google: "{user_message}". Только запрос на русском/английском, без лишних слов.'}],
-            "max_tokens": 30, "temperature": 0,
-        }
-        q_data, _ = groq_request_with_rotation(provider["url"], q_payload, p_headers, timeout=10)
-        search_query = user_message
-        if not _:
-            q = (q_data.get("choices",[{}])[0].get("message",{}).get("content","") or "").strip()
-            if q and len(q) < 100:
-                search_query = q
-
-        results, search_err = search_web(search_query)
-
-        if not results:
-            yield send("step", {"icon": "⚠️", "text": f"Поиск не дал результатов. Отвечаю из знаний..."})
-            # Отвечаем из базы знаний с пометкой
-            ans_payload = {
-                "model": config.current_model,
-                "messages": [
-                    {"role": "system", "content": SEARCH_SYSTEM_PROMPT},
-                    {"role": "user", "content":
-                        f"{user_message}\n\n[Поиск в интернете не дал результатов. "
-                        f"Отвечай из своих знаний с пометкой (из базы знаний) и укажи что данные могут быть устаревшими.]"},
-                ],
-                "max_tokens": provider.get("max_tokens", 8192),
-                "temperature": 0.5,
-            }
-            ans, ans_err = groq_request_with_rotation(provider["url"], ans_payload, p_headers, timeout=60)
-            reply = ans["choices"][0]["message"]["content"] if not ans_err else f"❌ {ans_err}"
-            yield send("result", {"reply": reply, "searched": False, "sources": [], "query": search_query})
-            yield send("done", {})
-            return
-
-        yield send("step", {"icon": "📋", "text": f"Найдено {len(results)} результатов. Читаю страницы..."})
-
-        # Скрапим топ-3
-        scraped = []
-        for res in results[:4]:
-            url_to_scrape = res.get("url", "")
-            if not url_to_scrape:
-                scraped.append({"title": res["title"], "text": res["snippet"], "url": ""})
-                continue
-            yield send("step", {"icon": "📄", "text": f"Открываю: {res['title'][:55]}..."})
-            page_text, page_err = fetch_page_text(url_to_scrape)
-            if page_text and len(page_text) > 100:
-                scraped.append({"title": res["title"], "text": page_text, "url": url_to_scrape})
-                yield send("step", {"icon": "✅", "text": f"Прочитал ({len(page_text)} символов): {res['title'][:45]}"})
-            else:
-                # Используем snippet
-                scraped.append({"title": res["title"], "text": res.get("snippet",""), "url": url_to_scrape})
-                yield send("step", {"icon": "📝", "text": f"Использую сниппет: {res['title'][:45]}"})
-
-        yield send("step", {"icon": "🧠", "text": "Анализирую и пишу подробный ответ..."})
-
-        sources = [{"title": s["title"], "url": s["url"]} for s in scraped if s.get("url")]
-        context = "\n\n".join(
-            f"### [{i+1}] {s['title']}\nURL: {s['url']}\n{s['text'][:3000]}"
-            for i, s in enumerate(scraped) if s.get("text")
-        )
-
-        final_payload = {
-            "model": config.current_model,
-            "messages": [
-                {"role": "system", "content": SEARCH_SYSTEM_PROMPT},
-                {"role": "user", "content":
-                    f"Вопрос: {user_message}\n\nДанные из интернета:\n{context}"},
-            ],
-            "max_tokens": provider.get("max_tokens", 8192),
-            "temperature": 0.3,
-        }
-        final_data, final_err = groq_request_with_rotation(provider["url"], final_payload, p_headers, timeout=90)
-        if final_err:
-            yield send("error", {"text": f"Ошибка AI: {final_err}"})
-        else:
-            reply = final_data["choices"][0]["message"]["content"]
-            yield send("result", {"reply": reply, "searched": True, "sources": sources, "query": search_query})
-        yield send("done", {})
-
-    return Response(generate(), mimetype="text/event-stream",
-                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+    return Response(
+        generate(),
+        mimetype="application/x-ndjson",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no",
+                 "Connection": "keep-alive"},
+    )
 
 
-# ═══ /api/auto_search (JSON) ═══
+# ══════════════════════════════════════════════════════════════════
+# JSON-ENDPOINT'Ы
+# ══════════════════════════════════════════════════════════════════
+
+@search_bp.route("/api/search", methods=["POST"])
+def api_search():
+    """Только результаты поиска (без генерации ответа)."""
+    data = request.get_json(silent=True) or {}
+    query = (data.get("message") or data.get("query") or "").strip()
+    if not query:
+        return jsonify({"error": "Пустой запрос"}), 400
+    results, trace = search_web(query, num=int(data.get("limit", 8)))
+    return jsonify({"query": query, "results": results, "trace": trace,
+                    "count": len(results)})
+
 
 @search_bp.route("/api/auto_search", methods=["POST"])
 def auto_search():
-    data = request.get_json() or {}
-    user_message = data.get("message", "").strip()
+    data = request.get_json(silent=True) or {}
+    user_message = (data.get("message") or "").strip()
     if not user_message:
-        return jsonify({"error": "Пустое сообщение"})
+        return jsonify({"error": "Пустое сообщение"}), 400
 
-    # Groq compound-beta первым
-    answer, sources = groq_web_search(user_message)
-    if answer and len(answer) > 50:
-        return jsonify({"needs_search": True, "reply": answer,
-                        "sources": sources if isinstance(sources, list) else [],
-                        "search_query": user_message})
-
-    results, _ = search_web(user_message)
+    results, trace = search_web(user_message)
     context = "\n\n".join(
-        f"### {r['title']}\n{r['snippet']}" for r in results if r.get("snippet")
+        f"### [{i + 1}] {r['title']}\nURL: {r['url']}\n{r.get('snippet', '')}"
+        for i, r in enumerate(results) if r.get("snippet") or r.get("url")
     )
-    provider = config.PROVIDERS[config.current_provider]
-    p_headers = {**provider["headers"]}
-    key = get_groq_key()
-    if key and "groq" in provider["url"]:
-        p_headers["Authorization"] = f"Bearer {key}"
+    prompt = (f"Вопрос: {user_message}\n\nДанные из интернета:\n{context}" if context
+              else f"{user_message}\n[Поиск не дал результатов. Отвечай из своих знаний.]")
+    reply, meta = chat_completion([{"role": "user", "content": prompt}],
+                                  system=SEARCH_SYSTEM_PROMPT, temperature=0.3)
+    if reply is None:
+        return jsonify({"error": meta}), 502
+    return jsonify({
+        "needs_search": bool(results),
+        "reply": reply,
+        "sources": [{"title": r["title"], "url": r["url"], "snippet": r.get("snippet", "")}
+                    for r in results],
+        "search_query": user_message,
+        "trace": trace,
+        "model": meta.get("model"),
+    })
 
-    payload = {
-        "model": config.current_model,
-        "messages": [
-            {"role": "system", "content": SEARCH_SYSTEM_PROMPT},
-            {"role": "user", "content": f"Вопрос: {user_message}\n\nДанные:\n{context}" if context
-             else f"{user_message}\n[Поиск не дал результатов. Отвечай из своих знаний.]"},
-        ],
-        "max_tokens": provider.get("max_tokens", 8192),
-        "temperature": 0.3,
-    }
-    resp_data, resp_err = groq_request_with_rotation(provider["url"], payload, p_headers, timeout=90)
-    if resp_err:
-        return jsonify({"error": resp_err})
-    reply = resp_data["choices"][0]["message"]["content"]
-    src = [{"title": r["title"], "url": r["url"]} for r in results if r.get("url")]
-    return jsonify({"needs_search": bool(results), "reply": reply,
-                    "sources": src, "search_query": user_message})
-
-
-# ═══ /api/web_search_groq ═══
 
 @search_bp.route("/api/web_search_groq", methods=["POST"])
 def web_search_groq():
-    data = request.get_json() or {}
-    user_message = data.get("message", "").strip()
+    """Историческое имя endpoint'а: поиск + ответ через активную модель."""
+    data = request.get_json(silent=True) or {}
+    user_message = (data.get("message") or "").strip()
     if not user_message:
-        return jsonify({"error": "Пустое сообщение"})
+        return jsonify({"error": "Пустое сообщение"}), 400
 
-    # Groq compound-beta
-    answer, sources = groq_web_search(user_message)
-    if answer and len(answer) > 50:
-        src = sources if isinstance(sources, list) else []
-        return jsonify({"reply": answer, "sources": src})
-
-    # Fallback поиск
-    results, err = search_web(user_message)
+    results, trace = search_web(user_message)
     context = "\n\n".join(
-        f"📌 **{r['title']}**\n{r['snippet']}\n🔗 {r['url']}"
-        for r in results if r.get("snippet")
+        f"### [{i + 1}] {r['title']}\nURL: {r['url']}\n{r.get('snippet', '')}"
+        for i, r in enumerate(results) if r.get("snippet") or r.get("url")
     )
-    provider = config.PROVIDERS[config.current_provider]
-    p_headers = {**provider["headers"]}
-    key = get_groq_key()
-    if key and "groq" in provider["url"]:
-        p_headers["Authorization"] = f"Bearer {key}"
+    prompt = (f"Вопрос: {user_message}\n\nРезультаты поиска:\n{context}" if context
+              else f"{user_message}\n[Поиск не дал результатов. Отвечай из своих знаний с пометкой.]")
+    reply, meta = chat_completion([{"role": "user", "content": prompt}],
+                                  system=SEARCH_SYSTEM_PROMPT, temperature=0.3)
+    if reply is None:
+        return jsonify({"error": meta}), 502
+    return jsonify({
+        "reply": reply,
+        "sources": [{"title": r["title"], "url": r["url"], "snippet": r.get("snippet", "")}
+                    for r in results],
+        "trace": trace,
+        "model": meta.get("model"),
+    })
 
-    payload = {
-        "model": config.current_model,
-        "messages": [
-            {"role": "system", "content": SEARCH_SYSTEM_PROMPT},
-            {"role": "user", "content":
-                f"Вопрос: {user_message}\n\nРезультаты:\n{context}" if context
-                else f"{user_message}\n[Поиск не дал результатов. Отвечай из своих знаний с пометкой.]"},
-        ],
-        "max_tokens": provider.get("max_tokens", 8192),
-        "temperature": 0.3,
+
+# ══════════════════════════════════════════════════════════════════
+# ЗДОРОВЬЕ ПОИСКОВЫХ БЭКЕНДОВ (кеш 60 секунд)
+# ══════════════════════════════════════════════════════════════════
+
+_HEALTH_CACHE = {"at": 0.0, "data": None}
+_HEALTH_LOCK = threading.Lock()
+
+
+def probe_backends(probe_query="python"):
+    """Быстрая проверка каждого бэкенда — для индикатора в интерфейсе."""
+    checked = []
+    for name in search_backends():
+        handler = BACKENDS.get(name)
+        if handler is None:
+            continue
+        started = time.time()
+        try:
+            results, error = handler(probe_query, 3)
+        except Exception as exc:
+            results, error = [], f"{exc.__class__.__name__}"
+        checked.append({
+            "backend": name,
+            "ok": bool(results),
+            "count": len(results),
+            "ms": int((time.time() - started) * 1000),
+            "error": None if results else (error or "пусто"),
+        })
+    alive = [item["backend"] for item in checked if item["ok"]]
+    return {
+        "ok": bool(alive),
+        "alive": alive,
+        "backends": checked,
+        "checked_at": int(time.time()),
+        "instances": SEARXNG_INSTANCES,
     }
-    resp_data, resp_err = groq_request_with_rotation(provider["url"], payload, p_headers, timeout=90)
-    if resp_err:
-        return jsonify({"error": resp_err})
-    reply = resp_data["choices"][0]["message"]["content"]
-    src = [{"title": r["title"], "url": r["url"]} for r in results if r.get("url")]
-    return jsonify({"reply": reply, "sources": src})
+
+
+@search_bp.route("/api/search/health", methods=["GET"])
+def search_health():
+    force = request.args.get("refresh", "0") == "1"
+    with _HEALTH_LOCK:
+        fresh = _HEALTH_CACHE["data"] and (time.time() - _HEALTH_CACHE["at"] < 60)
+        if fresh and not force:
+            return jsonify(_HEALTH_CACHE["data"])
+    data = probe_backends()
+    with _HEALTH_LOCK:
+        _HEALTH_CACHE["data"] = data
+        _HEALTH_CACHE["at"] = time.time()
+    return jsonify(data)
+
+
+@search_bp.route("/api/ai/status", methods=["GET"])
+def ai_status():
+    """Что сейчас подключено: провайдер, модель, поиск. Для индикатора в топбаре."""
+    provider, model, _ = resolve_target()
+    offline = provider == "local_demo"
+    with _HEALTH_LOCK:
+        cached = _HEALTH_CACHE["data"] if _HEALTH_CACHE["data"] and (time.time() - _HEALTH_CACHE["at"] < 120) else None
+    return jsonify({
+        "provider": provider,
+        "provider_name": PROVIDER_LABELS.get(provider, provider),
+        "model": model,
+        "offline": offline,
+        "configured": config.has_credentials(provider),
+        "search_alive": (cached or {}).get("ok"),
+        "search_backends": (cached or {}).get("alive", []),
+        "local_model": local_llm.MODEL_ID,
+    })
