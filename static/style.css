@@ -73,6 +73,7 @@ html, body {
 
 .sidebar-body {
   flex: 1; min-height: 0; overflow-y: auto;
+  overscroll-behavior: contain;   /* не «прокручивать» чат изнутри сайдбара */
   padding: 12px 10px;
   display: flex; flex-direction: column; gap: 3px;
 }
@@ -113,11 +114,8 @@ html[data-glass-theme="light"] .nav-item.active { color: var(--accent); }
   box-shadow: 0 4px 12px -4px var(--accent-glow);
 }
 
-/* История чатов */
+/* История чатов — часть общего скролла сайдбара: один ползунок на всю панель */
 #historyContainer {
-  flex: 0 1 auto; min-height: 0;
-  max-height: min(44vh, 520px);
-  overflow-y: auto;
   display: flex; flex-direction: column; gap: 3px;
   margin-top: 4px; padding-right: 2px;
 }
@@ -125,31 +123,14 @@ html[data-glass-theme="light"] .nav-item.active { color: var(--accent); }
   font-size: 9.5px; font-weight: 800; letter-spacing: .14em; text-transform: uppercase;
   color: var(--text-4); padding: 12px 10px 4px;
 }
-/* История занимает всё оставшееся место в сайдбаре */
-#historyContainer {
-  flex: 1;
-  overflow-y: auto;
-  min-height: 60px;
-  padding-bottom: 8px;
-}
-#historyContainer::-webkit-scrollbar { width: 3px; }
-#historyContainer::-webkit-scrollbar-thumb { background: var(--accent); border-radius: 2px; opacity: .5; }
 .history-item {
   display: flex; align-items: center; gap: 9px;
   padding: 9px 11px; border-radius: var(--r-sm);
   cursor: pointer; font-size: 12.5px; color: var(--text-2);
   border: 1px solid transparent;
   transition: background var(--t) var(--ease), color var(--t) var(--ease), border-color var(--t) var(--ease);
-  position: relative;
 }
 .history-item:hover { background: var(--glass-fill); color: var(--text-1); border-color: var(--glass-border-soft); }
-.history-item.active { background: rgba(139,92,246,.12); color: var(--text-1); border-color: rgba(139,92,246,.3); }
-.hist-title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.hist-count {
-  font-size: 10px; color: var(--text-muted); background: rgba(255,255,255,.06);
-  padding: 1px 5px; border-radius: 8px; flex-shrink: 0;
-}
-.hist-count:empty { display: none; }
 .history-item.active {
   background: var(--accent-soft); color: color-mix(in srgb, var(--accent) 55%, white);
   border-color: color-mix(in srgb, var(--accent) 35%, transparent);
@@ -206,8 +187,14 @@ html[data-glass-theme="light"] .nav-item.active { color: var(--accent); }
   box-shadow: 0 6px 18px -6px var(--accent-glow), inset 0 1px 0 rgba(255,255,255,.4);
   overflow: hidden;
 }
-.user-name { font-size: 12.5px; font-weight: 700; }
-.user-plan { font-size: 10.5px; color: var(--text-4); }
+.user-name {
+  font-size: 12.5px; font-weight: 700;
+  max-width: 130px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.user-plan {
+  font-size: 10.5px; color: var(--text-4);
+  max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 .logout-btn {
   background: color-mix(in srgb, var(--err) 14%, transparent);
   border: 1px solid color-mix(in srgb, var(--err) 30%, transparent);
@@ -254,8 +241,15 @@ html[data-glass-theme="light"] .nav-item.active { color: var(--accent); }
 .topbar-title {
   font-size: 12.5px; font-weight: 800; letter-spacing: .01em; white-space: nowrap;
   display: flex; align-items: center; gap: 8px;
+  min-width: 0; flex: 0 1 auto;          /* сжимаемся, чтобы кнопки оставались видны */
 }
-.topbar-title .lg-dot { margin-right: 2px; }
+.topbar-title .lg-dot { margin-right: 2px; flex-shrink: 0; }
+/* Длинные имена моделей («nvidia/nemotron-3-ultra-550b…») обрезаем троеточием */
+#statusText {
+  display: block; min-width: 0;
+  max-width: min(46vw, 340px);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 .topbar-actions { margin-left: auto; display: flex; gap: 7px; align-items: center; }
 .icon-btn {
   width: 36px; height: 36px;
@@ -1030,12 +1024,15 @@ html[data-glass-theme="light"] .eyebrow { color: var(--accent); }
   .sidebar {
     position: fixed; top: 0; left: 0; bottom: 0;
     margin: 0; border-radius: 0 var(--r-lg) var(--r-lg) 0;
-    width: min(320px, 86vw);
-    /* Плавное раскрытие пальцем: --drawer-x задаёт drag-логика в app.js */
-    transform: translateX(calc(var(--drawer-x, 0px) - var(--drawer-width, 320px)));
+    /* Ширина и сдвиг берутся из ОДНОЙ переменной: закрытый сайдбар
+       уезжает ровно на свою ширину и не оставляет полосу на чате. */
+    width: var(--drawer-width, min(300px, 86vw));
+    /* закрытый уезжает ровно на свою ширину (та же переменная) — полоса не остаётся */
+    transform: translateX(calc(var(--drawer-x, 0px) - var(--drawer-width, min(300px, 86vw))));
+    will-change: transform;
   }
-  .app.drawer-animate .sidebar { transition: transform .3s var(--ease-out); }
   .sidebar.open { box-shadow: var(--glass-shadow-lg); }
+  .app.drawer-animate .sidebar { transition: transform .3s var(--ease-out); }
   .menu-btn { display: flex; }
   .main { margin: 0; border-radius: 0; border: none; }
   .chat-container { padding: 16px 11px 6px; }
@@ -1044,6 +1041,11 @@ html[data-glass-theme="light"] .eyebrow { color: var(--accent); }
   .topbar { padding: 0 10px; }
   .media-model-label { display: none; }
   .stage-scene { height: 116px; }
+  #statusText { max-width: 38vw; }
+
+  /* Когда сайдбар открыт — чат неподвижен: один «ползунок» на экран */
+  body.drawer-open .main, body.drawer-open .chat-container { overflow: hidden; }
+  body.drawer-open { overflow: hidden; }
 }
 @media (max-width: 480px) {
   .toolbar-btn span { display: none; }
