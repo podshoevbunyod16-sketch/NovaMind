@@ -20,7 +20,9 @@
  *      обрезается многоточием с полным названием в подсказке.
  *   9. страница настроек и окно входа не ломаются;
  *  10. панель «маленький Linux»: терминал, файлы, git, задачи;
- *  11. агентный режим, кнопки у блоков кода и шпаргалка хоткеев.
+ *  11. агентный режим, кнопки у блоков кода и шпаргалка хоткеев;
+ *  12. поиск в интернете через песочницу: вкладка «Поиск», nova search,
+ *      поиск по песочнице и кнопка «Аналог» у блока кода.
  */
 import { createRequire } from 'node:module';
 
@@ -195,6 +197,13 @@ const dom = new JSDOM(html, {
       }
       if (path.startsWith('/api/terminal/run')) {
         const command = String(JSON.parse(options.body || '{}').command || '');
+        if (command.startsWith('nova search')) {
+          return json({ code: 0, stdout: '🔎 «' + command.slice(12) + '» — найдено 2 (0.2 c, searxng)\n'
+            + '1. asyncio — документация\n   https://docs.python.org/3/library/asyncio.html\n'
+            + '   Event loop, tasks and queues.\n'
+            + '2. PEP 492\n   https://peps.python.org/pep-0492/\n   async/await syntax.',
+            stderr: '', duration_ms: 200, timed_out: false, cwd: '.' });
+        }
         if (command === 'ls -la') {
           return json({ code: 0, stdout: 'README.md  hello.py', stderr: '', duration_ms: 12, timed_out: false, cwd: '.' });
         }
@@ -215,6 +224,27 @@ const dom = new JSDOM(html, {
       if (path.startsWith('/api/terminal/git')) {
         return json({ repo: true, branch: 'main', clean: false, last: 'a1b2c3d первый коммит (Nova, 2026-09-29)',
                       changes: [{ status: 'M', path: 'hello.py' }] });
+      }
+      if (path.startsWith('/api/linux/search')) {
+        const body = JSON.parse(options.body || '{}');
+        if (body.mode === 'code') {
+          return json({ mode: 'code', query: body.query, count: 1, truncated: false, results: [
+            { path: 'hello.py', line: 2, snippet: 'print("привет")', url: '' },
+          ] });
+        }
+        return json({ mode: 'web', query: body.query, count: 2, backend: 'searxng', elapsed_ms: 240, results: [
+          { title: 'asyncio — документация', url: 'https://docs.python.org/3/library/asyncio.html',
+            host: 'docs.python.org', snippet: 'Event loop, tasks and queues.' },
+          { title: 'PEP 492', url: 'https://peps.python.org/pep-0492/',
+            host: 'peps.python.org', snippet: 'async/await syntax.' },
+        ] });
+      }
+      if (path.startsWith('/api/linux/save')) {
+        return json({ path: 'notes/research/2026-09-30-asyncio-notes.md' });
+      }
+      if (path.startsWith('/api/linux/read')) {
+        return json({ url: 'https://docs.python.org/3/library/asyncio.html',
+                      text: 'Текст страницы asyncio', elapsed_ms: 120, bytes: 22 });
       }
       if (path.startsWith('/api/agent/status')) {
         return json({ enabled: true, tools: true, max_steps: 6, admin: true, hint: '' });
@@ -693,6 +723,99 @@ check('«?» открывает шпаргалку хоткеев',
 press('Escape');
 await new Promise((resolve) => setTimeout(resolve, 100));
 check('Escape закрывает шпаргалку', document.getElementById('cheatsheet').hidden === true);
+
+console.log('\n12) Поиск в интернете через Linux-окружение');
+window.Linux.open('search');
+await new Promise((resolve) => setTimeout(resolve, 100));
+const searchInput = document.getElementById('searchInput');
+const searchList = document.getElementById('searchList');
+
+check('вкладка «Поиск» есть и переключает режим',
+  !!document.querySelector('#linuxTabs .linux-tab[data-tab="search"]')
+  && document.querySelector('.linux-sec[data-sec="search"]').classList.contains('is-active'));
+
+searchInput.value = 'python asyncio';
+document.getElementById('searchForm').dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
+await new Promise((resolve) => setTimeout(resolve, 200));
+check('поиск в интернете возвращает источники',
+  searchList.textContent.includes('asyncio — документация')
+  && searchList.textContent.includes('peps.python.org')
+  && document.getElementById('searchStatus').textContent.includes('searxng'));
+
+searchList.querySelector('[data-act="chat"]').click();
+await new Promise((resolve) => setTimeout(resolve, 120));
+check('«В чат» подставляет источник в поле ввода',
+  document.getElementById('chat-input').value.includes('docs.python.org'));
+
+window.Linux.open('search');
+await new Promise((resolve) => setTimeout(resolve, 100));
+document.getElementById('searchForm').dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
+await new Promise((resolve) => setTimeout(resolve, 200));
+searchList.querySelector('[data-act="save"]').click();
+await new Promise((resolve) => setTimeout(resolve, 200));
+check('«Сохранить» уводит выдачу в рабочую папку',
+  document.querySelector('.linux-sec[data-sec="files"]').classList.contains('is-active')
+  || termOut.textContent.includes('notes/research'));
+
+window.Linux.open('search');
+await new Promise((resolve) => setTimeout(resolve, 100));
+document.getElementById('searchForm').dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
+await new Promise((resolve) => setTimeout(resolve, 200));
+searchList.querySelector('[data-act="task"]').click();
+await new Promise((resolve) => setTimeout(resolve, 200));
+check('«В задачу» заводит задачу и открывает список',
+  document.querySelector('.linux-sec[data-sec="tasks"]').classList.contains('is-active')
+  && document.getElementById('taskList').textContent.includes('Изучить:'));
+
+window.Linux.open('search');
+await new Promise((resolve) => setTimeout(resolve, 100));
+searchList.querySelector('[data-act="read"]').click();
+await new Promise((resolve) => setTimeout(resolve, 200));
+check('«Читать» открывает страницу источника в терминале',
+  document.querySelector('.linux-sec[data-sec="terminal"]').classList.contains('is-active')
+  && termOut.textContent.includes('Текст страницы asyncio'));
+
+// тот же запрос, но по файлам песочницы
+window.Linux.open('search');
+await new Promise((resolve) => setTimeout(resolve, 100));
+document.querySelector('#searchModes .search-mode[data-mode="code"]').click();
+searchInput.value = 'asyncio';
+document.getElementById('searchForm').dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
+await new Promise((resolve) => setTimeout(resolve, 200));
+check('поиск по песочнице находит вхождения в коде',
+  searchList.textContent.includes('hello.py')
+  && searchList.textContent.includes('print'));
+
+// «Найди аналог» у блока кода
+const simTurn = window.createAssistantTurn();
+simTurn.appendText('```python\ndef fetch_users(limit=10):\n    return db.query("users", limit)\n```');
+await new Promise((resolve) => setTimeout(resolve, 80));
+const simBlock = simTurn.element.querySelector('.code-block');
+check('у блока кода есть кнопка «Аналог»', !!simBlock.querySelector('[data-code="similar"]'));
+simBlock.querySelector('[data-code="similar"]').dispatchEvent(
+  new window.MouseEvent('click', { bubbles: true, cancelable: true }));
+await new Promise((resolve) => setTimeout(resolve, 250));
+check('«Аналог» ищет по коду в интернете через песочницу',
+  linuxPanel.hidden === false
+  && document.querySelector('.linux-sec[data-sec="search"]').classList.contains('is-active')
+  && searchInput.value.includes('python') && searchInput.value.includes('fetch_users'),
+  searchInput.value);
+check('поиск по коду сразу показал результаты',
+  searchList.textContent.includes('asyncio — документация'));
+
+// терминал умеет тот же поиск
+window.Linux.setTab('terminal');
+termInput.value = 'nova search asyncio';
+document.getElementById('termForm').dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
+await new Promise((resolve) => setTimeout(resolve, 200));
+check('команда nova search в терминале печатает источники',
+  termOut.textContent.includes('$ nova search asyncio')
+  && termOut.textContent.includes('docs.python.org'));
+check('в терминале есть чипы поиска',
+  document.getElementById('termChips').textContent.includes('Поиск в интернете')
+  && document.getElementById('termChips').textContent.includes('Поиск по песочнице'));
+press('Escape');
+await new Promise((resolve) => setTimeout(resolve, 80));
 
 if (failures.length) {
   console.error(`\n❌ Провалено проверок: ${failures.length} → ${failures.join(', ')}`);

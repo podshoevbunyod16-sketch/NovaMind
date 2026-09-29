@@ -22,7 +22,9 @@ import re
 import time
 
 from ai_providers import chat_completion, chat_stream, resolve_target
-from routes.terminal import run_agent as run_terminal, safe_path, relative_to_workspace, ensure_workspace
+from routes.terminal import (run_agent as run_terminal, safe_path, relative_to_workspace,
+                             ensure_workspace, nova_search, nova_read, _save_research,
+                             _format_results as _format_search_results)
 
 agent_bp = Blueprint("agent", __name__)
 
@@ -38,6 +40,8 @@ AGENT_SYSTEM_PROMPT = """Ты — агент NovaMind внутри «мален�
   {"action":"read","path":"hello.py"}                       прочитать файл
   {"action":"write","path":"notes/plan.md","content":"…"}  записать файл
   {"action":"ls"}                                          список файлов
+  {"action":"search","query":"что найти"}                   ПОИСК В ИНТЕРНЕТЕ
+  {"action":"open","url":"https://…"}                       прочитать страницу
   {"action":"task","title":"…","detail":"…"}                завести задачу с подпунктами в detail
   {"action":"task_done","note":"что сделано"}               задача выполнена
   {"action":"answer","text":"ответ пользователю"}            закончить и ответить
@@ -47,7 +51,11 @@ AGENT_SYSTEM_PROMPT = """Ты — агент NovaMind внутри «мален�
 2. Сначала разберись в задаче (run/read/ls), потом действуй, потом answer.
 3. Один инструмент за один шаг. Не выдумывай результат команды — сначала выполни её.
 4. Команды выполняются ТОЛЬКО по одной, без | и >.
-5. В answer пиши по-русски, конкретно, с результатами: что сделано и что получилось."""
+5. Нужны свежие данные или факты — сначала search, потом опирайся на найденное.
+6. Результаты поиска полезно сохранять: write в notes/research/<тема>.md,
+   а не держать в ответе — тогда их можно будет открыть позже.
+7. В answer пиши по-русски, конкретно, с результатами: что сделано и что получилось.
+   Если опирался на интернет — перечисли источники по именам из выдачи."""
 
 
 def is_enabled():
@@ -249,6 +257,39 @@ def _perform(action, kind, use_tools, state, goal=""):
     if not use_tools:
         return "Инструменты недоступны. Ответь пользователю по имеющимся данным."
 
+    if kind == "search":
+        query = str(action.get("query") or "").strip()
+        if not query:
+            return 'Пустой поисковый запрос. Повтори с {"action":"search","query":"..."}.'
+        results, meta = nova_search(query, limit=6)
+        text = _format_search_results(query, results, meta["backend"], meta["elapsed_ms"])
+        if not results:
+            yield _ndjson({"type": "step", "icon": "⚠️", "text": f"Поиск «{query}» ничего не дал"})
+        else:
+            yield _ndjson({"type": "step", "icon": "🔎",
+                           "text": f"Нашёл {len(results)} по запросу «{query}» ({meta['backend']})"})
+            yield _ndjson({"type": "tool", "name": "search", "command": f"nova search {query}",
+                           "code": 0, "output": text, "results": results})
+        if state["task_id"]:
+            import database as _db
+            _db.append_task_step(state["task_id"], f"Поиск: {query}", status="done",
+                                 log=text[:1200])
+        return text
+
+    if kind == "open":
+        url = str(action.get("url") or "").strip()
+        if not url.startswith(("http://", "https://")):
+            return "Нужен полный адрес страницы, например https://example.com"
+        text, elapsed = nova_read(url, max_chars=4000)
+        if state["task_id"]:
+            import database as _db
+            _db.append_task_step(state["task_id"], f"Прочитал {url}", status="done",
+                                 log=(text or "")[:1200])
+        yield _ndjson({"type": "step", "icon": "📰", "text": f"Прочитал {url} ({elapsed} мс)"})
+        yield _ndjson({"type": "tool", "name": "open", "command": url, "code": 0 if text else 1,
+                       "output": (text or "страница пустая")[:1500]})
+        return text or "Страница не прочиталась."
+
     if kind == "ls":
         command, label, icon = "ls -la", "Смотрю файлы", "📂"
     elif kind == "read":
@@ -276,7 +317,7 @@ def _perform(action, kind, use_tools, state, goal=""):
             database.append_task_step(state["task_id"], f"Записал {relative_to_workspace(path)}",
                                       status="doing", log=clip(content, 800))
         yield _ndjson({"type": "step", "icon": "✍️", "text": f"Записал {relative_to_workspace(path)}"})
-        return f"Файл {relative_to_workspace(path)} записан."
+        return f"Файл {relative_to_workspace(path)} записан. Открой его командой cat {relative_to_workspace(path)}."
 
     elif kind == "run":
         command = str(action.get("command") or "").strip()

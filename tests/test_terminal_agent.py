@@ -1,6 +1,9 @@
 """
 Песочница терминала, задачи и агентный цикл — на настоящем HTTP.
 
+Фикстуры sandbox и admin_client живут в tests/conftest.py — ими пользуются
+и песочница, и тесты поиска.
+
 Проверяется ровно то, что важно для безопасности:
   * выключенный терминал и не-админ не проходят;
   * команда вне белого списка и опасные конструкции отклоняются;
@@ -14,30 +17,8 @@ import os
 
 import pytest
 
-import database
 import routes.agent as agent_routes
 import routes.terminal as term_routes
-
-
-@pytest.fixture
-def sandbox(tmp_path, monkeypatch):
-    """Отдельная песочница и включённое окружение + вход администратора."""
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    monkeypatch.setattr(term_routes, "WORKSPACE", os.path.realpath(str(workspace)))
-    monkeypatch.setattr(agent_routes, "run_terminal", term_routes.run_agent)
-    monkeypatch.setenv("TERMINAL_ENABLED", "1")
-    monkeypatch.setenv("AGENT_ENABLED", "1")
-    return workspace
-
-
-@pytest.fixture
-def admin_client(client, sandbox):
-    """Администратор в уже включённой песочнице."""
-    with client.session_transaction() as session:
-        session["admin_logged_in"] = True
-        session["username"] = "admin"
-    return client
 
 
 def _run(client, command):

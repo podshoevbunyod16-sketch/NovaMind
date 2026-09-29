@@ -318,6 +318,7 @@
       <nav class="linux-tabs" id="linuxTabs" role="tablist">
         <button type="button" class="linux-tab is-active" data-tab="terminal" role="tab">Терминал</button>
         <button type="button" class="linux-tab" data-tab="files" role="tab">Файлы</button>
+        <button type="button" class="linux-tab" data-tab="search" role="tab">Поиск</button>
         <button type="button" class="linux-tab" data-tab="git" role="tab">Git</button>
         <button type="button" class="linux-tab" data-tab="tasks" role="tab">Задачи<span class="linux-badge" id="tasksBadge" hidden>0</span></button>
       </nav>
@@ -357,6 +358,20 @@
         </div>
       </section>
 
+      <!-- Поиск: интернет и код, оба — через песочницу -->
+      <section class="linux-sec" data-sec="search">
+        <form class="search-form" id="searchForm">
+          <div class="search-modes" id="searchModes">
+            <button type="button" class="search-mode is-active" data-mode="web" title="Поиск в интернете теми же бэкендами, что и в чате">Интернет</button>
+            <button type="button" class="search-mode" data-mode="code" title="Тот же запрос, но по файлам рабочей папки">По песочнице</button>
+          </div>
+          <input id="searchInput" placeholder="например: python asyncio task group" autocomplete="off">
+          <button class="lg-btn tiny" type="submit" id="btnSearchRun">Искать</button>
+        </form>
+        <div class="search-status" id="searchStatus" hidden></div>
+        <div class="search-list" id="searchList"></div>
+      </section>
+
       <!-- Git -->
       <section class="linux-sec" data-sec="git">
         <div class="sec-bar">
@@ -392,8 +407,9 @@
         <li><kbd>Ctrl</kbd>+<kbd>Enter</kbd><span>отправить сообщение</span></li>
         <li><kbd>Esc</kbd><span>закрыть панель, снять активный режим</span></li>
         <li><kbd>↑</kbd><kbd>↓</kbd><span>в терминале — история команд</span></li>
+        <li><kbd>Ctrl</kbd>+<kbd>K</kbd><span>поиск в интернете в чате</span></li>
       </ul>
-      <p class="cheat-foot">Подсказка: у блока кода есть свои кнопки — «Объясни», «Тесты», «Оптимизируй», «В терминал».</p>
+      <p class="cheat-foot">Подсказка: у блока кода есть свои кнопки — «Объясни», «Тесты», «Оптимизируй», «Найди аналог», «В терминал». Поиск живёт во вкладке «Поиск» и в терминале: <code>nova search запрос</code>.</p>
     </div>
   </div>
 

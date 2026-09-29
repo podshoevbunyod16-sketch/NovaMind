@@ -22,6 +22,8 @@
     histIndex: -1,
     busy: false,
     file: null,
+    searchMode: 'web',
+    searchResult: null,
     agent: false,
     agentStatus: null,
   };
@@ -34,6 +36,7 @@
       'termOut', 'termChips', 'termForm', 'termInput', 'termNote',
       'fileList', 'filesHint', 'btnFilesRefresh', 'fileView', 'fileViewPath', 'fileViewBody',
       'btnFileToChat', 'btnFileToTerm', 'btnFileClose',
+      'searchForm', 'searchModes', 'searchInput', 'btnSearchRun', 'searchStatus', 'searchList',
       'gitBox', 'gitHint', 'btnGitRefresh',
       'taskForm', 'taskInput', 'taskList', 'tasksBadge',
       'cheatsheet', 'btnCheatClose', 'chatContainer', 'chat-input',
@@ -87,6 +90,8 @@
     { cmd: 'python3 hello.py', title: 'Запустить пример' },
     { cmd: 'git status', title: 'Состояние git' },
     { cmd: 'cat README.md', title: 'Прочитать README' },
+    { cmd: 'nova search ', title: '🔎 Поиск в интернете' },
+    { cmd: 'grep -rn "TODO" .', title: '🔎 Поиск по песочнице' },
     { cmd: 'help', title: 'Что доступно' },
   ];
 
@@ -214,7 +219,122 @@
     el.fileViewBody.textContent = '';
   }
 
-  // ───────────────────────── git ─────────────────────────
+  // ───────────────────────── поиск через окружение ─────────────────────────
+
+function searchStatus(text, kind = 'info') {
+  if (!el.searchStatus) return;
+  el.searchStatus.hidden = !text;
+  el.searchStatus.className = `search-status is-${kind}`;
+  el.searchStatus.textContent = text || '';
+}
+
+function renderSearch(data) {
+  state.searchResult = data;
+  const list = el.searchList;
+  if (!data.results.length) {
+    list.innerHTML = `<div class="sec-empty">${data.mode === 'code'
+      ? 'В песочнице таких вхождений нет.'
+      : 'Ничего не нашлось. Попробуйте другой запрос или проверьте бэкенды поиска.'}</div>`;
+    return;
+  }
+  if (data.mode === 'code') {
+    list.innerHTML = data.results.map((hit) => `
+      <button type="button" class="hit hit-code" data-open="${escapeAttr(hit.path)}">
+        <span class="hit-path">${escapeHtml(hit.path)}<span class="hit-line">:${hit.line || 1}</span></span>
+        <span class="hit-snippet">${escapeHtml(hit.snippet)}</span>
+      </button>`).join('');
+    return;
+  }
+  list.innerHTML = data.results.map((item, index) => `
+    <article class="hit" data-index="${index}">
+      <a class="hit-title" href="${escapeAttr(item.url)}" target="_blank" rel="noopener noreferrer"
+         title="${escapeAttr(item.url)}">${index + 1}. ${escapeHtml(item.title || item.host)}</a>
+      <span class="hit-host">${escapeHtml(item.host || '')}</span>
+      ${item.snippet ? `<p class="hit-snippet">${escapeHtml(item.snippet)}</p>` : ''}
+      <div class="hit-acts">
+        <button type="button" data-act="chat" title="Спросить об этом в чате">В чат</button>
+        <button type="button" data-act="task" title="Завести задачу по этой теме">В задачу</button>
+        <button type="button" data-act="save" title="Сохранить выдачу в рабочую папку">Сохранить</button>
+        <button type="button" data-act="read" title="Прочитать страницу">Читать</button>
+      </div>
+    </article>`).join('');
+}
+
+const escapeAttr = (text) => String(text ?? '').replace(/[&<>"]/g, (ch) => (
+  { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]
+));
+
+function resultAt(index) {
+  const data = state.searchResult;
+  return (data && data.results && data.results[index]) || null;
+}
+
+async function runLinuxSearch(query) {
+  const text = String(query ?? (el.searchInput ? el.searchInput.value : '')).trim();
+  if (!text) return null;
+  if (el.btnSearchRun) { el.btnSearchRun.disabled = true; el.btnSearchRun.textContent = 'Ищу…'; }
+  searchStatus(state.searchMode === 'code'
+    ? `Ищу «${text}» по файлам рабочей папки…`
+    : `Ищу «${text}» в интернете…`);
+  try {
+    const data = await api('/api/linux/search', {
+      method: 'POST',
+      body: JSON.stringify({ query: text, mode: state.searchMode }),
+    });
+    renderSearch(data);
+    searchStatus(data.mode === 'code'
+      ? `Найдено вхождений: ${data.count}${data.truncated ? ' (показаны не все)' : ''}`
+      : `${data.count} источников · ${data.backend || 'поиск'} · ${(data.elapsed_ms / 1000).toFixed(1)} c`,
+      data.count ? 'ok' : 'warn');
+    if (el.searchInput) el.searchInput.value = text;
+    return data;
+  } catch (error) {
+    el.searchList.innerHTML = `<div class="sec-empty">${esc(error.message)}</div>`;
+    searchStatus(error.message, 'warn');
+    return null;
+  } finally {
+    if (el.btnSearchRun) { el.btnSearchRun.disabled = false; el.btnSearchRun.textContent = 'Искать'; }
+  }
+}
+
+/** Открывает найденное в терминале — командой, а не копипастой. */
+function searchInTerminal(query) {
+  const text = String(query ?? (el.searchInput ? el.searchInput.value : '')).trim();
+  if (!text) return;
+  setTab('terminal');
+  runTerminal(`nova search ${text}`);
+}
+
+async function saveSearchResult() {
+  const data = state.searchResult;
+  if (!data || !data.results.length) return;
+  try {
+    const saved = await api('/api/linux/save', {
+      method: 'POST',
+      body: JSON.stringify({ query: data.query, results: data.results }),
+    });
+    showNotification(`Сохранено: ${saved.path}`, 'info');
+    termLine('meta', `💾 поиск сохранён: ${saved.path}`);
+    setTab('files');
+  } catch (error) {
+    showNotification(error.message, 'warn');
+  }
+}
+
+async function readResult(url) {
+  searchStatus(`Читаю ${url}…`);
+  try {
+    const data = await api('/api/linux/read', { method: 'POST', body: JSON.stringify({ url }) });
+    setTab('terminal');
+    termLine('cmd', `nova read ${url}`);
+    termLine('out', data.text || '(страница пустая)');
+    termLine('meta', `${data.bytes} символов · ${data.elapsed_ms} мс`);
+  } catch (error) {
+    searchStatus(error.message, 'warn');
+  }
+}
+
+// ───────────────────────── git ─────────────────────────
 
   async function loadGit() {
     if (!el.gitBox) return;
@@ -378,6 +498,7 @@
       section.classList.toggle('is-active', section.dataset.sec === tab);
     });
     if (tab === 'files') loadFiles();
+    if (tab === 'search') el.searchInput && el.searchInput.focus();
     if (tab === 'git') loadGit();
     if (tab === 'tasks') loadTasks();
   }
@@ -497,8 +618,24 @@
     { key: 'explain', icon: '💡', title: 'Объясни код', prompt: 'Объясни этот код по пунктам: что делает, где может сломаться, что улучшить.' },
     { key: 'tests', icon: '🧪', title: 'Напиши тесты', prompt: 'Напиши юнит-тесты к этому коду и запусти их в песочнице.' },
     { key: 'optimize', icon: '⚡', title: 'Оптимизируй', prompt: 'Оптимизируй этот код: читаемость, скорость, обработка ошибок. Покажи diff.' },
+    { key: 'similar', icon: '🔎', title: 'Найди аналог в интернете', prompt: null },
     { key: 'terminal', icon: '⌨️', title: 'В терминал', prompt: null },
   ];
+
+  /** По коду строим поисковый запрос: язык + главный идентификатор. */
+  function searchQueryForCode(lang, code) {
+    const lines = String(code || '').split('\n').map((line) => line.trim()).filter(Boolean);
+    const named = lines.find((line) => /^(def|class|function|const|class|func)\s+([A-Za-z_]\w*)/.test(line));
+    const symbol = named && (named.match(/([A-Za-z_]\w*)\s*\(/) || [])[1];
+    const words = (named || lines[0] || '')
+      .replace(/[(){}=;:\[\]]/g, ' ')
+      .split(/\s+/).filter((word) => word.length > 2 && !/^(def|class|function|const|let|var|import|from|return|self|this)$/i.test(word));
+    const head = words.slice(0, 3).join(' ');
+    const prefix = { python: 'python', py: 'python', js: 'javascript', javascript: 'javascript',
+                     ts: 'typescript', typescript: 'typescript', bash: 'bash', sh: 'bash',
+                     sql: 'sql', go: 'golang', rust: 'rust', java: 'java' }[lang] || 'code';
+    return [prefix, symbol || head].filter(Boolean).join(' ').slice(0, 80);
+  }
 
   function codeOf(node) {
     const block = node.closest('.code-block');
@@ -520,6 +657,17 @@
     const action = CODE_ACTIONS.find((item) => item.key === button.dataset.code);
     if (!action || !text) return;
     event.preventDefault();
+    if (action.key === 'similar') {
+      const query = searchQueryForCode(lang, text);
+      state.searchMode = 'web';
+      document.querySelectorAll('.search-mode').forEach((item) => {
+        item.classList.toggle('is-active', item.dataset.mode === 'web');
+      });
+      openPanel('search');
+      if (el.searchInput) el.searchInput.value = query;
+      runLinuxSearch(query);
+      return;
+    }
     if (action.key === 'terminal') {
       const name = (lang === 'python' || lang === 'py') ? `snippets/${Date.now()}.py`
         : (lang === 'js' || lang === 'javascript') ? `snippets/${Date.now()}.js` : `snippets/${Date.now()}.txt`;
@@ -617,6 +765,46 @@
       termLine('out', state.file.content);
     });
 
+    el.searchForm && el.searchForm.addEventListener('submit', (event) => {
+      event.preventDefault();
+      runLinuxSearch();
+    });
+    el.searchModes && el.searchModes.addEventListener('click', (event) => {
+      const button = event.target.closest('.search-mode');
+      if (!button) return;
+      state.searchMode = button.dataset.mode;
+      document.querySelectorAll('.search-mode').forEach((item) => {
+        item.classList.toggle('is-active', item === button);
+      });
+      if (el.searchInput) {
+        el.searchInput.placeholder = state.searchMode === 'code'
+          ? 'что найти в файлах рабочей папки'
+          : 'например: python asyncio task group';
+      }
+    });
+    el.searchList && el.searchList.addEventListener('click', (event) => {
+      const hit = event.target.closest('.hit-code');
+      if (hit) { setTab('files'); openFile(hit.dataset.open); return; }
+      const button = event.target.closest('.hit-acts button');
+      if (!button) return;
+      const item = resultAt(Number(button.closest('.hit').dataset.index));
+      if (!item) return;
+      const act = button.dataset.act;
+      if (act === 'chat') {
+        el.input.value = `Разбери источник «${item.title || item.url}» (${item.url}). Что полезного взять?`;
+        el.input.focus();
+        el.input.dispatchEvent(new Event('input'));
+        closePanel();
+      } else if (act === 'task') {
+        addTask(`Изучить: ${item.title || item.url}`, item.url);
+        setTab('tasks');
+      } else if (act === 'save') {
+        saveSearchResult();
+      } else if (act === 'read') {
+        readResult(item.url);
+      }
+    });
+
     el.btnGitRefresh && el.btnGitRefresh.addEventListener('click', loadGit);
 
     el.taskForm && el.taskForm.addEventListener('submit', (event) => {
@@ -669,6 +857,9 @@
     loadFiles,
     loadGit,
     loadStatus,
+    search: runLinuxSearch,
+    searchInTerminal,
+    setSearchMode(mode) { state.searchMode = mode; },
     setAgent,
     toggleAgent,
     toggleCheatsheet,

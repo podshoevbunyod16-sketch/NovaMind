@@ -1570,6 +1570,7 @@ function formatContent(text) {
           <button type="button" data-code="explain" title="Объяснить этот код">💡 Объясни</button>
           <button type="button" data-code="tests" title="Написать тесты к этому коду">🧪 Тесты</button>
           <button type="button" data-code="optimize" title="Оптимизировать и показать diff">⚡ Оптимизируй</button>
+          <button type="button" data-code="similar" title="Найти аналог в интернете через песочницу">🔎 Аналог</button>
           <button type="button" data-code="copy" title="Скопировать код">📋</button>
           <button type="button" data-code="terminal" title="Перенести в терминал песочницы">⌨️ В терминал</button>
         </span>

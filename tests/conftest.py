@@ -81,3 +81,30 @@ class FakeResponse:
         if self.status_code >= 400:
             import requests
             raise requests.HTTPError(f"HTTP {self.status_code}")
+
+
+# ══════════════ «маленький Linux»: песочница и вход администратора ══════════════
+@pytest.fixture
+def sandbox(tmp_path, monkeypatch):
+    """Отдельная песочница и включённое окружение + вход администратора."""
+    import os
+    import routes.terminal as term_routes
+    import routes.agent as agent_routes
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.setattr(term_routes, "WORKSPACE", os.path.realpath(str(workspace)))
+    monkeypatch.setattr(agent_routes, "run_terminal", term_routes.run_agent)
+    monkeypatch.setenv("TERMINAL_ENABLED", "1")
+    monkeypatch.setenv("AGENT_ENABLED", "1")
+    return workspace
+
+
+@pytest.fixture
+def admin_client(client, sandbox):
+    """Администратор в уже включённой песочнице."""
+    with client.session_transaction() as session:
+        session["admin_logged_in"] = True
+        session["username"] = "admin"
+    return client
+
