@@ -870,6 +870,68 @@ function createAssistantTurn(options = {}) {
       scrollToBottom();
     },
 
+    /** План агента: короткий блок над шагами. */
+    plan(text) {
+      if (!text) return;
+      ensureStage(null, '');
+      let box = stage.querySelector('.stage-plan');
+      if (!box) {
+        box = document.createElement('div');
+        box.className = 'stage-plan';
+        stage.insertBefore(box, stepsEl);
+      }
+      box.innerHTML = `<span class="stage-plan-label">План</span><span class="stage-plan-text">${escapeHtml(text)}</span>`;
+      scrollToBottom();
+    },
+
+    /** Вывод команды терминала — сворачиваемый блок прямо в ответе. */
+    tool(event = {}) {
+      const command = event.command || '';
+      if (!command) return;
+      let box = bubble.querySelector('.agent-tools');
+      if (!box) {
+        box = document.createElement('div');
+        box.className = 'agent-tools';
+        bubble.appendChild(box);
+      }
+      const failed = Number(event.code) !== 0;
+      const wrapEl = document.createElement('div');
+      wrapEl.className = `agent-tool${failed ? ' is-error' : ''}`;
+      wrapEl.innerHTML = `
+        <button type="button" class="agent-tool-head">
+          <span class="agent-tool-ico">${failed ? '✕' : '⌨'}</span>
+          <code class="agent-tool-cmd">${escapeHtml(command)}</code>
+          <span class="agent-tool-code">${escapeHtml(String(event.code ?? 0))}</span>
+          <span class="caret">▼</span>
+        </button>
+        <pre class="agent-tool-out">${escapeHtml(event.output || '(пусто)')}</pre>`;
+      wrapEl.querySelector('.agent-tool-head').addEventListener('click', () => {
+        wrapEl.classList.toggle('is-open');
+      });
+      box.appendChild(wrapEl);
+      scrollToBottom();
+    },
+
+    /** Агент завёл задачу — показываем её прямо в ответе. */
+    taskChip(task = {}) {
+      if (!task.id) return;
+      let box = bubble.querySelector('.agent-task');
+      if (!box) {
+        box = document.createElement('div');
+        box.className = 'agent-task';
+        bubble.appendChild(box);
+      }
+      const steps = (task.steps || []).length;
+      box.innerHTML = `<span class="agent-task-ico">${task.status === 'done' ? '✔' : '📋'}</span>
+        <span class="agent-task-title">${escapeHtml(task.title || 'Задача')}</span>
+        <span class="agent-task-meta">${escapeHtml(task.status)}${steps ? ` · шагов: ${steps}` : ''}</span>
+        <button type="button" class="agent-task-more">Задачи</button>`;
+      box.querySelector('.agent-task-more').addEventListener('click', () => {
+        if (window.Linux) { window.Linux.open('tasks'); window.Linux.loadTasks(); }
+      });
+      scrollToBottom();
+    },
+
     reasoningToken(token) {
       if (!token) return;
       reasoningText += token;
@@ -954,6 +1016,8 @@ function createAssistantTurn(options = {}) {
       if (meta.provider) bits.push(escapeHtml(meta.provider));
       if (meta.offline) bits.push('офлайн');
       if (meta.searched) bits.push('с поиском');
+      if (meta.agent) bits.push('агент');
+      if (meta.steps) bits.push(`шагов: ${meta.steps}`);
       if (sourcesData.length) bits.push(`источников: ${sourcesData.length}`);
       bits.push(`${seconds} c`);
       metaEl.innerHTML = `<span>${bits.join(' · ')}</span>`;
@@ -1497,8 +1561,21 @@ function appendMessage(role, content, meta = null) {
 function formatContent(text) {
   let html = escapeHtml(String(text ?? ''));
 
-  // Блоки кода
-  html = html.replace(/```(\w+)?\n?([\s\S]*?)```/g, (_, lang, code) => `<pre><code>${code.trim()}</code></pre>`);
+  // Блоки кода — с кнопками для программиста
+  html = html.replace(/```(\w+)?\n?([\s\S]*?)```/g, (_, lang, code) => `
+    <div class="code-block" data-lang="${escapeHtml(lang || '')}">
+      <div class="code-bar">
+        <span class="code-lang">${escapeHtml(lang || 'код')}</span>
+        <span class="code-acts">
+          <button type="button" data-code="explain" title="Объяснить этот код">💡 Объясни</button>
+          <button type="button" data-code="tests" title="Написать тесты к этому коду">🧪 Тесты</button>
+          <button type="button" data-code="optimize" title="Оптимизировать и показать diff">⚡ Оптимизируй</button>
+          <button type="button" data-code="copy" title="Скопировать код">📋</button>
+          <button type="button" data-code="terminal" title="Перенести в терминал песочницы">⌨️ В терминал</button>
+        </span>
+      </div>
+      <pre><code>${code.trim()}</code></pre>
+    </div>`);
   // Инлайн-код
   html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
   // Заголовки

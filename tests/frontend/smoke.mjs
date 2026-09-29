@@ -1,6 +1,7 @@
 /**
- * Смоук-тест фронтенда: настоящий index.html + настоящий static/app.js
- * выполняются в jsdom и гоняют полный сценарий поиска.
+ * Смоук-тест фронтенда: настоящие index.html, app.js и linux.js
+ * выполняются в jsdom и гоняют полный сценарий поиска, «маленький Linux»
+ * и агентного режима.
  *
  * Запуск (нужен запущенный сервер на :5000 и установленный jsdom):
  *   npm install jsdom
@@ -17,6 +18,9 @@
  *   8. компоновка: сайдбар скрыт по умолчанию и открывается бургером,
  *      у чата и сайдбара нет своих ползунков, длинное имя модели
  *      обрезается многоточием с полным названием в подсказке.
+ *   9. страница настроек и окно входа не ломаются;
+ *  10. панель «маленький Linux»: терминал, файлы, git, задачи;
+ *  11. агентный режим, кнопки у блоков кода и шпаргалка хоткеев.
  */
 import { createRequire } from 'node:module';
 
@@ -69,6 +73,51 @@ const CHAT_STREAM = [
   { done: true, model: 'mock-model', provider: 'openai_compatible', has_reply: true },
 ];
 
+// ── Синтетический поток агента: те же события, что отдаёт /api/agent/stream
+const AGENT_STREAM = [
+  { type: 'stage', scene: 'agent', title: 'Планирую', text: 'Разбираю задачу по шагам…' },
+  { type: 'plan', text: '1) посмотреть файлы\n2) запустить пример' },
+  { type: 'task', task: { id: 'task-1', title: 'Проверить песочницу', status: 'doing', source: 'agent', steps: [] } },
+  { type: 'step', icon: '📂', text: 'Смотрю файлы — ls -la' },
+  { type: 'tool', name: 'run', command: 'ls -la', code: 0, output: 'README.md  hello.py' },
+  { type: 'step', icon: '✅', text: '$ python3 hello.py — код 0' },
+  { type: 'tool', name: 'run', command: 'python3 hello.py', code: 0, output: 'Привет из рабочей папки NovaMind' },
+  { type: 'task', task: { id: 'task-1', title: 'Проверить песочницу', status: 'done', source: 'agent',
+                           steps: [{ title: '$ python3 hello.py', status: 'done', log: 'ок' }] } },
+  { type: 'token', token: 'Скрипт отработал: ' },
+  { type: 'token', token: '**привет из папки**.' },
+  { type: 'result', reply: 'Скрипт отработал: привет из папки.', steps: 2, task_id: 'task-1', model: 'mock-model' },
+  { type: 'done' },
+];
+
+// Крошечный API задач в памяти — проверяем, что фронт говорит с ним по-человечески
+const taskStore = new Map();
+function tasksApi(path, options = {}) {
+  const method = (options.method || 'GET').toUpperCase();
+  const body = JSON.parse(options.body || '{}');
+  const reply = (data) => ({ ok: true, status: 200, async json() { return data; }, async text() { return JSON.stringify(data); } });
+  if (path === '/api/tasks' && method === 'GET') return reply({ tasks: [...taskStore.values()] });
+  if (path === '/api/tasks' && method === 'POST') {
+    const task = { id: 't' + (taskStore.size + 1), title: body.title, detail: '', status: 'todo',
+                   source: 'user', steps: [], created_at: Date.now() / 1000, updated_at: Date.now() / 1000 };
+    taskStore.set(task.id, task);
+    return reply({ task });
+  }
+  const id = path.split('/')[3];
+  const task = taskStore.get(id);
+  if (method === 'DELETE') { taskStore.delete(id); return reply({ deleted: id }); }
+  if (method === 'PATCH') {
+    Object.assign(task, body);
+    taskStore.set(id, task);
+    return reply({ task });
+  }
+  if (path.endsWith('/steps')) {
+    task.steps = (task.steps || []).concat([{ title: body.title, status: body.status, log: body.log }]);
+    return reply({ task });
+  }
+  return reply({});
+}
+
 function streamResponse(events) {
   const payload = events.map((e) => JSON.stringify(e)).join('\n') + '\n';
   const encoder = new TextEncoder();
@@ -97,11 +146,11 @@ const pageHtml = await (await fetch(BASE + '/chat')).text();
 // jsdom не тянет внешние скрипты сам — подставляем app.js инлайном,
 // ровно тем содержимым, которое отдаёт сервер.
 const appJs = await (await fetch(BASE + '/static/app.js')).text();
-const html = pageHtml.replace(
-  '<script src="/static/app.js"></script>',
-  '<script>' + appJs + '</script>',
-);
-if (html === pageHtml) throw new Error('не удалось встроить /static/app.js в страницу');
+const linuxJs = await (await fetch(BASE + '/static/linux.js')).text();
+const html = pageHtml
+  .replace('<script src="/static/app.js"></script>', '<script>' + appJs + '</script>')
+  .replace('<script src="/static/linux.js"></script>', '<script>' + linuxJs + '</script>');
+if (!html.includes('window.Linux')) throw new Error('не удалось встроить /static/linux.js в страницу');
 
 const virtualConsole = new VirtualConsole();
 const consoleErrors = [];
@@ -128,6 +177,7 @@ const dom = new JSDOM(html, {
     window.addEventListener('error', (event) => consoleErrors.push('window.onerror: ' + event.message));
     window.fetch = async (url, options = {}) => {
       const path = String(url).replace(BASE, '');
+      const json = (data) => ({ ok: true, status: 200, async json() { return data; }, async text() { return JSON.stringify(data); } });
       if (path.startsWith('/api/auto_search_stream')) return streamResponse(SEARCH_STREAM);
       if (path.startsWith('/send_stream')) return streamResponse(CHAT_STREAM);
       if (path.startsWith('/api/ai/status')) {
@@ -139,6 +189,38 @@ const dom = new JSDOM(html, {
       if (path.startsWith('/api/media/')) {
         return { ok: true, status: 200, async json() { return { selection: null }; } };
       }
+      if (path.startsWith('/api/terminal/status')) {
+        return json({ enabled: true, admin: true, available: true, workspace: 'workspace', git: true,
+                      commands: ['ls', 'python3', 'git'] });
+      }
+      if (path.startsWith('/api/terminal/run')) {
+        const command = String(JSON.parse(options.body || '{}').command || '');
+        if (command === 'ls -la') {
+          return json({ code: 0, stdout: 'README.md  hello.py', stderr: '', duration_ms: 12, timed_out: false, cwd: '.' });
+        }
+        if (command.startsWith('shutdown')) {
+          return { ok: false, status: 400, async json() { return { error: 'Команда «shutdown» не в списке разрешённых' }; } };
+        }
+        return json({ code: 0, stdout: 'Привет из рабочей папки NovaMind', stderr: '', duration_ms: 40, timed_out: false, cwd: '.' });
+      }
+      if (path.startsWith('/api/terminal/files')) {
+        return json({ files: [
+          { path: 'hello.py', name: 'hello.py', size: 220, dir: '.' },
+          { path: 'notes/ideas.md', name: 'ideas.md', size: 48, dir: 'notes' },
+        ], truncated: false, workspace: 'workspace' });
+      }
+      if (path.startsWith('/api/terminal/file')) {
+        return json({ path: 'hello.py', content: 'print(\"привет\")' });
+      }
+      if (path.startsWith('/api/terminal/git')) {
+        return json({ repo: true, branch: 'main', clean: false, last: 'a1b2c3d первый коммит (Nova, 2026-09-29)',
+                      changes: [{ status: 'M', path: 'hello.py' }] });
+      }
+      if (path.startsWith('/api/agent/status')) {
+        return json({ enabled: true, tools: true, max_steps: 6, admin: true, hint: '' });
+      }
+      if (path.startsWith('/api/agent/stream')) return streamResponse(AGENT_STREAM);
+      if (path.startsWith('/api/tasks')) return tasksApi(path, options);
       if (path.startsWith('/send')) {
         return { ok: true, status: 200, async json() { return { reply: 'Запасной ответ', chat_id: 'x' }; } };
       }
@@ -447,6 +529,170 @@ await new Promise((resolve) => setTimeout(resolve, 150));
 // jsdom не умеет реальную навигацию — это ограничение теста, а не страницы
 const realErrors = authErrors.filter((item) => !item.includes('Not implemented: navigation'));
 check('вход: после входа нет ошибок', realErrors.length === 0, realErrors.join(' | '));
+
+console.log('\n10) Маленький Linux: панель, терминал, файлы, git, задачи');
+const linuxPanel = document.getElementById('linuxPanel');
+const termOut = document.getElementById('termOut');
+const termInput = document.getElementById('termInput');
+const press = (key, options = {}) => document.dispatchEvent(
+  new window.KeyboardEvent('keydown', { key, bubbles: true, cancelable: true, ...options })
+);
+
+check('панель скрыта до первого открытия', linuxPanel.hidden === true);
+press('j', { ctrlKey: true });
+await new Promise((resolve) => setTimeout(resolve, 120));
+check('Ctrl+J открывает панель', linuxPanel.hidden === false
+  && document.body.classList.contains('linux-open')
+  && document.getElementById('btnLinux').getAttribute('aria-expanded') === 'true');
+check('доступ к песочнице подтверждён, индикатор горит',
+  document.getElementById('linuxLed').classList.contains('is-on')
+  && document.getElementById('linuxPath').textContent.includes('workspace'));
+
+termInput.value = 'ls -la';
+document.getElementById('termForm').dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
+await new Promise((resolve) => setTimeout(resolve, 120));
+check('терминал выполняет команду и печатает вывод',
+  termOut.textContent.includes('$ ls -la') && termOut.textContent.includes('README.md')
+  && termOut.textContent.includes('код 0'), termOut.textContent.slice(-120));
+
+termInput.value = 'shutdown now';
+document.getElementById('termForm').dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
+await new Promise((resolve) => setTimeout(resolve, 120));
+check('команда вне белого списка ругается понятно',
+  termOut.textContent.includes('не в списке разрешённых'));
+
+document.querySelector('#linuxTabs .linux-tab[data-tab="files"]').click();
+await new Promise((resolve) => setTimeout(resolve, 120));
+check('вкладка «Файлы» показывает дерево рабочей папки',
+  document.getElementById('fileList').textContent.includes('hello.py')
+  && document.getElementById('fileList').textContent.includes('notes'));
+document.querySelector('.file-row[data-path="hello.py"]').click();
+await new Promise((resolve) => setTimeout(resolve, 120));
+check('файл открывается для просмотра',
+  document.getElementById('fileView').hidden === false
+  && document.getElementById('fileViewBody').textContent.includes('print'));
+document.getElementById('btnFileToChat').click();
+await new Promise((resolve) => setTimeout(resolve, 120));
+check('«В чат» подставляет содержимое файла в поле ввода',
+  document.getElementById('chat-input').value.includes('hello.py')
+  && linuxPanel.hidden === true);
+
+window.Linux.open('git');
+await new Promise((resolve) => setTimeout(resolve, 120));
+check('вкладка «Git» показывает ветку и изменения',
+  document.getElementById('gitBox').textContent.includes('main')
+  && document.getElementById('gitBox').textContent.includes('hello.py'));
+
+window.Linux.open('tasks');
+await new Promise((resolve) => setTimeout(resolve, 120));
+document.getElementById('taskInput').value = 'Починить смоук';
+document.getElementById('taskForm').dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
+await new Promise((resolve) => setTimeout(resolve, 150));
+check('задача добавляется в список и счётчик',
+  document.getElementById('taskList').textContent.includes('Починить смоук')
+  && document.getElementById('tasksBadge').hidden === false);
+document.querySelector('#taskList [data-cycle]').click();
+await new Promise((resolve) => setTimeout(resolve, 150));
+check('клик по чекбоксу переключает статус задачи',
+  document.querySelector('#taskList .task-card').className.includes('is-doing'));
+document.querySelector('#taskList [data-del]').click();
+await new Promise((resolve) => setTimeout(resolve, 150));
+check('задача удаляется', !document.getElementById('taskList').textContent.includes('Починить смоук'));
+
+press('j', { ctrlKey: true });
+await new Promise((resolve) => setTimeout(resolve, 100));
+check('Ctrl+J закрывает панель', linuxPanel.hidden === true);
+
+console.log('\n11) Агентный режим и бонусы для программиста');
+const agentButton = document.getElementById('btnAgent');
+agentButton.click();
+await new Promise((resolve) => setTimeout(resolve, 120));
+check('агентный режим включается и меняет подсказку',
+  agentButton.classList.contains('is-on')
+  && agentButton.getAttribute('aria-pressed') === 'true'
+  && document.getElementById('chat-input').placeholder.includes('агент'));
+
+document.getElementById('chat-input').value = 'запусти hello.py и скажи результат';
+await window.sendMessage();
+await new Promise((resolve) => setTimeout(resolve, 350));
+const aiTurns = document.querySelectorAll('.message.ai');
+const agentBubble = aiTurns[aiTurns.length - 1];
+check('агент показывает план', !!agentBubble && agentBubble.querySelector('.stage-plan') !== null);
+check('агент показывает выполненные команды',
+  !!agentBubble && agentBubble.querySelectorAll('.agent-tool').length === 2
+  && agentBubble.textContent.includes('python3 hello.py'));
+check('агент показывает заведённую задачу',
+  !!agentBubble && agentBubble.querySelector('.agent-task') !== null
+  && agentBubble.querySelector('.agent-task').textContent.includes('Проверить песочницу'));
+check('агент печатает ответ и закрывает сцену',
+  !!agentBubble && agentBubble.querySelector('.answer').textContent.includes('привет из папки')
+  && agentBubble.querySelector('.stage').classList.contains('collapsed'));
+check('мета ответа упоминает агента и шаги',
+  !!agentBubble && agentBubble.querySelector('.msg-meta').textContent.includes('агент')
+  && agentBubble.querySelector('.msg-meta').textContent.includes('шагов: 2'));
+
+window.Linux.open('terminal');
+await new Promise((resolve) => setTimeout(resolve, 100));
+press('Escape');   // первый Esc — панель
+await new Promise((resolve) => setTimeout(resolve, 100));
+press('Escape');   // второй Esc — агентный режим
+await new Promise((resolve) => setTimeout(resolve, 100));
+check('Escape закрывает панель, затем выключает агентный режим',
+  linuxPanel.hidden === true && !agentButton.classList.contains('is-on'));
+
+// кнопки у блока кода
+const codeTurn = window.createAssistantTurn();
+codeTurn.appendText('Вот функция:\n\n```python\ndef add(a, b):\n    return a + b\n```');
+await new Promise((resolve) => setTimeout(resolve, 80));
+const codeBlock = codeTurn.element.querySelector('.code-block');
+check('у блока кода есть кнопки для программиста',
+  !!codeBlock && codeBlock.querySelector('[data-code="explain"]')
+  && codeBlock.querySelector('[data-code="tests"]')
+  && codeBlock.querySelector('[data-code="optimize"]')
+  && codeBlock.querySelector('[data-code="terminal"]'));
+
+codeBlock.querySelector('[data-code="explain"]').dispatchEvent(
+  new window.MouseEvent('click', { bubbles: true, cancelable: true }));
+await new Promise((resolve) => setTimeout(resolve, 80));
+check('«Объясни» подставляет код в поле ввода',
+  document.getElementById('chat-input').value.includes('Объясни этот код')
+  && document.getElementById('chat-input').value.includes('return a + b'));
+
+codeBlock.querySelector('[data-code="terminal"]').dispatchEvent(
+  new window.MouseEvent('click', { bubbles: true, cancelable: true }));
+await new Promise((resolve) => setTimeout(resolve, 150));
+check('«В терминал» открывает панель и подставляет имя файла',
+  linuxPanel.hidden === false && termInput.value.includes('snippets/')
+  && termOut.textContent.includes('def add'), termInput.value);
+
+press('Escape');
+await new Promise((resolve) => setTimeout(resolve, 100));
+check('Escape закрывает панель', linuxPanel.hidden === true);
+
+// в агентном режиме «Объясни» не подставляет текст, а сразу идёт агенту
+agentButton.click();
+await new Promise((resolve) => setTimeout(resolve, 100));
+const turnsBefore = document.querySelectorAll('.message.ai').length;
+document.getElementById('chat-input').value = '';
+codeBlock.querySelector('[data-code="explain"]').dispatchEvent(
+  new window.MouseEvent('click', { bubbles: true, cancelable: true }));
+await new Promise((resolve) => setTimeout(resolve, 300));
+check('в агентном режиме «Объясни» уходит агенту, а не в поле',
+  document.getElementById('chat-input').value === ''
+  && document.querySelectorAll('.message.ai').length === turnsBefore + 1);
+window.Linux.setAgent(false);
+await new Promise((resolve) => setTimeout(resolve, 100));
+
+document.activeElement && document.activeElement.blur();   // «?» работает вне поля ввода
+press('?', { keyCode: 63 });
+await new Promise((resolve) => setTimeout(resolve, 100));
+check('«?» открывает шпаргалку хоткеев',
+  document.getElementById('cheatsheet').hidden === false
+  && document.querySelector('.cheat-list').textContent.includes('Ctrl')
+  && document.querySelector('.cheat-list').textContent.includes('агентный режим'));
+press('Escape');
+await new Promise((resolve) => setTimeout(resolve, 100));
+check('Escape закрывает шпаргалку', document.getElementById('cheatsheet').hidden === true);
 
 if (failures.length) {
   console.error(`\n❌ Провалено проверок: ${failures.length} → ${failures.join(', ')}`);

@@ -116,6 +116,16 @@
 
       <div class="topbar-actions">
 
+        <button class="icon-btn agent-btn" id="btnAgent" type="button" aria-pressed="false"
+                title="Агентный режим: задача выполняется в песочнице (терминал, файлы, задачи)">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="7" width="16" height="12" rx="3"/><path d="M12 3v4M8 13h.01M16 13h.01M9.5 16.5h5"/></svg>
+        </button>
+
+        <button class="icon-btn" id="btnLinux" type="button" aria-expanded="false"
+                title="Маленький Linux: терминал, файлы, git и задачи (Ctrl+J)">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M7 9l3 3-3 3M13 15h4"/></svg>
+        </button>
+
         <button class="media-model-btn" id="btnMediaModel" type="button"
                 onclick="openMediaPicker()" title="Поиск и выбор моделей генерации изображений, аудио и видео">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z"/><path d="M19 15l.8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8z"/></svg>
@@ -216,7 +226,7 @@
       </div>
 
       <div class="input-wrapper">
-        <textarea id="chat-input" placeholder="Напишите сообщение..." rows="1" onkeydown="handleKey(event)" oninput="autoResize(this); document.getElementById('sendBtn').disabled = !this.value.trim()"></textarea>
+        <textarea id="chat-input" placeholder="Напишите сообщение..." rows="1" data-default-placeholder="Напишите сообщение..." onkeydown="handleKey(event)" oninput="autoResize(this); document.getElementById('sendBtn').disabled = !this.value.trim()"></textarea>
 
         <div class="input-actions">
           <button class="voice-btn" id="voiceBtn" onclick="toggleVoice()" title="Голосовой ввод">
@@ -296,6 +306,98 @@
 
 <div class="lg-toast-stack" id="toastStack" aria-live="polite"></div>
 
-<script src="/static/app.js"></script>
+
+  <!-- ═══════════════ МАЛЕНЬКИЙ LINUX ═══════════════ -->
+  <aside class="linux-panel" id="linuxPanel" hidden aria-label="Маленький Linux">
+    <header class="linux-head">
+      <div class="linux-title">
+        <span class="linux-led" id="linuxLed"></span>
+        <span>Рабочая папка</span>
+        <code class="linux-path" id="linuxPath">workspace/</code>
+      </div>
+      <nav class="linux-tabs" id="linuxTabs" role="tablist">
+        <button type="button" class="linux-tab is-active" data-tab="terminal" role="tab">Терминал</button>
+        <button type="button" class="linux-tab" data-tab="files" role="tab">Файлы</button>
+        <button type="button" class="linux-tab" data-tab="git" role="tab">Git</button>
+        <button type="button" class="linux-tab" data-tab="tasks" role="tab">Задачи<span class="linux-badge" id="tasksBadge" hidden>0</span></button>
+      </nav>
+      <button class="icon-btn linux-close" id="btnLinuxClose" type="button" title="Закрыть (Esc)">✕</button>
+    </header>
+
+    <div class="linux-body">
+      <!-- Терминал -->
+      <section class="linux-sec is-active" data-sec="terminal">
+        <div class="term-out" id="termOut" aria-live="polite"></div>
+        <div class="term-chips" id="termChips"></div>
+        <form class="term-row" id="termForm" autocomplete="off">
+          <span class="term-prompt">$</span>
+          <input class="term-input" id="termInput" spellcheck="false" placeholder="python3 hello.py">
+          <button class="term-run" type="submit" title="Выполнить (Enter)">↵</button>
+        </form>
+        <div class="linux-note" id="termNote" hidden></div>
+      </section>
+
+      <!-- Файлы -->
+      <section class="linux-sec" data-sec="files">
+        <div class="sec-bar">
+          <button class="lg-btn tiny" id="btnFilesRefresh" type="button">Обновить</button>
+          <span class="sec-hint" id="filesHint"></span>
+        </div>
+        <div class="file-list" id="fileList"></div>
+        <div class="file-view" id="fileView" hidden>
+          <div class="file-view-head">
+            <code id="fileViewPath"></code>
+            <span class="file-view-acts">
+              <button class="lg-btn tiny" id="btnFileToChat" type="button" title="Вставить содержимое в поле ввода">В чат</button>
+              <button class="lg-btn tiny" id="btnFileToTerm" type="button" title="Показать в терминале">В терминал</button>
+              <button class="lg-btn tiny" id="btnFileClose" type="button">Закрыть</button>
+            </span>
+          </div>
+          <pre class="file-view-body" id="fileViewBody"></pre>
+        </div>
+      </section>
+
+      <!-- Git -->
+      <section class="linux-sec" data-sec="git">
+        <div class="sec-bar">
+          <button class="lg-btn tiny" id="btnGitRefresh" type="button">Обновить</button>
+          <span class="sec-hint" id="gitHint"></span>
+        </div>
+        <div class="git-box" id="gitBox"></div>
+      </section>
+
+      <!-- Задачи -->
+      <section class="linux-sec" data-sec="tasks">
+        <form class="task-form" id="taskForm">
+          <input id="taskInput" placeholder="Новая задача — Enter, чтобы добавить">
+          <button class="lg-btn tiny" type="submit">Добавить</button>
+        </form>
+        <div class="task-list" id="taskList"></div>
+      </section>
+    </div>
+  </aside>
+
+  <!-- Шпаргалка по горячим клавишам -->
+  <div class="cheatsheet" id="cheatsheet" hidden>
+    <div class="cheat-card" role="dialog" aria-label="Горячие клавиши">
+      <div class="cheat-head">
+        <span>⌨️ Горячие клавиши</span>
+        <button class="icon-btn" id="btnCheatClose" type="button" title="Закрыть">✕</button>
+      </div>
+      <ul class="cheat-list">
+        <li><kbd>?</kbd><span>эта шпаргалка</span></li>
+        <li><kbd>Ctrl</kbd>+<kbd>J</kbd><span>панель «маленький Linux»</span></li>
+        <li><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>A</kbd><span>агентный режим</span></li>
+        <li><kbd>Ctrl</kbd>+<kbd>K</kbd><span>команды и режимы</span></li>
+        <li><kbd>Ctrl</kbd>+<kbd>Enter</kbd><span>отправить сообщение</span></li>
+        <li><kbd>Esc</kbd><span>закрыть панель, снять активный режим</span></li>
+        <li><kbd>↑</kbd><kbd>↓</kbd><span>в терминале — история команд</span></li>
+      </ul>
+      <p class="cheat-foot">Подсказка: у блока кода есть свои кнопки — «Объясни», «Тесты», «Оптимизируй», «В терминал».</p>
+    </div>
+  </div>
+
+  <script src="/static/app.js"></script>
+  <script src="/static/linux.js"></script>
 </body>
 </html>

@@ -24,6 +24,10 @@ GOOGLE_REDIRECT_URI  = os.getenv("GOOGLE_REDIRECT_URI", "http://localhost:5000/a
 # ---------- Безопасность ----------
 ADMIN_CODE        = os.getenv("ADMIN_CODE", "007")
 ADMIN_SESSION_KEY = os.getenv("SESSION_SECRET") or os.urandom(24).hex()
+# Логин и код администратора. ADMIN_USER можно переопределить в .env,
+# иначе вход идёт под именем admin с кодом ADMIN_CODE.
+ADMIN_USER        = os.getenv("ADMIN_USER", "admin").strip() or "admin"
+ADMIN_CREDENTIALS = {ADMIN_USER: ADMIN_CODE}
 
 # ---------- Провайдеры AI ----------
 PROVIDERS = {

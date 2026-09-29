@@ -3,6 +3,7 @@ database.py — SQLite база данных для истории чатов
 """
 import os
 import time
+import json
 import uuid
 import sqlite3
 import threading
@@ -125,3 +126,101 @@ def trim_messages(chat_id, max_messages=100):
                 """, (chat_id, chat_id, max_messages))
 
 # ---------- Админ ----------
+
+# ══════════════════════════════════════════════════════════════
+# ЗАДАЧИ
+# Список дел, который живёт рядом с чатами: их создаёт человек или
+# агентный режим, у каждой задачи есть шаги и лог выполнения.
+# ══════════════════════════════════════════════════════════════
+
+def init_tasks():
+    """Таблица задач создаётся лениво — чтобы старый novamind_chats.db не ломался."""
+    with get_db() as conn:
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS tasks (
+                id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                detail TEXT DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'todo',      -- todo | doing | done
+                source TEXT NOT NULL DEFAULT 'user',      -- user | agent
+                steps TEXT NOT NULL DEFAULT '[]',         -- JSON: [{title, status, log, at}]
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_tasks_updated ON tasks(updated_at DESC);
+        """)
+
+def _row_to_task(row):
+    try:
+        steps = json.loads(row["steps"] or "[]")
+    except (TypeError, ValueError):
+        steps = []
+    data = dict(row)
+    data["steps"] = steps if isinstance(steps, list) else []
+    return data
+
+def list_tasks(status=None, limit=100):
+    init_tasks()
+    with get_db() as conn:
+        if status:
+            rows = conn.execute(
+                "SELECT * FROM tasks WHERE status=? ORDER BY updated_at DESC LIMIT ?",
+                (status, limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM tasks ORDER BY updated_at DESC LIMIT ?", (limit,)
+            ).fetchall()
+    return [_row_to_task(r) for r in rows]
+
+def create_task(title, detail="", source="user", steps=None):
+    init_tasks()
+    task_id = str(uuid.uuid4())
+    now = time.time()
+    with _db_lock:
+        with get_db() as conn:
+            conn.execute(
+                "INSERT INTO tasks (id, title, detail, status, source, steps, created_at, updated_at)"
+                " VALUES (?, ?, ?, 'todo', ?, ?, ?, ?)",
+                (task_id, title[:200], detail[:2000], source, json.dumps(steps or [], ensure_ascii=False), now, now),
+            )
+    return get_task(task_id)
+
+def get_task(task_id):
+    init_tasks()
+    with get_db() as conn:
+        row = conn.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
+    return _row_to_task(row) if row else None
+
+def update_task(task_id, **fields):
+    """Обновляет перечисленные поля задачи (title, detail, status)."""
+    init_tasks()
+    allowed = {key: fields[key] for key in ("title", "detail", "status")
+               if key in fields and fields[key] is not None}
+    if not allowed:
+        return get_task(task_id)
+    sets = ", ".join(f"{key}=?" for key in allowed)
+    with _db_lock:
+        with get_db() as conn:
+            conn.execute(f"UPDATE tasks SET {sets}, updated_at=? WHERE id=?",
+                         (*allowed.values(), time.time(), task_id))
+    return get_task(task_id)
+
+def append_task_step(task_id, title, status="doing", log=""):
+    """Дописывает шаг к задаче: агент так показывает, что именно он делает."""
+    task = get_task(task_id)
+    if not task:
+        return None
+    steps = task["steps"]
+    steps.append({"title": title[:200], "status": status, "log": log[:4000], "at": time.time()})
+    with _db_lock:
+        with get_db() as conn:
+            conn.execute("UPDATE tasks SET steps=?, updated_at=? WHERE id=?",
+                         (json.dumps(steps[-40:], ensure_ascii=False), time.time(), task_id))
+    return get_task(task_id)
+
+def delete_task(task_id):
+    init_tasks()
+    with _db_lock:
+        with get_db() as conn:
+            conn.execute("DELETE FROM tasks WHERE id=?", (task_id,))

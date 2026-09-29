@@ -7,7 +7,7 @@ import json
 import os
 from database import list_chats
 from groq_rotation import GROQ_KEYS, get_groq_key_status
-from config import ADMIN_CODE, ADMIN_SESSION_KEY, PROVIDERS
+from config import ADMIN_CODE, ADMIN_CREDENTIALS, ADMIN_SESSION_KEY, PROVIDERS
 
 admin_bp = Blueprint("admin", __name__)
 
@@ -78,6 +78,7 @@ def admin_login():
         return jsonify({'success': False, 'error': 'Неверный код'})
 
     session['admin_logged_in'] = True
+    session['admin_username'] = username
     return jsonify({'success': True, 'username': username})
 
 @admin_bp.route('/api/admin/logout', methods=['POST'])

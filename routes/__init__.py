@@ -8,6 +8,8 @@ from .admin import admin_bp
 from .media import media_bp
 from .search import search_bp
 from .composio import composio_bp
+from .terminal import terminal_bp, tasks_bp
+from .agent import agent_bp
 
 ALL_BLUEPRINTS = [
     chat_bp,
@@ -17,4 +19,7 @@ ALL_BLUEPRINTS = [
     media_bp,
     search_bp,
     composio_bp,
+    terminal_bp,
+    tasks_bp,
+    agent_bp,
 ]

@@ -1,0 +1,690 @@
+/**
+ * static/linux.js — «маленький Linux» поверх чата.
+ *
+ * Всё живёт в одной правой панели: терминал, файлы рабочей папки,
+ * git и список задач. Агентный режим (кнопка в шапке) отправляет
+ * сообщение не в чат, а в агентный цикл, который работает этой
+ * же песочницей. Бонус для программистов: кнопки прямо у блоков
+ * кода в ответах модели.
+ *
+ * Зависит от app.js (fetch, consumeNdjson, createAssistantTurn),
+ * поэтому подключается вторым скриптом.
+ */
+(() => {
+  'use strict';
+
+  const $ = (id) => document.getElementById(id);
+  const state = {
+    open: false,
+    tab: 'terminal',
+    status: null,
+    history: [],
+    histIndex: -1,
+    busy: false,
+    file: null,
+    agent: false,
+    agentStatus: null,
+  };
+
+  const el = {};
+
+  function cache() {
+    [
+      'linuxPanel', 'linuxPath', 'linuxLed', 'linuxTabs', 'btnLinuxClose', 'btnLinux', 'btnAgent',
+      'termOut', 'termChips', 'termForm', 'termInput', 'termNote',
+      'fileList', 'filesHint', 'btnFilesRefresh', 'fileView', 'fileViewPath', 'fileViewBody',
+      'btnFileToChat', 'btnFileToTerm', 'btnFileClose',
+      'gitBox', 'gitHint', 'btnGitRefresh',
+      'taskForm', 'taskInput', 'taskList', 'tasksBadge',
+      'cheatsheet', 'btnCheatClose', 'chatContainer', 'chat-input',
+    ].forEach((id) => { el[id] = $(id); });
+    el.input = el['chat-input'];          // то же поле ввода, короткое имя как в app.js
+  }
+
+  // ───────────────────────── утилиты ─────────────────────────
+
+  const esc = (text) => String(text ?? '').replace(/[&<>"']/g, (ch) => (
+    { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]
+  ));
+
+  async function api(url, options) {
+    const response = await fetch(url, {
+      headers: { 'Content-Type': 'application/json' },
+      ...options,
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      const error = new Error(data.error || `HTTP ${response.status}`);
+      error.status = response.status;
+      error.data = data;
+      throw error;
+    }
+    return data;
+  }
+
+  function showNotification(message, kind) {
+    if (typeof window.showNotification === 'function') window.showNotification(message, kind);
+  }
+
+  // ───────────────────────── терминал ─────────────────────────
+
+  function termLine(kind, text) {
+    if (!el.termOut) return;
+    const line = document.createElement('div');
+    line.className = `term-line is-${kind}`;
+    line.textContent = text == null ? '' : String(text);
+    el.termOut.appendChild(line);
+    el.termOut.scrollTop = el.termOut.scrollHeight;
+  }
+
+  function termBanner(text, kind = 'info') {
+    termLine('banner', text);
+  }
+
+  /** Подсказки быстрого ввода — самые ходовые команды. */
+  const QUICK = [
+    { cmd: 'ls -la', title: 'Что в папке' },
+    { cmd: 'python3 hello.py', title: 'Запустить пример' },
+    { cmd: 'git status', title: 'Состояние git' },
+    { cmd: 'cat README.md', title: 'Прочитать README' },
+    { cmd: 'help', title: 'Что доступно' },
+  ];
+
+  function paintQuickChips() {
+    if (!el.termChips) return;
+    el.termChips.innerHTML = QUICK.map((item) =>
+      `<button type="button" class="term-chip" data-cmd="${esc(item.cmd)}" title="${esc(item.cmd)}">${esc(item.title)}</button>`
+    ).join('');
+  }
+
+  function setNote(text) {
+    if (!el.termNote) return;
+    el.termNote.hidden = !text;
+    if (text) el.termNote.textContent = text;
+  }
+
+  async function runTerminal(command) {
+    const cmd = String(command || '').trim();
+    if (!cmd || state.busy) return;
+    state.busy = true;
+    setNote('');
+    termLine('cmd', `$ ${cmd}`);
+    el.termOut.scrollTop = el.termOut.scrollHeight;
+    try {
+      const result = await api('/api/terminal/run', { method: 'POST', body: JSON.stringify({ command: cmd }) });
+      if (result.stdout) termLine('out', result.stdout);
+      if (result.stderr) termLine('err', result.stderr);
+      const meta = `код ${result.code} · ${result.duration_ms} мс`;
+      termLine(result.code ? 'err' : 'meta', meta + (result.timed_out ? ' · прервано по таймауту' : ''));
+      state.history.unshift(cmd);
+      loadGit();                 // команда могла изменить репозиторий
+    } catch (error) {
+      termLine('err', error.message);
+    } finally {
+      state.busy = false;
+      el.termInput.focus();
+    }
+  }
+
+  // ───────────────────────── статус окружения ─────────────────────────
+
+  async function loadStatus() {
+    try {
+      const status = await api('/api/terminal/status');
+      state.status = status;
+      if (el.linuxLed) el.linuxLed.classList.toggle('is-on', !!status.available);
+      if (el.linuxPath) el.linuxPath.textContent = `${status.workspace || 'workspace/'}/`;
+      if (el.termInput) el.termInput.disabled = !status.available;
+      if (status.available) {
+        setNote('');
+        if (!el.termOut.children.length) {
+          termBanner('Песочница готова. Команды выполняются по одной, без | и >.');
+          termBanner('Наберите help — покажу, что доступно.');
+        }
+      } else {
+        setNote(status.hint || 'Окружение недоступно');
+        if (!el.termOut.children.length) {
+          termBanner(status.enabled
+            ? 'Нужен вход администратора: откройте панель управления и войдите.'
+            : 'Окружение выключено. В .env добавьте TERMINAL_ENABLED=1 и перезапустите сервер.');
+        }
+      }
+      if (el.filesHint) el.filesHint.textContent = status.available ? '' : status.hint || '';
+      if (!status.available && !el.taskList.children.length) paintTasksOff();
+    } catch (error) {
+      setNote(error.message);
+    }
+    try {
+      state.agentStatus = await api('/api/agent/status');
+    } catch (_) {
+      state.agentStatus = { enabled: false };
+    }
+    paintAgentButton();
+  }
+
+  // ───────────────────────── файлы ─────────────────────────
+
+  async function loadFiles() {
+    if (!el.fileList) return;
+    try {
+      const data = await api('/api/terminal/files');
+      if (!data.files.length) {
+        el.fileList.innerHTML = '<div class="sec-empty">Папка пуста. Создайте файл из терминала: touch hello.py</div>';
+      } else {
+        el.fileList.innerHTML = data.files.map((file) => `
+          <button type="button" class="file-row" data-path="${esc(file.path)}" title="${esc(file.path)}">
+            <span class="file-ico">${file.path.endsWith('.py') ? '🐍' : file.path.endsWith('.md') ? '📝' : file.path.endsWith('.csv') ? '📊' : '📄'}</span>
+            <span class="file-name">${esc(file.name)}</span>
+            <span class="file-dir">${esc(file.dir)}</span>
+            <span class="file-size">${formatBytes(file.size)}</span>
+          </button>`).join('');
+      }
+      if (el.filesHint) {
+        el.filesHint.textContent = data.truncated
+          ? `показаны первые ${data.files.length} файлов`
+          : `${data.files.length} файл(ов)`;
+      }
+    } catch (error) {
+      el.fileList.innerHTML = `<div class="sec-empty">${esc(error.message)}</div>`;
+    }
+  }
+
+  function formatBytes(size) {
+    if (!size) return '0 Б';
+    if (size < 1024) return `${size} Б`;
+    if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} КБ`;
+    return `${(size / 1024 / 1024).toFixed(1)} МБ`;
+  }
+
+  async function openFile(path) {
+    try {
+      const data = await api('/api/terminal/file', { method: 'POST', body: JSON.stringify({ action: 'read', path }) });
+      state.file = data;
+      el.fileViewPath.textContent = data.path;
+      el.fileViewBody.textContent = data.content;
+      el.fileView.hidden = false;
+    } catch (error) {
+      showNotification(error.message, 'warn');
+    }
+  }
+
+  function closeFile() {
+    state.file = null;
+    el.fileView.hidden = true;
+    el.fileViewBody.textContent = '';
+  }
+
+  // ───────────────────────── git ─────────────────────────
+
+  async function loadGit() {
+    if (!el.gitBox) return;
+    try {
+      const data = await api('/api/terminal/git');
+      if (!data.repo) {
+        el.gitBox.innerHTML = `
+          <div class="sec-empty">Это не git-репозиторий.</div>
+          <button class="lg-btn tiny" id="btnGitInit" type="button">Создать репозиторий</button>`;
+        const init = $('btnGitInit');
+        if (init) init.addEventListener('click', () => runTerminal('git init').then(loadGit));
+        if (el.gitHint) el.gitHint.textContent = '';
+        return;
+      }
+      const rows = data.changes.length
+        ? data.changes.map((row) => `
+            <div class="git-row"><span class="git-flag is-${esc(row.status)}">${esc(row.status)}</span>
+            <code>${esc(row.path)}</code></div>`).join('')
+        : '<div class="sec-empty">Рабочая папка чистая — незакоммиченных изменений нет.</div>';
+      el.gitBox.innerHTML = `
+        <div class="git-head">
+          <span class="git-branch">⎇ ${esc(data.branch)}</span>
+          <span class="git-state ${data.clean ? 'is-clean' : 'is-dirty'}">${data.clean ? 'чисто' : data.changes.length + ' изменений'}</span>
+        </div>
+        <div class="git-last" title="Последний коммит">${esc(data.last || 'коммитов пока нет')}</div>
+        <div class="git-rows">${rows}</div>`;
+      if (el.gitHint) el.gitHint.textContent = 'Ctrl+C не нужен — команды выполняются по одной';
+    } catch (error) {
+      el.gitBox.innerHTML = `<div class="sec-empty">${esc(error.message)}</div>`;
+    }
+  }
+
+  // ───────────────────────── задачи ─────────────────────────
+
+  const STATUS_FLOW = { todo: 'doing', doing: 'done', done: 'todo' };
+  const STATUS_LABEL = { todo: 'К выполнению', doing: 'В работе', done: 'Готово' };
+
+  function paintTasksOff() {
+    if (el.taskInput) el.taskInput.disabled = false;   // задачи доступны всем
+  }
+
+  async function loadTasks() {
+    if (!el.taskList) return;
+    try {
+      const data = await api('/api/tasks');
+      paintTasks(data.tasks || []);
+    } catch (error) {
+      el.taskList.innerHTML = `<div class="sec-empty">${esc(error.message)}</div>`;
+    }
+  }
+
+  function paintTasks(tasks) {
+    const open = tasks.filter((task) => task.status !== 'done').length;
+    if (el.tasksBadge) {
+      el.tasksBadge.hidden = !open;
+      el.tasksBadge.textContent = open;
+    }
+    if (!tasks.length) {
+      el.taskList.innerHTML = '<div class="sec-empty">Задач пока нет. Добавьте вручную или попросите агента.</div>';
+      return;
+    }
+    el.taskList.innerHTML = tasks.map((task) => {
+      const steps = (task.steps || []).slice(-6).map((step) => `
+        <li class="task-step is-${esc(step.status || 'doing')}">
+          <span class="task-step-mark">${step.status === 'done' ? '✔' : step.status === 'error' ? '✕' : '•'}</span>
+          <span class="task-step-title">${esc(step.title)}</span>
+        </li>`).join('');
+      return `
+        <article class="task-card is-${esc(task.status)}" data-task="${esc(task.id)}">
+          <header class="task-card-head">
+            <button type="button" class="task-check" data-cycle="${esc(task.id)}"
+                    title="Переключить статус">${task.status === 'done' ? '✔' : '○'}</button>
+            <span class="task-title">${esc(task.title)}</span>
+            ${task.source === 'agent' ? '<span class="task-tag">агент</span>' : ''}
+            <button type="button" class="task-del" data-del="${esc(task.id)}" title="Удалить">✕</button>
+          </header>
+          ${task.detail ? `<p class="task-detail">${esc(task.detail)}</p>` : ''}
+          ${steps ? `<ul class="task-steps">${steps}</ul>` : ''}
+          <footer class="task-card-foot">
+            <span>${esc(STATUS_LABEL[task.status] || task.status)}</span>
+            <span>${timeAgo(task.updated_at)}</span>
+          </footer>
+        </article>`;
+    }).join('');
+  }
+
+  function timeAgo(stamp) {
+    if (!stamp) return '';
+    const seconds = Math.max(0, Date.now() / 1000 - stamp);
+    if (seconds < 60) return 'только что';
+    if (seconds < 3600) return `${Math.floor(seconds / 60)} мин назад`;
+    if (seconds < 86400) return `${Math.floor(seconds / 3600)} ч назад`;
+    return new Date(stamp * 1000).toLocaleDateString('ru-RU');
+  }
+
+  async function addTask(title) {
+    const clean = String(title || '').trim();
+    if (!clean) return;
+    try {
+      await api('/api/tasks', { method: 'POST', body: JSON.stringify({ title: clean }) });
+      if (el.taskInput) el.taskInput.value = '';
+      loadTasks();
+    } catch (error) {
+      showNotification(error.message, 'warn');
+    }
+  }
+
+  async function cycleTask(id) {
+    const card = el.taskList.querySelector(`[data-task="${CSS.escape(id)}"]`);
+    const current = card ? card.className.match(/is-(todo|doing|done)/)?.[1] : 'todo';
+    try {
+      await api(`/api/tasks/${encodeURIComponent(id)}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ status: STATUS_FLOW[current] || 'todo' }),
+      });
+      loadTasks();
+    } catch (error) {
+      showNotification(error.message, 'warn');
+    }
+  }
+
+  async function removeTask(id) {
+    try {
+      await api(`/api/tasks/${encodeURIComponent(id)}`, { method: 'DELETE' });
+      loadTasks();
+    } catch (error) {
+      showNotification(error.message, 'warn');
+    }
+  }
+
+  // ───────────────────────── панель ─────────────────────────
+
+  async function openPanel(tab) {
+    state.open = true;
+    el.linuxPanel.hidden = false;
+    document.body.classList.add('linux-open');
+    if (el.btnLinux) el.btnLinux.setAttribute('aria-expanded', 'true');
+    setTab(tab || state.tab);
+    await loadStatus();
+    if (state.tab === 'terminal') el.termInput && el.termInput.focus();
+  }
+
+  function closePanel() {
+    state.open = false;
+    el.linuxPanel.hidden = true;
+    document.body.classList.remove('linux-open');
+    if (el.btnLinux) el.btnLinux.setAttribute('aria-expanded', 'false');
+  }
+
+  function togglePanel(tab) {
+    if (state.open) { closePanel(); return; }
+    openPanel(tab);
+  }
+
+  function setTab(tab) {
+    state.tab = tab;
+    document.querySelectorAll('#linuxTabs .linux-tab').forEach((button) => {
+      button.classList.toggle('is-active', button.dataset.tab === tab);
+    });
+    document.querySelectorAll('.linux-sec').forEach((section) => {
+      section.classList.toggle('is-active', section.dataset.sec === tab);
+    });
+    if (tab === 'files') loadFiles();
+    if (tab === 'git') loadGit();
+    if (tab === 'tasks') loadTasks();
+  }
+
+  // ───────────────────────── агентный режим ─────────────────────────
+
+  function paintAgentButton() {
+    const button = el.btnAgent;
+    if (!button) return;
+    const available = !state.agentStatus || state.agentStatus.enabled !== false;
+    button.classList.toggle('is-on', state.agent);
+    button.setAttribute('aria-pressed', state.agent ? 'true' : 'false');
+    button.title = state.agent
+      ? 'Агентный режим включён — задача выполняется в песочнице. Нажмите, чтобы вернуть обычный чат.'
+      : (available
+        ? 'Агентный режим: задача выполняется в песочнице (терминал, файлы, задачи)'
+        : 'Агентный режим выключен: в .env добавьте AGENT_ENABLED=1');
+    button.disabled = !available;
+    const field = el['chat-input'];
+    if (field) {
+      const base = field.dataset.defaultPlaceholder || 'Напишите сообщение...';
+      field.placeholder = state.agent
+        ? 'Опишите задачу — агент выполнит её в песочнице и заведёт задачу…'
+        : base;
+    }
+  }
+
+  function setAgent(on) {
+    state.agent = !!on;
+    paintAgentButton();
+    localStorage.setItem('novamind_agent_mode', state.agent ? '1' : '0');
+    if (state.agent) showNotification('Агентный режим: задача уйдёт в песочницу', 'info');
+  }
+
+  function toggleAgent() {
+    if (state.agentStatus && state.agentStatus.enabled === false) {
+      showNotification('Агентный режим выключен (AGENT_ENABLED=1 в .env)', 'warn');
+      return;
+    }
+    setAgent(!state.agent);
+  }
+
+  /** Отправка сообщения в агентный цикл вместо обычного чата. */
+  async function runAgentTurn(message) {
+    const turn = createAssistantTurn({ name: 'NovaMind · агент' });
+    turn.setStage('agent', 'Планирую', 'Разбираю задачу по шагам…');
+
+    const controller = new AbortController();
+    activeAbort = controller;          // кнопка «Стоп» в app.js останавливает агента
+
+    let result = {};
+    try {
+      const response = await fetch('/api/agent/stream', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message }),
+        signal: controller.signal,
+      });
+      if (!response.ok) {
+        const raw = await response.text();
+        let details = `HTTP ${response.status}`;
+        try { details = JSON.parse(raw).error || details; } catch (_) { details += ': ' + raw.slice(0, 200); }
+        throw new Error(details);
+      }
+      await consumeNdjson(response, (event) => {
+        if (event.type === 'stage') turn.setStage('agent', event.title, event.text);
+        else if (event.type === 'plan') turn.plan(event.text);
+        else if (event.type === 'step') turn.step(event.icon, event.text);
+        else if (event.type === 'tool') turn.tool(event);
+        else if (event.type === 'task') { turn.taskChip(event.task); if (state.tab === 'tasks') loadTasks(); }
+        else if (event.type === 'token') turn.appendToken(event.token);
+        else if (event.type === 'result') result = event;
+        else if (event.type === 'error') turn.step('⚠️', event.text);
+      });
+      if (!turn.text) turn.appendText(result.reply || 'Готово.');
+      turn.finish({ model: result.model, steps: result.steps, agent: true });
+      if (result.task_id) { loadTasks(); }
+    } catch (error) {
+      if (error.name === 'AbortError') {
+        turn.appendText(turn.text || '_Агент остановлен._');
+        turn.finish({ model: result.model, agent: true });
+      } else {
+        turn.fail(error.message || 'Агент недоступен');
+      }
+    }
+  }
+
+  /** Агент включается одной строкой в обычном sendMessage. */
+  const originalSend = window.sendMessage;
+  window.sendMessage = function patchedSend(text) {
+    const msg = String(text ?? (el.input ? el.input.value : '')).trim();
+    if (state.agent && msg && !msg.startsWith('/') && !isTyping) {
+      return startAgentMessage(msg);
+    }
+    return originalSend.apply(this, arguments);
+  };
+
+  async function startAgentMessage(msg) {
+    hideWelcome();
+    appendMessage('user', msg);
+    lastUserMessage = msg;
+    if (el.input) { el.input.value = ''; el.input.style.height = 'auto'; }
+    isTyping = true;
+    setSendBusy(true);
+    closeCmdk();
+    try {
+      await runAgentTurn(msg);
+    } finally {
+      isTyping = false;
+      if (typeof setSendBusy === 'function') setSendBusy(false);
+    }
+  }
+
+  // ───────────────────────── бонус: кнопки у кода ─────────────────────────
+
+  const CODE_ACTIONS = [
+    { key: 'explain', icon: '💡', title: 'Объясни код', prompt: 'Объясни этот код по пунктам: что делает, где может сломаться, что улучшить.' },
+    { key: 'tests', icon: '🧪', title: 'Напиши тесты', prompt: 'Напиши юнит-тесты к этому коду и запусти их в песочнице.' },
+    { key: 'optimize', icon: '⚡', title: 'Оптимизируй', prompt: 'Оптимизируй этот код: читаемость, скорость, обработка ошибок. Покажи diff.' },
+    { key: 'terminal', icon: '⌨️', title: 'В терминал', prompt: null },
+  ];
+
+  function codeOf(node) {
+    const block = node.closest('.code-block');
+    const code = block && block.querySelector('code');
+    return { lang: (block && block.dataset.lang) || '', text: code ? code.textContent : '' };
+  }
+
+  function onCodeAction(event) {
+    const button = event.target.closest('[data-code]');
+    if (!button) return;
+    const { lang, text } = codeOf(button);
+    if (button.dataset.code === 'copy') {
+      event.preventDefault();
+      if (typeof copyText === 'function') copyText(text);
+      else if (navigator.clipboard) navigator.clipboard.writeText(text);
+      showNotification('Код скопирован', 'info');
+      return;
+    }
+    const action = CODE_ACTIONS.find((item) => item.key === button.dataset.code);
+    if (!action || !text) return;
+    event.preventDefault();
+    if (action.key === 'terminal') {
+      const name = (lang === 'python' || lang === 'py') ? `snippets/${Date.now()}.py`
+        : (lang === 'js' || lang === 'javascript') ? `snippets/${Date.now()}.js` : `snippets/${Date.now()}.txt`;
+      openPanel('terminal');
+      termBanner(`Код вставлен в ${name} — сохраните его командой:`);
+      termLine('cmd', `cat > ${name} << 'EOF'   ← вставьте код и EOF`);
+      termLine('out', text);
+      termLine('out', 'EOF');
+      el.termInput.value = `cat > ${name}`;
+      el.termInput.focus();
+      el.termInput.select();
+      showNotification('Код в терминале — скопируйте вставку и завершите EOF', 'info');
+      return;
+    }
+    if (action.key === 'explain' && state.agent) {
+      startAgentMessage(`${action.prompt}\n\n\`\`\`${lang}\n${text}\n\`\`\``);
+      return;
+    }
+    if (el.input) {
+      el.input.value = `${action.prompt}\n\n\`\`\`${lang}\n${text}\n\`\`\``;
+      el.input.focus();
+      el.input.dispatchEvent(new Event('input'));
+    }
+  }
+
+  // ───────────────────────── шпаргалка ─────────────────────────
+
+  function toggleCheatsheet(force) {
+    const show = force == null ? el.cheatsheet.hidden : force;
+    el.cheatsheet.hidden = !show;
+  }
+
+  // ───────────────────────── события ─────────────────────────
+
+  function wire() {
+    el.btnLinux && el.btnLinux.addEventListener('click', () => togglePanel());
+    el.btnLinuxClose && el.btnLinuxClose.addEventListener('click', closePanel);
+    el.btnAgent && el.btnAgent.addEventListener('click', toggleAgent);
+    el.btnCheatClose && el.btnCheatClose.addEventListener('click', () => toggleCheatsheet(false));
+    el.cheatsheet && el.cheatsheet.addEventListener('click', (event) => {
+      if (event.target === el.cheatsheet) toggleCheatsheet(false);
+    });
+
+    el.linuxTabs && el.linuxTabs.addEventListener('click', (event) => {
+      const button = event.target.closest('.linux-tab');
+      if (button) setTab(button.dataset.tab);
+    });
+
+    el.termForm && el.termForm.addEventListener('submit', (event) => {
+      event.preventDefault();
+      const command = el.termInput.value;
+      el.termInput.value = '';
+      runTerminal(command);
+    });
+
+    // ↑/↓ — история команд, Ctrl+L — очистить
+    el.termInput && el.termInput.addEventListener('keydown', (event) => {
+      if (event.key === 'ArrowUp' || event.key === 'ArrowDown') {
+        if (!state.history.length) return;
+        event.preventDefault();
+        state.histIndex = event.key === 'ArrowUp'
+          ? Math.min(state.histIndex + 1, state.history.length - 1)
+          : state.histIndex - 1;
+        el.termInput.value = state.histIndex < 0 ? '' : state.history[state.histIndex];
+        return;
+      }
+      if (event.key === 'l' && (event.ctrlKey || event.metaKey)) {
+        event.preventDefault();
+        if (el.termOut) el.termOut.innerHTML = '';
+      }
+    });
+
+    el.termChips && el.termChips.addEventListener('click', (event) => {
+      const chip = event.target.closest('.term-chip');
+      if (chip) { el.termInput.value = chip.dataset.cmd; el.termInput.focus(); }
+    });
+
+    el.btnFilesRefresh && el.btnFilesRefresh.addEventListener('click', loadFiles);
+    el.fileList && el.fileList.addEventListener('click', (event) => {
+      const row = event.target.closest('.file-row');
+      if (row) openFile(row.dataset.path);
+    });
+    el.btnFileClose && el.btnFileClose.addEventListener('click', closeFile);
+    el.btnFileToChat && el.btnFileToChat.addEventListener('click', () => {
+      if (!state.file || !el.input) return;
+      el.input.value = `Разбери файл ${state.file.path} из рабочей папки:\n\n\`\`\`\n${state.file.content}\n\`\`\``;
+      el.input.focus();
+      el.input.dispatchEvent(new Event('input'));
+      closePanel();
+    });
+    el.btnFileToTerm && el.btnFileToTerm.addEventListener('click', () => {
+      if (!state.file) return;
+      setTab('terminal');
+      termLine('cmd', `cat ${state.file.path}`);
+      termLine('out', state.file.content);
+    });
+
+    el.btnGitRefresh && el.btnGitRefresh.addEventListener('click', loadGit);
+
+    el.taskForm && el.taskForm.addEventListener('submit', (event) => {
+      event.preventDefault();
+      addTask(el.taskInput.value);
+    });
+    el.taskList && el.taskList.addEventListener('click', (event) => {
+      const cycle = event.target.closest('[data-cycle]');
+      if (cycle) { cycleTask(cycle.dataset.cycle); return; }
+      const del = event.target.closest('[data-del]');
+      if (del) removeTask(del.dataset.del);
+    });
+
+    el.chatContainer && el.chatContainer.addEventListener('click', onCodeAction);
+
+    document.addEventListener('keydown', (event) => {
+      const typing = /^(INPUT|TEXTAREA)$/.test(document.activeElement && document.activeElement.tagName);
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'j' && !event.shiftKey) {
+        event.preventDefault();
+        togglePanel();
+        return;
+      }
+      if ((event.ctrlKey || event.metaKey) && event.shiftKey && event.key.toLowerCase() === 'a') {
+        event.preventDefault();
+        toggleAgent();
+        return;
+      }
+      if (event.key === '?' && !typing && !event.ctrlKey && !event.metaKey && !event.altKey) {
+        event.preventDefault();
+        toggleCheatsheet();
+        return;
+      }
+      if (event.key === 'Escape') {
+        if (el.cheatsheet && !el.cheatsheet.hidden) { toggleCheatsheet(false); return; }
+        if (state.open) { closePanel(); return; }
+        if (state.agent) setAgent(false);
+      }
+    });
+  }
+
+  // Публичный интерфейс — им пользуется всё остальное.
+  window.Linux = {
+    state,
+    open: openPanel,
+    close: closePanel,
+    toggle: togglePanel,
+    setTab,
+    run: runTerminal,
+    loadTasks,
+    loadFiles,
+    loadGit,
+    loadStatus,
+    setAgent,
+    toggleAgent,
+    toggleCheatsheet,
+    isAgentOn: () => state.agent,
+  };
+
+  function init() {
+    cache();
+    if (!el.linuxPanel) return;
+    paintQuickChips();
+    wire();
+    state.agent = localStorage.getItem('novamind_agent_mode') === '1';
+    loadStatus();
+    loadTasks();
+  }
+
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
+  else init();
+})();

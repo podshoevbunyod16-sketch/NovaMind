@@ -3,6 +3,7 @@ __pycache__/
 .env
 runtime_settings.json
 generated_media/
+workspace/
 venv/
 *.log
 .DS_Store
