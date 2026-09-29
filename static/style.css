@@ -125,14 +125,31 @@ html[data-glass-theme="light"] .nav-item.active { color: var(--accent); }
   font-size: 9.5px; font-weight: 800; letter-spacing: .14em; text-transform: uppercase;
   color: var(--text-4); padding: 12px 10px 4px;
 }
+/* История занимает всё оставшееся место в сайдбаре */
+#historyContainer {
+  flex: 1;
+  overflow-y: auto;
+  min-height: 60px;
+  padding-bottom: 8px;
+}
+#historyContainer::-webkit-scrollbar { width: 3px; }
+#historyContainer::-webkit-scrollbar-thumb { background: var(--accent); border-radius: 2px; opacity: .5; }
 .history-item {
   display: flex; align-items: center; gap: 9px;
   padding: 9px 11px; border-radius: var(--r-sm);
   cursor: pointer; font-size: 12.5px; color: var(--text-2);
   border: 1px solid transparent;
   transition: background var(--t) var(--ease), color var(--t) var(--ease), border-color var(--t) var(--ease);
+  position: relative;
 }
 .history-item:hover { background: var(--glass-fill); color: var(--text-1); border-color: var(--glass-border-soft); }
+.history-item.active { background: rgba(139,92,246,.12); color: var(--text-1); border-color: rgba(139,92,246,.3); }
+.hist-title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hist-count {
+  font-size: 10px; color: var(--text-muted); background: rgba(255,255,255,.06);
+  padding: 1px 5px; border-radius: 8px; flex-shrink: 0;
+}
+.hist-count:empty { display: none; }
 .history-item.active {
   background: var(--accent-soft); color: color-mix(in srgb, var(--accent) 55%, white);
   border-color: color-mix(in srgb, var(--accent) 35%, transparent);
