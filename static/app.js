@@ -889,11 +889,8 @@ function createAssistantTurn(options = {}) {
         box.className = 'agent-term';
         box.innerHTML = `
           <button type="button" class="agent-term-head">
-<<<<<<< HEAD
-            <span class="agent-term-ico">🐧</span>
-=======
             <span class="agent-term-ico">⌨️</span>
->>>>>>> d42dfa25f0f2c0d68742da19cdd015831aee836a
+ d42dfa25f0f2c0d68742da19cdd015831aee836a
             <span class="agent-term-title">Работа в Linux</span>
             <span class="agent-term-meta"></span>
             <span class="caret">▼</span>
@@ -925,14 +922,9 @@ function createAssistantTurn(options = {}) {
       const word = (n10 === 1 && n100 !== 11) ? 'шаг'
         : (n10 >= 2 && n10 <= 4 && (n100 < 12 || n100 > 14)) ? 'шага' : 'шагов';
       box.querySelector('.agent-term-meta').textContent =
-<<<<<<< HEAD
-        `${count} ${count === 1 ? 'шаг' : (count < 5 ? 'шага' : 'шагов')}${done ? ` · ошибок: ${done}` : ''}`;
-      box.classList.add('is-open');        // во время работы показываем
-      box.classList.remove('is-done');
-=======
         `${count} ${word}${done ? ` · ошибок: ${done}` : ''}`;
       // Блок остаётся свёрнутым: раскрывается только по нажатию пользователя
->>>>>>> d42dfa25f0f2c0d68742da19cdd015831aee836a
+ d42dfa25f0f2c0d68742da19cdd015831aee836a
       scrollToBottom();
     },
 
