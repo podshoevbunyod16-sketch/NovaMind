@@ -1,7 +1,7 @@
 /**
  * Смоук-тест фронтенда: настоящие index.html, app.js и linux.js
- * выполняются в jsdom и гоняют полный сценарий поиска, «маленький Linux»
- * и агентного режима.
+ * выполняются в jsdom и гоняют полный сценарий: поиск, обычный чат и
+ * главный чат, в котором ИИ сам работает в Linux-окружении.
  *
  * Запуск (нужен запущенный сервер на :5000 и установленный jsdom):
  *   npm install jsdom
@@ -14,15 +14,17 @@
  *   4. источники появляются ВНУТРИ пузыря ИИ;
  *   5. с первым токеном сцена схлопывается и печатается ответ;
  *   6. после завершения сцена скрыта, ответ и ссылки остались;
- *   7. Ctrl+K открывает командную панель; тема переключается;
+ *   7. Ctrl+K открывает командную панель; кнопки темы нет;
  *   8. компоновка: сайдбар скрыт по умолчанию и открывается бургером,
  *      у чата и сайдбара нет своих ползунков, длинное имя модели
  *      обрезается многоточием с полным названием в подсказке.
  *   9. страница настроек и окно входа не ломаются;
- *  10. панель «маленький Linux»: терминал, файлы, git, задачи;
- *  11. агентный режим, кнопки у блоков кода и шпаргалка хоткеев;
- *  12. поиск в интернете через песочницу: вкладка «Поиск», nova search,
- *      поиск по песочнице и кнопка «Аналог» у блока кода.
+ *  10. лишнего нет: кнопок «Агент», «Linux», «Тема», панели Linux,
+ *      шпаргалки и карточек-подсказок; скрытое не всплывает на телефоне;
+ *  11. главный чат сам работает в Linux: план, шаги, свёрнутый блок
+ *      «Работа в Linux», простые вопросы — сразу текстом;
+ *  12. кнопка «Поиск» (автопоиск) идёт через Linux-окружение,
+ *      кнопки у блоков кода, откат на обычный чат, «стоп».
  */
 import { createRequire } from 'node:module';
 
@@ -77,7 +79,7 @@ const CHAT_STREAM = [
 
 // ── Синтетический поток агента: те же события, что отдаёт /api/agent/stream
 const AGENT_STREAM = [
-  { type: 'stage', scene: 'agent', title: 'Планирую', text: 'Разбираю задачу по шагам…' },
+  { type: 'stage', scene: 'agent', title: 'Работаю в Linux', text: 'Иду к цели по шагам…' },
   { type: 'plan', text: '1) посмотреть файлы\n2) запустить пример' },
   { type: 'task', task: { id: 'task-1', title: 'Проверить песочницу', status: 'doing', source: 'agent', steps: [] } },
   { type: 'step', icon: '📂', text: 'Смотрю файлы — ls -la' },
@@ -91,6 +93,54 @@ const AGENT_STREAM = [
   { type: 'result', reply: 'Скрипт отработал: привет из папки.', steps: 2, task_id: 'task-1', model: 'mock-model' },
   { type: 'done' },
 ];
+
+// Простой вопрос: модель ответила сразу, без окружения
+const SIMPLE_STREAM = [
+  { type: 'token', token: 'Привет! ' },
+  { type: 'token', token: 'Чем помочь?' },
+  { type: 'result', reply: 'Привет! Чем помочь?', steps: 0, model: 'mock-model', sources: [], searched: false },
+  { type: 'done' },
+];
+
+// Модель начала фразой, потом выдала действие — фразу забираем назад
+const RETRACT_STREAM = [
+  { type: 'token', token: 'Сейчас посмотрю…' },
+  { type: 'retract' },
+  { type: 'stage', scene: 'agent', title: 'Работаю в Linux', text: 'Иду к цели по шагам…' },
+  { type: 'tool', name: 'run', command: 'ls -la', code: 0, output: 'hello.py' },
+  { type: 'token', token: 'В папке есть hello.py' },
+  { type: 'result', reply: 'В папке есть hello.py', steps: 1, model: 'mock-model' },
+  { type: 'done' },
+];
+
+// Кнопка «Поиск»: nova search → чтение страниц → ответ со ссылками
+const LINUX_SOURCES = [
+  { title: 'Обзор рынка', url: 'https://example.com/a', host: 'example.com' },
+  { title: 'Википедия', url: 'https://ru.wikipedia.org/wiki/X', host: 'ru.wikipedia.org' },
+];
+const LINUX_SEARCH_STREAM = [
+  { type: 'stage', scene: 'search', title: 'Поищу в интернете', text: 'Ищу через Linux-окружение…' },
+  { type: 'step', icon: '🔎', text: 'Нашёл источников: 2 (searxng)' },
+  { type: 'tool', name: 'search', command: 'nova search цена ноутбука', code: 0, output: '[1] Обзор рынка' },
+  { type: 'sources', sources: LINUX_SOURCES },
+  { type: 'tool', name: 'open', command: 'nova read https://example.com/a', code: 0, output: 'Текст страницы' },
+  { type: 'step', icon: '💾', text: 'Сохранил выдержки: notes/research/2026-09-29-cena-search.md' },
+  { type: 'stage', scene: 'write', title: 'Разбираю найденное', text: 'Решаю, хватает ли данных' },
+  { type: 'token', token: 'Средняя цена — **12 500 ₽** [1].' },
+  { type: 'result', reply: 'Средняя цена — 12 500 ₽ [1].', steps: 0, searched: true, model: 'mock-model',
+    sources: LINUX_SOURCES },
+  { type: 'done' },
+];
+
+// Управление моками: доступно ли окружение и что отвечает агент
+const mock = {
+  linux: false,            // сначала окружения нет — проверяем старый путь
+  agentStream: AGENT_STREAM,
+  agentStatus: 200,
+  agentRequests: [],
+  sendStreamCalls: 0,
+  sessionLogins: [],
+};
 
 // Крошечный API задач в памяти — проверяем, что фронт говорит с ним по-человечески
 const taskStore = new Map();
@@ -181,7 +231,12 @@ const dom = new JSDOM(html, {
       const path = String(url).replace(BASE, '');
       const json = (data) => ({ ok: true, status: 200, async json() { return data; }, async text() { return JSON.stringify(data); } });
       if (path.startsWith('/api/auto_search_stream')) return streamResponse(SEARCH_STREAM);
-      if (path.startsWith('/send_stream')) return streamResponse(CHAT_STREAM);
+      if (path.startsWith('/send_stream')) { mock.sendStreamCalls += 1; return streamResponse(CHAT_STREAM); }
+      if (path.startsWith('/api/session/check')) return json({ signed_in: false, nick: '', admin: false });
+      if (path.startsWith('/api/session/login')) {
+        mock.sessionLogins.push(JSON.parse(options.body || '{}').nick);
+        return json({ success: true });
+      }
       if (path.startsWith('/api/ai/status')) {
         return { ok: true, status: 200, async json() { return { provider: 'openai_compatible', provider_name: 'Local', model: 'mock-model', offline: false, configured: true }; } };
       }
@@ -249,9 +304,19 @@ const dom = new JSDOM(html, {
                       text: 'Текст страницы asyncio', elapsed_ms: 120, bytes: 22 });
       }
       if (path.startsWith('/api/agent/status')) {
-        return json({ enabled: true, tools: true, max_steps: 6, admin: true, hint: '' });
+        return json(mock.linux
+          ? { enabled: true, tools: true, available: true, max_steps: 8, hint: '' }
+          : { enabled: false, tools: false, available: false, max_steps: 8,
+              hint: 'Linux-окружение выключено: добавьте TERMINAL_ENABLED=1 в .env и перезапустите сервер' });
       }
-      if (path.startsWith('/api/agent/stream')) return streamResponse(AGENT_STREAM);
+      if (path.startsWith('/api/agent/stream')) {
+        mock.agentRequests.push(JSON.parse(options.body || '{}'));
+        if (mock.agentStatus !== 200) {
+          return { ok: false, status: mock.agentStatus, async json() { return { error: 'выключено' }; },
+                   async text() { return '{"error":"выключено"}'; } };
+        }
+        return streamResponse(mock.agentStream);
+      }
       if (path.startsWith('/api/tasks')) return tasksApi(path, options);
       if (path.startsWith('/send')) {
         return { ok: true, status: 200, async json() { return { reply: 'Запасной ответ', chat_id: 'x' }; } };
@@ -274,8 +339,10 @@ check('функции app.js доступны', typeof window.toggleWebSearch ==
 check('статус ИИ отрисован в топбаре',
   document.getElementById('statusText').textContent.includes('mock-model'),
   document.getElementById('statusText').textContent);
+check('один раз подсказали, почему ИИ пока без Linux',
+  [...document.querySelectorAll('#toastStack .lg-toast')].some((t) => t.textContent.includes('TERMINAL_ENABLED')));
 
-console.log('\n2) Поиск в интернете: сцена → шаги → источники → ответ');
+console.log('\n2) Без окружения: поиск старым путём (сцена → шаги → источники → ответ)');
 window.document.getElementById('chat-input').value = 'сколько стоит?';
 window.toggleWebSearch();
 check('кнопка поиска активна', document.getElementById('btn-web-search').classList.contains('active'));
@@ -311,7 +378,7 @@ check('сообщение пользователя в чате',
   document.querySelectorAll('.message.user').length === 1);
 check('история сохранена', JSON.parse(window.localStorage.getItem('nova_history_v2')).chats.length === 1);
 
-console.log('\n3) Обычный чат (без поиска): пузырь пустой, потом поток');
+console.log('\n3) Без окружения: обычный чат, пузырь пустой, потом поток');
 window.toggleWebSearch();
 document.getElementById('chat-input').value = 'сколько будет 6*7';
 await window.sendMessage();
@@ -320,6 +387,7 @@ const bubbles2 = document.querySelectorAll('.message.ai .msg-bubble');
 const chatBubble = bubbles2[bubbles2.length - 1];
 check('ответ получен потоком', chatBubble.querySelector('.answer').textContent.includes('42'));
 check('источников нет', chatBubble.querySelectorAll('.source-item').length === 0);
+check('без окружения сообщения не уходят в Linux', mock.agentRequests.length === 0);
 
 console.log('\n4) Бонусы интерфейса');
 window.openCmdk();
@@ -328,9 +396,9 @@ check('действия в панели есть', document.querySelectorAll('.c
 window.closeCmdk();
 check('командная панель закрыта', !document.getElementById('cmdk').classList.contains('open'));
 
-window.cycleTheme();
-check('тема всегда Aurora (единственная палитра)',
-  document.documentElement.getAttribute('data-glass-theme') === 'aurora');
+check('кнопки темы нет, тема всегда Aurora',
+  !document.getElementById('btnTheme') && typeof window.cycleTheme === 'undefined'
+  && document.documentElement.getAttribute('data-glass-theme') === 'aurora');
 
 window.toggleCalmMotion();
 check('спокойный режим включается',
@@ -511,10 +579,9 @@ check('диагностика: упавший бэкенд помечен',
 check('статус поиска объясняет итог',
   sdoc.getElementById('healthStatus').textContent.includes('2 из 3'),
   sdoc.getElementById('healthStatus').textContent);
-check('кнопка темы держит Aurora', (() => {
-  sdoc.getElementById('themeBtn').dispatchEvent(new settingsDom.window.Event('click'));
-  return settingsDom.window.document.documentElement.getAttribute('data-glass-theme') === 'aurora';
-})());
+check('настройки: кнопки темы нет, тема Aurora',
+  !sdoc.getElementById('themeBtn')
+  && sdoc.documentElement.getAttribute('data-glass-theme') === 'aurora');
 
 // ══════════════════════════════════════════════════════════════
 // 9) Окно входа
@@ -547,6 +614,7 @@ check('вход: переключение на регистрацию', (() => {
   return adoc.getElementById('registerForm').classList.contains('active')
     && !adoc.getElementById('loginForm').classList.contains('active');
 })());
+check('вход: выбора темы нет', !adoc.querySelector('.auth-theme-row'));
 check('вход: тема всегда Aurora', (() => {
   authDom.window.setAuthTheme('sunset');
   return adoc.documentElement.getAttribute('data-glass-theme') === 'aurora'
@@ -562,265 +630,179 @@ await new Promise((resolve) => setTimeout(resolve, 150));
 const realErrors = authErrors.filter((item) => !item.includes('Not implemented: navigation'));
 check('вход: после входа нет ошибок', realErrors.length === 0, realErrors.join(' | '));
 
-console.log('\n10) Маленький Linux: панель, терминал, файлы, git, задачи');
-const linuxPanel = document.getElementById('linuxPanel');
-const press = (key, options = {}) => document.dispatchEvent(
-  new window.KeyboardEvent('keydown', { key, bubbles: true, cancelable: true, ...options })
-);
+// ══════════════════════════════════════════════════════════════
+// 10) Лишнего нет: кнопки, панель Linux, шпаргалка, подсказки
+// ══════════════════════════════════════════════════════════════
+console.log('\n10) Убраны кнопки «Агент», «Linux», «Тема», панель и подсказки');
+const press = (key, extra = {}) => document.dispatchEvent(new window.KeyboardEvent('keydown', { key, bubbles: true, ...extra }));
+const aiCount = () => document.querySelectorAll('.message.ai').length;
+const lastAi = () => { const all = document.querySelectorAll('.message.ai'); return all[all.length - 1]; };
+const settle = (ms = 150) => new Promise((resolve) => setTimeout(resolve, ms));
 
-check('панель скрыта до первого открытия', linuxPanel.hidden === true);
-check('терминала в панели нет — его использует ИИ',
-  !document.querySelector('#linuxTabs .linux-tab[data-tab="terminal"]')
-  && !document.querySelector('.linux-sec[data-sec="terminal"]')
-  && !document.getElementById('termForm')
-  && !document.getElementById('termInput'));
-check('вкладки: файлы, поиск, git, задачи',
-  ['files', 'search', 'git', 'tasks'].every((tab) => !!document.querySelector(`#linuxTabs .linux-tab[data-tab="${tab}"]`))
-  && document.querySelectorAll('#linuxTabs .linux-tab').length === 4);
-
+check('нет кнопки агента', !document.getElementById('btnAgent'));
+check('нет кнопки Linux-окружения', !document.getElementById('btnLinux'));
+check('нет кнопки смены темы', !document.getElementById('btnTheme'));
+check('нет панели Linux', !document.getElementById('linuxPanel') && !document.querySelector('.linux-panel'));
+check('нет шпаргалки хоткеев', !document.getElementById('cheatsheet') && !document.querySelector('.cheatsheet'));
+check('нет карточек-подсказок на приветствии', !document.querySelector('.suggestions, .welcome .suggestion-card'));
+check('[hidden] всегда скрывает (на телефоне ничего не всплывает)',
+  /\[hidden\][^{]*\{[^}]*display:\s*none\s*!important/.test(chatCss));
+check('в CSS не осталось панели Linux и шпаргалки', !chatCss.includes('.linux-panel') && !chatCss.includes('.cheatsheet'));
 press('j', { ctrlKey: true });
-await new Promise((resolve) => setTimeout(resolve, 120));
-check('Ctrl+J открывает панель рабочей папки', linuxPanel.hidden === false
-  && document.body.classList.contains('linux-open')
-  && document.getElementById('btnLinux').getAttribute('aria-expanded') === 'true');
-check('вход через аккаунт открывает песочницу обычному пользователю',
-  document.getElementById('linuxLed').classList.contains('is-on')
-  && document.getElementById('linuxPath').textContent.includes('workspace'));
+press('?');
+await settle(60);
+check('старые хоткеи ничего не ломают', consoleErrors.length === 0, consoleErrors.join(' | '));
+check('кнопка автопоиска подписана и на телефоне',
+  document.getElementById('searchBtnText').textContent.startsWith('Поиск'));
+check('серверная сессия восстановлена по нику', mock.sessionLogins.includes('Smoke'), JSON.stringify(mock.sessionLogins));
 
-document.querySelector('#linuxTabs .linux-tab[data-tab="files"]').click();
-await new Promise((resolve) => setTimeout(resolve, 120));
-check('вкладка «Файлы» показывает дерево рабочей папки',
-  document.getElementById('fileList').textContent.includes('hello.py')
-  && document.getElementById('fileList').textContent.includes('notes'));
-document.querySelector('.file-row[data-path="hello.py"]').click();
-await new Promise((resolve) => setTimeout(resolve, 120));
-check('файл открывается для просмотра',
-  document.getElementById('fileView').hidden === false
-  && document.getElementById('fileViewBody').textContent.includes('print'));
-document.getElementById('btnFileToChat').click();
-await new Promise((resolve) => setTimeout(resolve, 120));
-check('«В чат» подставляет содержимое файла в поле ввода',
-  document.getElementById('chat-input').value.includes('hello.py')
-  && linuxPanel.hidden === true);
+// ══════════════════════════════════════════════════════════════
+// 11) Главный чат сам работает в Linux
+// ══════════════════════════════════════════════════════════════
+console.log('\n11) Главный чат: ИИ сам работает в Linux по шагам');
+mock.linux = true;
+await window.Linux.loadStatus();
+check('окружение доступно', window.Linux.isAvailable() === true);
+check('индикатор в шапке объясняет, что ИИ работает с Linux',
+  document.getElementById('statusDot').title.includes('Linux'));
 
-window.Linux.open('git');
-await new Promise((resolve) => setTimeout(resolve, 120));
-check('вкладка «Git» показывает ветку и изменения',
-  document.getElementById('gitBox').textContent.includes('main')
-  && document.getElementById('gitBox').textContent.includes('hello.py'));
-
-window.Linux.open('tasks');
-await new Promise((resolve) => setTimeout(resolve, 120));
-document.getElementById('taskInput').value = 'Починить смоук';
-document.getElementById('taskForm').dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
-await new Promise((resolve) => setTimeout(resolve, 150));
-check('задача добавляется в список и счётчик',
-  document.getElementById('taskList').textContent.includes('Починить смоук')
-  && document.getElementById('tasksBadge').hidden === false);
-document.querySelector('#taskList [data-cycle]').click();
-await new Promise((resolve) => setTimeout(resolve, 150));
-check('клик по чекбоксу переключает статус задачи',
-  document.querySelector('#taskList .task-card').className.includes('is-doing'));
-document.querySelector('#taskList [data-del]').click();
-await new Promise((resolve) => setTimeout(resolve, 150));
-check('задача удаляется', !document.getElementById('taskList').textContent.includes('Починить смоук'));
-
-press('j', { ctrlKey: true });
-await new Promise((resolve) => setTimeout(resolve, 100));
-check('Ctrl+J закрывает панель', linuxPanel.hidden === true);
-
-console.log('\n11) Агентный режим и бонусы для программиста');
-const agentButton = document.getElementById('btnAgent');
-agentButton.click();
-await new Promise((resolve) => setTimeout(resolve, 120));
-check('агентный режим включается и меняет подсказку',
-  agentButton.classList.contains('is-on')
-  && agentButton.getAttribute('aria-pressed') === 'true'
-  && document.getElementById('chat-input').placeholder.includes('агент'));
-
-document.getElementById('chat-input').value = 'запусти hello.py и скажи результат';
+mock.agentStream = SIMPLE_STREAM;
+const sendCallsBefore = mock.sendStreamCalls;
+document.getElementById('chat-input').value = 'привет';
 await window.sendMessage();
-await new Promise((resolve) => setTimeout(resolve, 350));
-const aiTurns = document.querySelectorAll('.message.ai');
-const agentBubble = aiTurns[aiTurns.length - 1];
-check('агент показывает план', !!agentBubble && agentBubble.querySelector('.stage-plan') !== null);
-check('блок команд виден во время работы и прячет вывод по умолчанию',
-  !!agentBubble && agentBubble.querySelector('.agent-term') !== null
-  && agentBubble.querySelector('.agent-term-out') !== null);
-check('агент показывает выполненные команды в сворачиваемом блоке',
-  !!agentBubble && agentBubble.querySelectorAll('.agent-term-row').length === 2
-  && agentBubble.querySelector('.agent-term').textContent.includes('python3 hello.py')
-  && agentBubble.querySelector('.agent-term-meta').textContent.includes('команд'));
-check('агент показывает заведённую задачу',
-  !!agentBubble && agentBubble.querySelector('.agent-task') !== null
-  && agentBubble.querySelector('.agent-task').textContent.includes('Проверить песочницу'));
-check('агент печатает ответ и закрывает сцену',
-  !!agentBubble && agentBubble.querySelector('.answer').textContent.includes('привет из папки')
-  && agentBubble.querySelector('.stage').classList.contains('collapsed'));
-check('после ответа блок команд сворачивается',
-  !!agentBubble && agentBubble.querySelector('.agent-term').classList.contains('is-done')
-  && !agentBubble.querySelector('.agent-term').classList.contains('is-open'));
-check('свёрнутый блок команд можно раскрыть кликом', (() => {
+await settle();
+check('обычное сообщение ушло в главный чат с Linux, без переключателя',
+  mock.agentRequests.length === 1 && mock.agentRequests[0].message === 'привет'
+  && mock.agentRequests[0].search === false && mock.sendStreamCalls === sendCallsBefore,
+  JSON.stringify(mock.agentRequests));
+check('простой вопрос — сразу текст, без блока Linux',
+  lastAi().querySelector('.answer').textContent.includes('Чем помочь')
+  && !lastAi().querySelector('.agent-term'));
+
+mock.agentStream = AGENT_STREAM;
+document.getElementById('chat-input').value = 'запусти hello.py и расскажи, что вышло';
+await window.sendMessage();
+await settle();
+const agentBubble = lastAi();
+check('задача ушла в Linux', mock.agentRequests.length === 2);
+check('ИИ показывает план', agentBubble.querySelector('.stage-plan')?.textContent.includes('посмотреть файлы') === true);
+check('шаги видны в блоке «Работа в Linux»',
+  agentBubble.querySelector('.agent-term-title')?.textContent === 'Работа в Linux'
+  && agentBubble.querySelectorAll('.agent-term-row').length === 2
+  && agentBubble.querySelector('.agent-term').textContent.includes('python3 hello.py'));
+check('блок шагов стоит над ответом', (() => {
   const box = agentBubble.querySelector('.agent-term');
-  box.querySelector('.agent-term-head').dispatchEvent(new window.MouseEvent('click', { bubbles: true, cancelable: true }));
+  const answer = agentBubble.querySelector('.answer');
+  return !!box && !!(box.compareDocumentPosition(answer) & window.Node.DOCUMENT_POSITION_FOLLOWING);
+})());
+check('счётчик шагов по-русски', agentBubble.querySelector('.agent-term-meta')?.textContent.startsWith('2 шага'),
+  agentBubble.querySelector('.agent-term-meta')?.textContent);
+check('после ответа блок свёрнут в одну строку',
+  agentBubble.querySelector('.agent-term').classList.contains('is-done')
+  && !agentBubble.querySelector('.agent-term').classList.contains('is-open'));
+check('свёрнутый блок раскрывается нажатием', (() => {
+  const box = agentBubble.querySelector('.agent-term');
+  const head = box.querySelector('.agent-term-head');
+  head.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
   const opened = box.classList.contains('is-open');
-  box.querySelector('.agent-term-head').dispatchEvent(new window.MouseEvent('click', { bubbles: true, cancelable: true }));
+  head.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
   return opened && !box.classList.contains('is-open');
 })());
-check('мета ответа упоминает агента и шаги',
-  !!agentBubble && agentBubble.querySelector('.msg-meta').textContent.includes('агент')
-  && agentBubble.querySelector('.msg-meta').textContent.includes('шагов: 2'));
+check('задача видна прямо в ответе',
+  agentBubble.querySelector('.agent-task')?.textContent.includes('Проверить песочницу') === true
+  && agentBubble.querySelector('.agent-task').textContent.includes('готово'));
+check('ответ напечатан, сцена схлопнута',
+  agentBubble.querySelector('.answer').textContent.includes('привет из папки')
+  && agentBubble.querySelector('.stage').classList.contains('collapsed'));
+check('под ответом видно «Linux» и число шагов',
+  agentBubble.querySelector('.msg-meta').textContent.includes('Linux')
+  && agentBubble.querySelector('.msg-meta').textContent.includes('шагов: 2'),
+  agentBubble.querySelector('.msg-meta').textContent);
 
-window.Linux.open('terminal');
-await new Promise((resolve) => setTimeout(resolve, 100));
-press('Escape');   // первый Esc — панель
-await new Promise((resolve) => setTimeout(resolve, 100));
-press('Escape');   // второй Esc — агентный режим
-await new Promise((resolve) => setTimeout(resolve, 100));
-check('Escape закрывает панель, затем выключает агентный режим',
-  linuxPanel.hidden === true && !agentButton.classList.contains('is-on'));
+mock.agentStream = RETRACT_STREAM;
+document.getElementById('chat-input').value = 'что в папке?';
+await window.sendMessage();
+await settle();
+check('если модель пошла работать — начатая фраза убрана',
+  lastAi().querySelector('.answer').textContent.trim() === 'В папке есть hello.py'
+  && lastAi().querySelectorAll('.agent-term-row').length === 1,
+  lastAi().querySelector('.answer').textContent);
 
-// кнопки у блока кода
-const codeTurn = window.createAssistantTurn();
-codeTurn.appendText('Вот функция:\n\n```python\ndef add(a, b):\n    return a + b\n```');
-await new Promise((resolve) => setTimeout(resolve, 80));
-const codeBlock = codeTurn.element.querySelector('.code-block');
-check('у блока кода есть кнопки для программиста',
-  !!codeBlock && codeBlock.querySelector('[data-code="explain"]')
-  && codeBlock.querySelector('[data-code="tests"]')
-  && codeBlock.querySelector('[data-code="optimize"]')
-  && codeBlock.querySelector('[data-code="terminal"]'));
+// ══════════════════════════════════════════════════════════════
+// 12) Кнопка «Поиск» через Linux, кнопки у кода, откат без окружения
+// ══════════════════════════════════════════════════════════════
+console.log('\n12) Автопоиск через Linux, кнопки у кода, откат, «стоп»');
+window.setWebSearch(true, true);
+mock.agentStream = LINUX_SEARCH_STREAM;
+document.getElementById('chat-input').value = 'сколько стоит ноутбук?';
+await window.sendMessage();
+await settle();
+const searchTurn = lastAi();
+check('кнопка «Поиск» отправляет запрос в Linux-окружение',
+  mock.agentRequests[mock.agentRequests.length - 1].search === true);
+check('поиск виден шагами nova search / nova read',
+  searchTurn.querySelector('.agent-term')?.textContent.includes('nova search цена ноутбука') === true
+  && searchTurn.querySelector('.agent-term').textContent.includes('nova read'));
+check('источники внутри пузыря', searchTurn.querySelectorAll('.source-item').length === 2,
+  String(searchTurn.querySelectorAll('.source-item').length));
+check('ответ напечатан', searchTurn.querySelector('.answer').textContent.includes('12 500'));
+check('под ответом «с поиском»', searchTurn.querySelector('.msg-meta').textContent.includes('с поиском'),
+  searchTurn.querySelector('.msg-meta').textContent);
+window.setWebSearch(false, true);
 
-codeBlock.querySelector('[data-code="explain"]').dispatchEvent(
-  new window.MouseEvent('click', { bubbles: true, cancelable: true }));
-await new Promise((resolve) => setTimeout(resolve, 80));
-check('«Объясни» подставляет код в поле ввода',
-  document.getElementById('chat-input').value.includes('Объясни этот код')
-  && document.getElementById('chat-input').value.includes('return a + b'));
+// Кнопки у блока кода
+mock.agentStream = SIMPLE_STREAM;
+window.appendMessage('ai', 'Вот код:\n```python\nprint(6 * 7)\n```');
+const codeBlock = lastAi().querySelector('.code-block');
+const codeButtons = codeBlock ? [...codeBlock.querySelectorAll('[data-code]')].map((b) => b.dataset.code) : [];
+check('у кода 4 кнопки: запустить, объяснить, тесты, копировать',
+  JSON.stringify(codeButtons) === JSON.stringify(['run', 'explain', 'tests', 'copy']), JSON.stringify(codeButtons));
+if (codeBlock) {
+  const before = mock.agentRequests.length;
+  codeBlock.querySelector('[data-code="run"]').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+  await settle();
+  const runRequest = mock.agentRequests[mock.agentRequests.length - 1];
+  check('«Запустить» просит ИИ выполнить код в Linux',
+    mock.agentRequests.length === before + 1
+    && runRequest.message.startsWith('Запусти этот код в Linux') && runRequest.message.includes('print(6 * 7)'));
+}
 
-codeBlock.querySelector('[data-code="terminal"]').dispatchEvent(
-  new window.MouseEvent('click', { bubbles: true, cancelable: true }));
-await new Promise((resolve) => setTimeout(resolve, 200));
-check('«В песочницу» сохраняет код файлом — без терминала на экране',
-  linuxPanel.hidden === false
-  && document.querySelector('.linux-sec[data-sec="files"]').classList.contains('is-active')
-  && !document.getElementById('termForm'));
+// Окружение закрылось посреди работы — ответит обычный чат, пустого пузыря нет
+mock.agentStatus = 403;
+const bubblesBefore = aiCount();
+const sendBefore = mock.sendStreamCalls;
+document.getElementById('chat-input').value = 'сколько будет 6*7';
+await window.sendMessage();
+await settle();
+check('при 403 сообщение ушло в обычный чат', mock.sendStreamCalls === sendBefore + 1);
+check('пустой пузырь не остался', aiCount() === bubblesBefore + 1
+  && lastAi().querySelector('.answer').textContent.includes('42'));
+mock.agentStatus = 200;
+await window.Linux.loadStatus();
 
-press('Escape');
-await new Promise((resolve) => setTimeout(resolve, 100));
-check('Escape закрывает панель', linuxPanel.hidden === true);
+// «Стоп» останавливает и работу в Linux
+const hangingAgent = (signal) => ({
+  ok: true, status: 200,
+  body: { getReader: () => ({ read: () => new Promise((_, reject) => {
+    signal?.addEventListener('abort', () => { const e = new Error('aborted'); e.name = 'AbortError'; reject(e); }, { once: true });
+  }) }) },
+});
+const fetchBeforeStop = window.fetch;
+window.fetch = async (url, options = {}) =>
+  String(url).includes('/api/agent/stream') ? hangingAgent(options?.signal) : fetchBeforeStop(url, options);
+document.getElementById('chat-input').value = 'долгая задача';
+const longTask = window.sendMessage();
+await settle(60);
+check('во время работы в Linux кнопка — «стоп»', document.getElementById('sendBtn').classList.contains('is-stop'));
+await window.sendMessage();
+await longTask.catch(() => {});
+await settle(60);
+check('«стоп» останавливает работу в Linux',
+  !document.getElementById('sendBtn').classList.contains('is-stop')
+  && lastAi().querySelector('.answer').textContent.includes('Остановлено'));
+window.fetch = fetchBeforeStop;
 
-// в агентном режиме «Объясни» не подставляет текст, а сразу идёт агенту
-agentButton.click();
-await new Promise((resolve) => setTimeout(resolve, 100));
-const turnsBefore = document.querySelectorAll('.message.ai').length;
-document.getElementById('chat-input').value = '';
-codeBlock.querySelector('[data-code="explain"]').dispatchEvent(
-  new window.MouseEvent('click', { bubbles: true, cancelable: true }));
-await new Promise((resolve) => setTimeout(resolve, 300));
-check('в агентном режиме «Объясни» уходит агенту, а не в поле',
-  document.getElementById('chat-input').value === ''
-  && document.querySelectorAll('.message.ai').length === turnsBefore + 1);
-window.Linux.setAgent(false);
-await new Promise((resolve) => setTimeout(resolve, 100));
-
-document.activeElement && document.activeElement.blur();   // «?» работает вне поля ввода
-press('?', { keyCode: 63 });
-await new Promise((resolve) => setTimeout(resolve, 100));
-check('«?» открывает шпаргалку хоткеев',
-  document.getElementById('cheatsheet').hidden === false
-  && document.querySelector('.cheat-list').textContent.includes('Ctrl')
-  && document.querySelector('.cheat-list').textContent.includes('агентный режим'));
-press('Escape');
-await new Promise((resolve) => setTimeout(resolve, 100));
-check('Escape закрывает шпаргалку', document.getElementById('cheatsheet').hidden === true);
-
-console.log('\n12) Поиск в интернете через Linux-окружение');
-window.Linux.open('search');
-await new Promise((resolve) => setTimeout(resolve, 100));
-const searchInput = document.getElementById('searchInput');
-const searchList = document.getElementById('searchList');
-
-check('вкладка «Поиск» есть и переключает режим',
-  !!document.querySelector('#linuxTabs .linux-tab[data-tab="search"]')
-  && document.querySelector('.linux-sec[data-sec="search"]').classList.contains('is-active'));
-
-searchInput.value = 'python asyncio';
-document.getElementById('searchForm').dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
-await new Promise((resolve) => setTimeout(resolve, 200));
-check('поиск в интернете возвращает источники',
-  searchList.textContent.includes('asyncio — документация')
-  && searchList.textContent.includes('peps.python.org')
-  && document.getElementById('searchStatus').textContent.includes('searxng'));
-
-searchList.querySelector('[data-act="chat"]').click();
-await new Promise((resolve) => setTimeout(resolve, 120));
-check('«В чат» подставляет источник в поле ввода',
-  document.getElementById('chat-input').value.includes('docs.python.org'));
-
-window.Linux.open('search');
-await new Promise((resolve) => setTimeout(resolve, 100));
-document.getElementById('searchForm').dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
-await new Promise((resolve) => setTimeout(resolve, 200));
-searchList.querySelector('[data-act="save"]').click();
-await new Promise((resolve) => setTimeout(resolve, 250));
-check('«Сохранить» уводит выдачу в рабочую папку',
-  document.querySelector('.linux-sec[data-sec="files"]').classList.contains('is-active'));
-
-window.Linux.open('search');
-await new Promise((resolve) => setTimeout(resolve, 100));
-document.getElementById('searchForm').dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
-await new Promise((resolve) => setTimeout(resolve, 200));
-searchList.querySelector('[data-act="task"]').click();
-await new Promise((resolve) => setTimeout(resolve, 200));
-check('«В задачу» заводит задачу и открывает список',
-  document.querySelector('.linux-sec[data-sec="tasks"]').classList.contains('is-active')
-  && document.getElementById('taskList').textContent.includes('Изучить:'));
-
-window.Linux.open('search');
-await new Promise((resolve) => setTimeout(resolve, 100));
-searchList.querySelector('[data-act="read"]').click();
-await new Promise((resolve) => setTimeout(resolve, 300));
-check('«Читать» сохраняет прочитанную страницу в рабочую папку',
-  document.querySelector('.linux-sec[data-sec="files"]').classList.contains('is-active'));
-
-// тот же запрос, но по файлам песочницы
-window.Linux.open('search');
-await new Promise((resolve) => setTimeout(resolve, 100));
-document.querySelector('#searchModes .search-mode[data-mode="code"]').click();
-searchInput.value = 'asyncio';
-document.getElementById('searchForm').dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
-await new Promise((resolve) => setTimeout(resolve, 200));
-check('поиск по песочнице находит вхождения в коде',
-  searchList.textContent.includes('hello.py')
-  && searchList.textContent.includes('print'));
-
-// «Найди аналог» у блока кода
-const simTurn = window.createAssistantTurn();
-simTurn.appendText('```python\ndef fetch_users(limit=10):\n    return db.query("users", limit)\n```');
-await new Promise((resolve) => setTimeout(resolve, 80));
-const simBlock = simTurn.element.querySelector('.code-block');
-check('у блока кода есть кнопка «Аналог»', !!simBlock.querySelector('[data-code="similar"]'));
-simBlock.querySelector('[data-code="similar"]').dispatchEvent(
-  new window.MouseEvent('click', { bubbles: true, cancelable: true }));
-await new Promise((resolve) => setTimeout(resolve, 250));
-check('«Аналог» ищет по коду в интернете через песочницу',
-  linuxPanel.hidden === false
-  && document.querySelector('.linux-sec[data-sec="search"]').classList.contains('is-active')
-  && searchInput.value.includes('python') && searchInput.value.includes('fetch_users'),
-  searchInput.value);
-check('поиск по коду сразу показал результаты',
-  searchList.textContent.includes('asyncio — документация'));
-
-// nova search остаётся инструментом песочницы: агент вызывает его через run
-const novaTurn = window.createAssistantTurn();
-novaTurn.setStage('agent', 'Планирую', 'Проверю песочницу');
-novaTurn.tool({ name: 'run', command: 'nova search asyncio', code: 0, output: 'docs.python.org' });
-check('команда nova search доступна как инструмент ИИ, а не как панель',
-  novaTurn.element.textContent.includes('nova search asyncio')
-  && novaTurn.element.querySelector('.agent-term') !== null);
-press('Escape');
-await new Promise((resolve) => setTimeout(resolve, 80));
+check('за весь прогон ошибок в консоли нет', consoleErrors.length === 0, consoleErrors.join(' | '));
 
 if (failures.length) {
   console.error(`\n❌ Провалено проверок: ${failures.length} → ${failures.join(', ')}`);

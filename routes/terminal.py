@@ -269,8 +269,10 @@ def nova_read(url, max_chars=4000):
     """Чтение страницы из песочницы — тем же зачитывателем, что и поиск."""
     from routes.search import fetch_page_text
     started = time.time()
-    text = fetch_page_text(url, max_chars=max_chars) or ""
-    return text, int((time.time() - started) * 1000)
+    fetched = fetch_page_text(url, max_chars=max_chars)
+    # fetch_page_text отдаёт (текст, ошибка); раньше кортеж уходил дальше как «текст»
+    text = fetched[0] if isinstance(fetched, tuple) else fetched
+    return (text or ""), int((time.time() - started) * 1000)
 
 
 def _run_nova(parts, timeout):

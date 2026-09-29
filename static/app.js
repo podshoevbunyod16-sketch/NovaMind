@@ -28,7 +28,6 @@ let aiStatus       = null;
 // Тема одна — Aurora. Остальные палитры убраны из оборота,
 // чтобы интерфейс везде выглядел одинаково.
 const THEMES = ['aurora'];
-const THEME_LABEL = { aurora: 'Aurora', midnight: 'Midnight', sunset: 'Sunset', light: 'Light glass' };
 const ONLY_THEME = 'aurora';
 
 // ========== DOM-ЭЛЕМЕНТЫ ==========
@@ -136,12 +135,6 @@ function applyTheme(theme) {
   return value;
 }
 
-function cycleTheme() {
-  // Переключать нечего: держим единственную тему и честно об этом говорим.
-  applyTheme(ONLY_THEME);
-  showNotification(`Тема ${THEME_LABEL[ONLY_THEME]} — единственная палитра`, 'info');
-}
-
 function toggleCalmMotion() {
   const calm = document.documentElement.getAttribute('data-motion') === 'calm';
   document.documentElement.setAttribute('data-motion', calm ? 'full' : 'calm');
@@ -213,21 +206,16 @@ function setWebSearch(state, silent = false) {
   btn?.classList.toggle('active', state);
   btn?.classList.toggle('is-live', state);
   const label = document.getElementById('searchBtnText');
-  if (label) label.textContent = state ? 'Поиск включён' : 'Поиск в интернете';
+  if (label) label.textContent = state ? 'Поиск вкл' : 'Поиск';
+  btn?.setAttribute('aria-pressed', state ? 'true' : 'false');
   if (!silent) {
     showNotification(state
-      ? '🔍 Поиск в интернете включён — покажу сцену поиска и источники'
-      : 'Поиск выключен', state ? 'ok' : 'info');
+      ? '🔍 Автопоиск включён — ИИ ищет в интернете через Linux и отвечает с источниками'
+      : 'Автопоиск выключен', state ? 'ok' : 'info');
   }
 }
 
 function toggleWebSearch() { setWebSearch(!webSearchOn); }
-
-function enableWebSearch() {
-  setWebSearch(true, true);
-  showNotification('🔍 Поиск включён. Задайте вопрос — увидите сцену поиска и источники.', 'ok');
-  input.focus();
-}
 
 function toggleReasoning() {
   reasoningOn = !reasoningOn;
@@ -799,7 +787,9 @@ function createAssistantTurn(options = {}) {
   const stopTimer = () => { if (timer) { clearInterval(timer); timer = null; } };
 
   const ensureStage = (scene, title) => {
-    if (!stage.innerHTML) {
+    // Пузырь начинался с индикатора «Думаю…», а ИИ пошёл работать —
+    // заменяем индикатор полноценной сценой с шагами.
+    if (!stage.innerHTML || stage.querySelector('.stage-idle')) {
       stage.innerHTML = `
         ${scene ? sceneMarkup(scene) : ''}
         <div class="stage-head lg-hidden">
@@ -899,8 +889,8 @@ function createAssistantTurn(options = {}) {
         box.className = 'agent-term';
         box.innerHTML = `
           <button type="button" class="agent-term-head">
-            <span class="agent-term-ico">⌨️</span>
-            <span class="agent-term-title">Работа в песочнице</span>
+            <span class="agent-term-ico">🐧</span>
+            <span class="agent-term-title">Работа в Linux</span>
             <span class="agent-term-meta"></span>
             <span class="caret">▼</span>
           </button>
@@ -909,7 +899,7 @@ function createAssistantTurn(options = {}) {
           // После сворачивания блок можно развернуть вручную
           box.classList.toggle('is-open');
         });
-        bubble.appendChild(box);
+        bubble.insertBefore(box, answerEl);
       }
       const failed = Number(event.code) !== 0;
       const row = document.createElement('div');
@@ -928,7 +918,7 @@ function createAssistantTurn(options = {}) {
       const count = box.querySelectorAll('.agent-term-row').length;
       const done = box.querySelectorAll('.agent-term-row.is-error').length;
       box.querySelector('.agent-term-meta').textContent =
-        `${count} ${count === 1 ? 'команда' : 'команд'}${done ? ` · ошибок: ${done}` : ''}`;
+        `${count} ${count === 1 ? 'шаг' : (count < 5 ? 'шага' : 'шагов')}${done ? ` · ошибок: ${done}` : ''}`;
       box.classList.add('is-open');        // во время работы показываем
       box.classList.remove('is-done');
       scrollToBottom();
@@ -949,16 +939,13 @@ function createAssistantTurn(options = {}) {
       if (!box) {
         box = document.createElement('div');
         box.className = 'agent-task';
-        bubble.appendChild(box);
+        bubble.insertBefore(box, answerEl);
       }
       const steps = (task.steps || []).length;
+      const statusLabel = { todo: 'к выполнению', doing: 'в работе', done: 'готово' }[task.status] || task.status;
       box.innerHTML = `<span class="agent-task-ico">${task.status === 'done' ? '✔' : '📋'}</span>
         <span class="agent-task-title">${escapeHtml(task.title || 'Задача')}</span>
-        <span class="agent-task-meta">${escapeHtml(task.status)}${steps ? ` · шагов: ${steps}` : ''}</span>
-        <button type="button" class="agent-task-more">Задачи</button>`;
-      box.querySelector('.agent-task-more').addEventListener('click', () => {
-        if (window.Linux) { window.Linux.open('tasks'); window.Linux.loadTasks(); }
-      });
+        <span class="agent-task-meta">${escapeHtml(statusLabel)}${steps ? ` · шагов: ${steps}` : ''}</span>`;
       scrollToBottom();
     },
 
@@ -1048,7 +1035,7 @@ function createAssistantTurn(options = {}) {
       if (meta.provider) bits.push(escapeHtml(meta.provider));
       if (meta.offline) bits.push('офлайн');
       if (meta.searched) bits.push('с поиском');
-      if (meta.agent) bits.push('агент');
+      if (meta.agent || meta.linux) bits.push('Linux');
       if (meta.steps) bits.push(`шагов: ${meta.steps}`);
       if (sourcesData.length) bits.push(`источников: ${sourcesData.length}`);
       bits.push(`${seconds} c`);
@@ -1406,7 +1393,18 @@ async function sendMessage(text) {
       return;
     }
 
-    // ── Поиск в интернете: сцена → шаги → источники → ответ ──
+    // ── Главный чат с Linux-окружением ──
+    // ИИ сам решает: ответить сразу или работать в Linux по шагам.
+    // Кнопка «Поиск» тоже идёт через окружение (nova search → чтение страниц → ответ).
+    if (window.Linux && typeof window.Linux.runTurn === 'function') {
+      const handled = await window.Linux.runTurn(finalMsg, {
+        search: webSearchOn || autoSearchOn,
+        reasoning: reasoningOn,
+      });
+      if (handled) return;
+    }
+
+    // ── Запасной путь без окружения: поиск в интернете ──
     if (webSearchOn || autoSearchOn) {
       const turn = createAssistantTurn();
       turn.beginSearch('Поищу в интернете');
@@ -1469,7 +1467,6 @@ async function sendMessage(text) {
   }
 }
 
-function sendSuggestion(text) { sendMessage(text); }
 
 // ========== РЕЖИМЫ КОМАНД ==========
 /** Плашка активного режима («Погода», «Курс валют»…) с крестиком отмены. */
@@ -1594,22 +1591,25 @@ function appendMessage(role, content, meta = null) {
 function formatContent(text) {
   let html = escapeHtml(String(text ?? ''));
 
-  // Блоки кода — с кнопками для программиста
-  html = html.replace(/```(\w+)?\n?([\s\S]*?)```/g, (_, lang, code) => `
-    <div class="code-block" data-lang="${escapeHtml(lang || '')}">
-      <div class="code-bar">
-        <span class="code-lang">${escapeHtml(lang || 'код')}</span>
-        <span class="code-acts">
-          <button type="button" data-code="explain" title="Объяснить этот код">💡 Объясни</button>
-          <button type="button" data-code="tests" title="Написать тесты к этому коду">🧪 Тесты</button>
-          <button type="button" data-code="optimize" title="Оптимизировать и показать diff">⚡ Оптимизируй</button>
-          <button type="button" data-code="similar" title="Найти аналог в интернете через песочницу">🔎 Аналог</button>
-          <button type="button" data-code="copy" title="Скопировать код">📋</button>
-          <button type="button" data-code="terminal" title="Сохранить код файлом в рабочую папку">⌨️ В песочницу</button>
-        </span>
-      </div>
-      <pre><code>${code.trim()}</code></pre>
-    </div>`);
+  // Блоки кода — с кнопками для программиста. Их вынимаем в заглушки,
+  // чтобы разметка ниже не трогала код: переносы строк не превращались
+  // в <br>, а ** и * внутри кода — в жирный и курсив.
+  const codeBlocks = [];
+  html = html.replace(/\n*```(\w+)?\n?([\s\S]*?)```\n*/g, (_, lang, code) => {
+    codeBlocks.push(
+      `<div class="code-block" data-lang="${escapeHtml(lang || '')}">`
+      + '<div class="code-bar">'
+      + `<span class="code-lang">${escapeHtml(lang || 'код')}</span>`
+      + '<span class="code-acts">'
+      + '<button type="button" data-code="run" title="ИИ запустит этот код в Linux и покажет результат">▶<span class="code-act-label"> Запустить</span></button>'
+      + '<button type="button" data-code="explain" title="Объяснить этот код">💡<span class="code-act-label"> Объясни</span></button>'
+      + '<button type="button" data-code="tests" title="Написать и запустить тесты">🧪<span class="code-act-label"> Тесты</span></button>'
+      + '<button type="button" data-code="copy" title="Скопировать код">📋</button>'
+      + '</span></div>'
+      + `<pre><code>${code.replace(/\s+$/, '').replace(/^\n+/, '')}</code></pre>`
+      + '</div>');
+    return `\u0000${codeBlocks.length - 1}\u0000`;
+  });
   // Инлайн-код
   html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
   // Заголовки
@@ -1647,6 +1647,8 @@ function formatContent(text) {
 
   html = html.replace(/\n\n/g, '<br><br>');
   html = html.replace(/\n/g, '<br>');
+  // Возвращаем блоки кода на место — нетронутыми
+  html = html.replace(/\u0000(\d+)\u0000/g, (_, index) => codeBlocks[Number(index)] || '');
   return html;
 }
 
@@ -2149,7 +2151,6 @@ const CMDK_ACTIONS = [
   { icon: '🔍', label: 'Включить/выключить поиск в интернете', hint: '', run: () => toggleWebSearch() },
   { icon: '🧠', label: 'Включить/выключить рассуждения', hint: '', run: () => toggleReasoning() },
   { icon: '🎨', label: 'Открыть панель медиа-моделей', hint: '', run: () => openMediaPicker() },
-  { icon: '🎭', label: 'Тема оформления: Aurora', hint: '', run: () => cycleTheme() },
   { icon: '✖️', label: 'Выключить активный режим', hint: '', run: () => clearInputMode() },
   { icon: '✨', label: 'Спокойный режим анимаций', hint: '', run: () => toggleCalmMotion() },
   { icon: '🧹', label: 'Очистить чат', hint: '', run: () => clearChat() },
