@@ -133,8 +133,16 @@ def trim_messages(chat_id, max_messages=100):
 # агентный режим, у каждой задачи есть шаги и лог выполнения.
 # ══════════════════════════════════════════════════════════════
 
+_tasks_ready = set()
+
 def init_tasks():
-    """Таблица задач создаётся лениво — чтобы старый novamind_chats.db не ломался."""
+    """Таблица задач создаётся лениво — чтобы старый novamind_chats.db не ломался.
+
+    Проверяем один раз на каждую базу: /api/tasks дёргается часто,
+    а CREATE TABLE IF NOT EXISTS на каждый запрос не нужен.
+    """
+    if DB_PATH in _tasks_ready:
+        return
     with get_db() as conn:
         conn.executescript("""
             CREATE TABLE IF NOT EXISTS tasks (
@@ -149,6 +157,7 @@ def init_tasks():
             );
             CREATE INDEX IF NOT EXISTS idx_tasks_updated ON tasks(updated_at DESC);
         """)
+    _tasks_ready.add(DB_PATH)
 
 def _row_to_task(row):
     try:
