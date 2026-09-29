@@ -362,6 +362,50 @@ def test_search_stream_answers_from_knowledge_when_backends_fail(client, monkeyp
     assert events[-1]["type"] == "done" and events[-1]["searched"] is False
 
 
+def test_search_stream_recovers_when_stream_dies_midway(client, monkeypatch, mock_search, local_runtime):
+    """Поток от модели оборвался — ответ всё равно должен дойти до пользователя."""
+    real_stream = search_routes.chat_stream
+
+    def dying_stream(messages, **kwargs):
+        yield "token", "Часть ответа "
+        raise ConnectionError("провайдер закрыл соединение")
+
+    monkeypatch.setattr(search_routes, "chat_stream", dying_stream)
+    monkeypatch.setattr(search_routes, "build_search_query", lambda message: "цены 2026")
+
+    events = _read_ndjson(client.post("/api/auto_search_stream", json={"message": "сколько стоит?", "force": True}))
+    types = [event["type"] for event in events]
+    assert "token" in types
+    # Сервер сам дочитывает ответ обычным запросом и кладёт его в result.reply
+    result = next(event for event in events if event["type"] == "result")
+    assert result["searched"] is True and result["reply"]
+    assert len(result["sources"]) == 2
+    assert events[-1]["type"] == "done"
+
+
+def test_search_stream_falls_back_to_sources_when_model_is_dead(client, monkeypatch, mock_search, local_runtime):
+    """Модель молчит и не отвечает даже без стрима — показываем найденное."""
+    def dead_stream(messages, **kwargs):
+        yield "error", "HTTP 503: upstream unavailable"
+        yield "done", ""
+
+    monkeypatch.setattr(search_routes, "chat_stream", dead_stream)
+    monkeypatch.setattr(search_routes, "chat_completion",
+                        lambda messages, **kwargs: (None, "HTTP 503: upstream unavailable"))
+    monkeypatch.setattr(search_routes, "build_search_query", lambda message: "цены 2026")
+
+    events = _read_ndjson(client.post("/api/auto_search_stream", json={"message": "сколько стоит?", "force": True}))
+    result = next(event for event in events if event["type"] == "result")
+    answer = result["reply"]
+
+    # Данные не теряются: в ответе есть сами найденные источники
+    assert "Обзор рынка" in answer and "Условия доставки" in answer
+    assert len(result["sources"]) == 2
+    assert events[-1]["type"] == "done"
+    steps = " ".join(event.get("text", "") for event in events if event["type"] == "step")
+    assert "503" in steps
+
+
 def test_search_stream_rejects_empty_message(client):
     assert client.post("/api/auto_search_stream", json={"message": "  "}).status_code == 400
 

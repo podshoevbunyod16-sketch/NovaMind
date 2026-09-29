@@ -13,7 +13,10 @@
  *   4. источники появляются ВНУТРИ пузыря ИИ;
  *   5. с первым токеном сцена схлопывается и печатается ответ;
  *   6. после завершения сцена скрыта, ответ и ссылки остались;
- *   7. Ctrl+K открывает командную панель; тема переключается.
+ *   7. Ctrl+K открывает командную панель; тема переключается;
+ *   8. компоновка: сайдбар скрыт по умолчанию и открывается бургером,
+ *      у чата и сайдбара нет своих ползунков, длинное имя модели
+ *      обрезается многоточием с полным названием в подсказке.
  */
 import { createRequire } from 'node:module';
 
@@ -211,10 +214,9 @@ check('действия в панели есть', document.querySelectorAll('.c
 window.closeCmdk();
 check('командная панель закрыта', !document.getElementById('cmdk').classList.contains('open'));
 
-const themeBefore = document.documentElement.getAttribute('data-glass-theme');
 window.cycleTheme();
-check('тема переключается',
-  document.documentElement.getAttribute('data-glass-theme') !== themeBefore);
+check('тема всегда Aurora (единственная палитра)',
+  document.documentElement.getAttribute('data-glass-theme') === 'aurora');
 
 window.toggleCalmMotion();
 check('спокойный режим включается',
@@ -228,13 +230,99 @@ window.showNotification('Тест', 'ok');
 check('тост показан', document.querySelectorAll('#toastStack .lg-toast').length >= 1,
   `в стеке ${document.querySelectorAll('#toastStack .lg-toast').length}`);
 
-console.log('\n5) Ошибок за весь прогон не появилось');
+// ══════════════════════════════════════════════════════════════
+// 5) Компоновка: один ползунок на всё окно, короткие имена моделей
+// ══════════════════════════════════════════════════════════════
+console.log('\n5) Компоновка чата');
+const chatCss = await (await fetch(BASE + '/static/style.css')).text();
+const cssBlock = (selector) => (chatCss.match(new RegExp('\\' + selector + '\\s*\\{[^}]*\\}')) || [''])[0];
+
+const appShell = document.querySelector('.app');
+check('сайдбар скрыт по умолчанию', appShell.classList.contains('nav-off'));
+check('бургер отмечен как закрытый', document.getElementById('btnNav').getAttribute('aria-expanded') === 'false');
+window.toggleSidebar();
+check('бургер открывает панель', !appShell.classList.contains('nav-off'));
+check('состояние панели запомнено', window.localStorage.getItem('nova_nav_open') === '1');
+window.toggleSidebar();
+check('бургер снова прячет панель', appShell.classList.contains('nav-off'));
+
+check('прокручивается всё окно, а не переписка',
+  !/overflow-y:\s*auto/.test(cssBlock('.chat-container')), cssBlock('.chat-container'));
+check('у сайдбара нет своего ползунка',
+  !/overflow-y:\s*auto/.test(cssBlock('.sidebar-body')), cssBlock('.sidebar-body'));
+check('поле ввода прилипает к низу окна', /position:\s*sticky/.test(cssBlock('.input-area')));
+check('шапка прилипает к верху окна', /position:\s*sticky/.test(cssBlock('.topbar')));
+
+const probe = document.createElement('span');
+window.setShortText(probe, 'meta-llama/Llama-3.3-70B-Instruct-Turbo-Provider', 26);
+check('длинное имя модели обрезано многоточием',
+  probe.textContent.endsWith('…') && probe.textContent.length <= 27, probe.textContent);
+check('полное имя модели — в подсказке', probe.title.startsWith('meta-llama'), probe.title);
+check('имя модели в шапке не выталкивает кнопки', /#statusText\s*\{[^}]*text-overflow:\s*ellipsis/.test(chatCss));
+check('у модели в шапке есть подсказка с полным именем',
+  document.getElementById('statusText').title.length > 0, document.getElementById('statusText').title);
+
+// ══════════════════════════════════════════════════════════════
+// 6) Кнопка «стоп», режимы и плашки
+// ══════════════════════════════════════════════════════════════
+console.log('\n6) Кнопка «стоп» и активный режим');
+
+// Поток, который не отвечает, — как раз тот случай, когда пользователь
+// жмёт «стоп» на пустом поле ввода.
+const hanging = (signal) => ({
+  ok: true, status: 200,
+  body: {
+    getReader: () => ({
+      read: () => new Promise((_, reject) => {
+        signal?.addEventListener('abort', () => {
+          const error = new Error('aborted');
+          error.name = 'AbortError';
+          reject(error);
+        }, { once: true });
+      }),
+    }),
+  },
+});
+const realFetch = window.fetch;
+window.fetch = async (url, options = {}) =>
+  String(url).includes('/send_stream') ? hanging(options?.signal) : realFetch(url, options);
+
+document.getElementById('chat-input').value = 'долгий ответ';
+const pending = window.sendMessage();
+await new Promise((resolve) => setTimeout(resolve, 60));
+check('во время генерации кнопка становится «стоп»',
+  document.getElementById('sendBtn').classList.contains('is-stop'));
+document.getElementById('chat-input').value = '';     // поле пустое, как у пользователя
+await window.sendMessage();
+await pending.catch(() => {});
+check('«стоп» срабатывает при пустом поле ввода',
+  !document.getElementById('sendBtn').classList.contains('is-stop'));
+check('после остановки показано уведомление',
+  [...document.querySelectorAll('#toastStack .lg-toast')].some((t) => t.textContent.includes('остановлена')));
+window.fetch = realFetch;
+
+const modeBar = document.getElementById('modeActiveBar');
+check('плашка режима скрыта в обычном чате', modeBar.hidden === true);
+window.activateMode({ prefix: '/services weather ', label: '🌤 Погода', placeholder: 'Введите город…' });
+check('режим включается и показывается', modeBar.hidden === false
+  && document.getElementById('modeActiveText').textContent.includes('Погода'));
+check('поле ввода просит город', document.getElementById('chat-input').placeholder.includes('город'));
+window.activateMode({ prefix: '/services weather ', label: '🌤 Погода', placeholder: 'Введите город…' });
+check('повторный клик по режиму выключает его', modeBar.hidden === true
+  && document.getElementById('chat-input').placeholder === 'Напишите сообщение...');
+window.activateMode({ prefix: '/services wiki ', label: '📚 Википедия', placeholder: 'Запрос…' });
+window.newChat();
+check('новый чат снимает активный режим', modeBar.hidden === true);
+check('плашка медиа не висит без выбранной модели',
+  document.getElementById('mediaActiveBar').hidden === true);
+
+console.log('\n7) Ошибок за весь прогон не появилось');
 check('консоль чистая', consoleErrors.length === 0, consoleErrors.join(' | '));
 
 // ══════════════════════════════════════════════════════════════
-// 6) Страница настроек: провайдеры, каталог, диагностика поиска
+// 8) Страница настроек: провайдеры, каталог, диагностика поиска
 // ══════════════════════════════════════════════════════════════
-console.log('\n6) Страница настроек');
+console.log('\n8) Страница настроек');
 const settingsHtml = await (await fetch(BASE + '/settings')).text();
 const settingsJs = await (await fetch(BASE + '/static/settings.js')).text();
 
@@ -309,16 +397,15 @@ check('диагностика: упавший бэкенд помечен',
 check('статус поиска объясняет итог',
   sdoc.getElementById('healthStatus').textContent.includes('2 из 3'),
   sdoc.getElementById('healthStatus').textContent);
-check('кнопка темы работает', (() => {
-  const before = settingsDom.window.document.documentElement.getAttribute('data-glass-theme');
+check('кнопка темы держит Aurora', (() => {
   sdoc.getElementById('themeBtn').dispatchEvent(new settingsDom.window.Event('click'));
-  return settingsDom.window.document.documentElement.getAttribute('data-glass-theme') !== before;
+  return settingsDom.window.document.documentElement.getAttribute('data-glass-theme') === 'aurora';
 })());
 
 // ══════════════════════════════════════════════════════════════
-// 7) Окно входа
+// 9) Окно входа
 // ══════════════════════════════════════════════════════════════
-console.log('\n7) Окно входа');
+console.log('\n9) Окно входа');
 const authHtml = await (await fetch(BASE + '/')).text();
 const authErrors = [];
 const authConsole = new VirtualConsole();
@@ -346,10 +433,10 @@ check('вход: переключение на регистрацию', (() => {
   return adoc.getElementById('registerForm').classList.contains('active')
     && !adoc.getElementById('loginForm').classList.contains('active');
 })());
-check('вход: тема сохраняется', (() => {
+check('вход: тема всегда Aurora', (() => {
   authDom.window.setAuthTheme('sunset');
-  return adoc.documentElement.getAttribute('data-glass-theme') === 'sunset'
-    && authDom.window.localStorage.getItem('nova_theme') === 'sunset';
+  return adoc.documentElement.getAttribute('data-glass-theme') === 'aurora'
+    && authDom.window.localStorage.getItem('nova_theme') === 'aurora';
 })());
 check('вход: гость заполняет форму и логинится', (() => {
   authDom.window.quickLogin('Guest');

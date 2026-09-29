@@ -312,11 +312,8 @@
                 </div>
             </div>
 
-            <div class="auth-theme-row" aria-label="Тема оформления">
+            <div class="auth-theme-row" aria-label="Тема оформления: Aurora">
                 <button type="button" class="t-aurora" title="Aurora" onclick="setAuthTheme('aurora')"></button>
-                <button type="button" class="t-midnight" title="Midnight" onclick="setAuthTheme('midnight')"></button>
-                <button type="button" class="t-sunset" title="Sunset" onclick="setAuthTheme('sunset')"></button>
-                <button type="button" class="t-light" title="Light glass" onclick="setAuthTheme('light')"></button>
             </div>
 
         </div>
@@ -383,10 +380,11 @@
 
         // ── Тема стекла (сохраняется и применяется во всём приложении) ──
         function setAuthTheme(theme) {
-            document.documentElement.setAttribute('data-glass-theme', theme);
-            localStorage.setItem('nova_theme', theme);
+            // Тема одна — Aurora.
+            document.documentElement.setAttribute('data-glass-theme', 'aurora');
+            localStorage.setItem('nova_theme', 'aurora');
         }
-        setAuthTheme(localStorage.getItem('nova_theme') || 'aurora');
+        setAuthTheme('aurora');
 
         function togglePassword(inputId, btn) {
             const input = document.getElementById(inputId);

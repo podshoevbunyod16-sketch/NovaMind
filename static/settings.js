@@ -217,16 +217,17 @@ if (document.readyState === 'loading') document.addEventListener('DOMContentLoad
 else initMediaCatalog();
 
 /* ========== ТЕМА СТЕКЛА ========== */
-const GLASS_THEMES = ['aurora', 'midnight', 'sunset', 'light'];
+// Тема одна — Aurora, как и в чате.
+const GLASS_THEMES = ['aurora'];
 function applyGlassTheme(theme) {
-  document.documentElement.setAttribute('data-glass-theme', theme);
-  localStorage.setItem('nova_theme', theme);
+  const value = GLASS_THEMES.includes(theme) ? theme : 'aurora';
+  document.documentElement.setAttribute('data-glass-theme', value);
+  localStorage.setItem('nova_theme', value);
 }
 function cycleGlassTheme() {
-  const current = document.documentElement.getAttribute('data-glass-theme') || 'aurora';
-  applyGlassTheme(GLASS_THEMES[(GLASS_THEMES.indexOf(current) + 1) % GLASS_THEMES.length]);
+  applyGlassTheme('aurora');
 }
-applyGlassTheme(localStorage.getItem('nova_theme') || 'aurora');
+applyGlassTheme('aurora');
 $('themeBtn')?.addEventListener('click', cycleGlassTheme);
 
 /* ========== ДИАГНОСТИКА ПОИСКА ========== */

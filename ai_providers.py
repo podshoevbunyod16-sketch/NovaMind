@@ -396,7 +396,10 @@ def _raw_stream(provider, model, payload, cfg, timeout):
     last_error = None
     for _ in range(attempts):
         try:
-            response = requests.post(cfg["url"], json=payload, headers=headers, timeout=timeout, stream=True)
+            # (подключение, ожидание очередной порции данных) — долгий первый
+            # токен у reasoning-моделей не должен обрываться по общему таймауту
+            response = requests.post(cfg["url"], json=payload, headers=headers,
+                                     timeout=(min(30, timeout), timeout), stream=True)
         except requests.exceptions.RequestException as exc:
             last_error = str(exc)
             if provider == "groq":
@@ -443,6 +446,12 @@ def _raw_stream(provider, model, payload, cfg, timeout):
                 token = delta.get("content") or choice.get("text") or ""
                 if token:
                     yield "token", token
+        except requests.exceptions.RequestException as exc:
+            # Соединение оборвалось посреди потока. Молча рвать генератор нельзя:
+            # всё, что уже пришло, показываем пользователю, и помечаем поток
+            # оборванным — вызывающий код сам решит, дособирать ответ или нет.
+            yield "error", f"Соединение с моделью прервано: {exc.__class__.__name__}"
+            return
         finally:
             response.close()
         return

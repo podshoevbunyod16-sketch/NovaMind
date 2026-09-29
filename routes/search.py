@@ -50,7 +50,14 @@ SEARXNG_INSTANCES = [
 ]
 
 SEARCH_TIMEOUT = float(os.getenv("SEARCH_TIMEOUT", "9"))
-READER_TIMEOUT = float(os.getenv("READER_TIMEOUT", "14"))
+READER_TIMEOUT = float(os.getenv("READER_TIMEOUT", "10"))
+# Сколько ждём модель после сбора источников. У reasoning-моделей первый токен
+# приходит долго, поэтому времени заметно больше, чем у обычного поиска.
+ANSWER_TIMEOUT = float(os.getenv("ANSWER_TIMEOUT", "180"))
+# Сколько страниц успеваем прочитать перед ответом.
+MAX_PAGES = int(os.getenv("SEARCH_MAX_PAGES", "3"))
+# Таймаут служебных запросов (короткий поисковый запрос, «нужен ли поиск»).
+QUERY_TIMEOUT = float(os.getenv("SEARCH_QUERY_TIMEOUT", "10"))
 
 
 def search_backends():
@@ -394,6 +401,17 @@ def _ndjson(payload):
     return json.dumps(payload, ensure_ascii=False) + "\n"
 
 
+def _pump(source, emit):
+    """Прокидывает события вложенного генератора через emit (с elapsed_ms)
+    и возвращает итоговое значение вложенного генератора."""
+    while True:
+        try:
+            event = next(source)
+        except StopIteration as stop:
+            return stop.value
+        yield emit(**event)
+
+
 def needs_web_search(user_message):
     """Быстрая эвристика + мнение модели: нужен ли интернет для вопроса."""
     text = (user_message or "").lower()
@@ -408,7 +426,7 @@ def needs_web_search(user_message):
             f'"{user_message}"\nНужен ли поиск в интернете для ответа? Ответь одним словом: SEARCH или DIRECT.\n'
             'SEARCH — цены, новости, погода, события, текущий статус, свежие данные.\n'
             'DIRECT — теория, математика, код, перевод, объяснение.'}],
-        provider=provider, model=model, temperature=0, max_tokens=8, timeout=15,
+        provider=provider, model=model, temperature=0, max_tokens=8, timeout=QUERY_TIMEOUT,
     )
     if error:
         return True  # не уверены — лучше поискать
@@ -423,7 +441,7 @@ def build_search_query(user_message):
         [{"role": "user", "content":
             f'Сделай из вопроса короткий поисковый запрос (до 8 слов, без кавычек и пояснений).\n'
             f'Вопрос: "{user_message}"'}],
-        provider=provider, model=model, temperature=0, max_tokens=40, timeout=15,
+        provider=provider, model=model, temperature=0, max_tokens=40, timeout=QUERY_TIMEOUT,
     )
     if error:
         return user_message
@@ -433,7 +451,7 @@ def build_search_query(user_message):
     return user_message
 
 
-def search_pipeline(user_message, force_search=True, reasoning=False, max_pages=3):
+def search_pipeline(user_message, force_search=True, reasoning=False, max_pages=None):
     """
     Генератор событий поиска + ответа. Все события — словари для NDJSON.
 
@@ -441,6 +459,7 @@ def search_pipeline(user_message, force_search=True, reasoning=False, max_pages=
       stage(search) → шаги → sources → stage(write) → токены ответа → result → done
     """
     started = time.time()
+    max_pages = MAX_PAGES if max_pages is None else max_pages
     provider, model, _ = resolve_target()
 
     def emit(**payload):
@@ -456,12 +475,15 @@ def search_pipeline(user_message, force_search=True, reasoning=False, max_pages=
         if not needs_web_search(user_message):
             yield emit(type="stage", scene="write", title="Отвечаю без поиска",
                        text="Свежие данные не нужны — отвечаю по знаниям модели")
-            for chunk in _stream_answer(
-                [{"role": "user", "content": user_message}],
-                system=DIRECT_SYSTEM_PROMPT, provider=provider, model=model, reasoning=reasoning,
-            ):
-                yield chunk
-            yield emit(type="result", reply="", searched=False, sources=[], query=None,
+            answer, note = yield from _pump(
+                _answer_with_context(user_message, "", [], provider, model, reasoning,
+                                     system=DIRECT_SYSTEM_PROMPT,
+                                     note="Интернет не нужен, отвечаю по базе знаний модели."),
+                emit,
+            )
+            if note:
+                yield emit(type="step", icon="⚠️", text=note)
+            yield emit(type="result", reply=answer, searched=False, sources=[], query=None,
                        model=model, offline=provider == "local_demo")
             yield emit(type="done", searched=False)
             return
@@ -498,15 +520,16 @@ def search_pipeline(user_message, force_search=True, reasoning=False, max_pages=
     if not results:
         yield emit(type="stage", scene="write", title="Поиск не дал результатов",
                    text="Отвечаю из базы знаний модели")
-        for chunk in _stream_answer(
-            [{"role": "user", "content":
-                f"{user_message}\n\n[Поиск в интернете не дал результатов. "
-                f"Отвечай из своих знаний с пометкой (из базы знаний) и предупреди, "
-                f"что данные могут быть устаревшими.]"}],
-            system=SEARCH_SYSTEM_PROMPT, provider=provider, model=model, reasoning=reasoning,
-        ):
-            yield chunk
-        yield emit(type="result", reply="", searched=False, sources=[], query=query,
+        answer, note = yield from _pump(
+            _answer_with_context(user_message, "", [], provider, model, reasoning,
+                                 note="Поиск в интернете не дал результатов. Отвечай из своих "
+                                      "знаний с пометкой (из базы знаний) и предупреди, что "
+                                      "данные могут быть устаревшими."),
+            emit,
+        )
+        if note:
+            yield emit(type="step", icon="⚠️", text=note)
+        yield emit(type="result", reply=answer, searched=False, sources=[], query=query,
                    model=model, offline=provider == "local_demo", trace=trace)
         yield emit(type="done", searched=False)
         return
@@ -534,13 +557,14 @@ def search_pipeline(user_message, force_search=True, reasoning=False, max_pages=
     yield emit(type="stage", scene="write", title="Собираю ответ",
                text=f"Обрабатываю {len(scraped)} источника")
 
-    for chunk in _stream_answer(
-        [{"role": "user", "content": f"Вопрос: {user_message}\n\nДанные из интернета:\n{context}"}],
-        system=SEARCH_SYSTEM_PROMPT, provider=provider, model=model, reasoning=reasoning,
-    ):
-        yield chunk
+    answer, note = yield from _pump(
+        _answer_with_context(user_message, context, sources, provider, model, reasoning),
+        emit,
+    )
+    if note:
+        yield emit(type="step", icon="⚠️", text=f"Ответ собран запасным путём: {note}")
 
-    yield emit(type="result", reply="", searched=True, sources=sources, query=query,
+    yield emit(type="result", reply=answer, searched=True, sources=sources, query=query,
                model=model, offline=provider == "local_demo", trace=trace)
     yield emit(type="done", searched=True)
 
@@ -570,22 +594,101 @@ def _read_pages(sources):
     return [item for item in results if item]
 
 
-def _stream_answer(messages, system, provider, model, reasoning=False):
-    """Потоковый ответ модели → события reasoning/token/error."""
-    seen_error = False
-    for kind, chunk in chat_stream(messages, provider=provider, model=model,
-                                   system=system, temperature=0.3, reasoning=reasoning):
-        if kind == "reasoning":
-            yield {"type": "reasoning", "token": chunk}
-        elif kind == "token":
-            yield {"type": "token", "token": chunk}
-        elif kind == "error":
-            seen_error = True
-            yield {"type": "error", "text": chunk}
-        elif kind == "done":
-            break
-    if seen_error:
-        return
+def _stream_answer(messages, system, provider, model, reasoning=False, timeout=None):
+    """Потоковый ответ модели → события reasoning/token/error.
+
+    Генератор возвращает кортеж (ошибка, текст): вызывающий код видит, что
+    именно удалось получить, и решает — повторить запрос или собрать ответ
+    из найденных источников.
+    """
+    timeout = timeout or ANSWER_TIMEOUT
+    pieces = []
+    failure = None
+    try:
+        for kind, chunk in chat_stream(messages, provider=provider, model=model,
+                                       system=system, temperature=0.3,
+                                       reasoning=reasoning, timeout=timeout):
+            if kind == "reasoning":
+                yield {"type": "reasoning", "token": chunk}
+            elif kind == "token":
+                pieces.append(chunk)
+                yield {"type": "token", "token": chunk}
+            elif kind == "error":
+                failure = chunk
+            elif kind == "done":
+                break
+    except Exception as exc:            # сеть или провайдер упали посреди потока
+        failure = f"{exc.__class__.__name__}: {exc}"
+    return failure, "".join(pieces).strip()
+
+
+def _fallback_answer(user_message, sources, reason=""):
+    """Ответ без модели: найденные ссылки и выдержки — чтобы данные не потерялись."""
+    if not sources:
+        return ("**Модель не ответила.** "
+                + (f"Причина: {reason}. " if reason else "")
+                + "Попробуйте спросить ещё раз или сформулировать вопрос иначе.")
+
+    lines = [
+        "**Модель не ответила по этим источникам** — ниже то, что нашёл поиск.",
+        "",
+        f"Запрос: _{user_message}_",
+        "",
+    ]
+    if reason:
+        lines.append(f"_Причина: {reason}_")
+        lines.append("")
+    for index, source in enumerate(sources[:6], 1):
+        title = (source.get("title") or "Без названия").strip()
+        url = source.get("url") or ""
+        host = source.get("host") or (urlparse(url).netloc if url else "")
+        snippet = " ".join((source.get("snippet") or "").split())[:320]
+        lines.append(f"**[{index}] {title}**")
+        lines.append(f"{host} — {url}")
+        if snippet:
+            lines.append(snippet)
+        lines.append("")
+    if len(sources) > 6:
+        lines.append(f"_Ещё {len(sources) - 6} источников — в списке под ответом._")
+    return "\n".join(lines).strip()
+
+
+def _answer_with_context(user_message, context, sources, provider, model,
+                         reasoning=False, system=SEARCH_SYSTEM_PROMPT, note=""):
+    """Ответ модели по найденным данным — с тремя ступенями страховки.
+
+    1. потоковый ответ;
+    2. тот же запрос без стрима (если поток оборвался);
+    3. текст из самих источников (если модель недоступна).
+
+    Так найденные ссылки всегда доезжают до пользователя, даже когда
+    генератор молчит или рвётся на середине.
+    """
+    body = f"Вопрос: {user_message}\n\nДанные из интернета:\n{context}"
+    if note:
+        body += f"\n\n[Примечание: {note}]"
+
+    failure, text = yield from _stream_answer(
+        [{"role": "user", "content": body}],
+        system=system, provider=provider, model=model, reasoning=reasoning,
+    )
+    if text:
+        return text, None
+
+    reason = failure or "модель не вернула текст"
+    yield {"type": "step", "icon": "🔁", "text": f"Поток прерван ({reason}) — повторяю запрос"}
+    answer, error = chat_completion(
+        [{"role": "user", "content": body}],
+        provider=provider, model=model, system=system, temperature=0.3,
+        timeout=ANSWER_TIMEOUT,
+    )
+    if answer and answer.strip():
+        return answer.strip(), reason
+    if isinstance(error, dict):
+        error = ""
+    return (_fallback_answer(user_message, sources,
+                             f"{reason}; {error or 'повтор не удался'}".strip("; ")),
+            reason)
 
 
 @search_bp.route("/api/auto_search_stream", methods=["POST"])

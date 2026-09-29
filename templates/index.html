@@ -43,31 +43,31 @@
         Чат
       </div>
 
-      <div class="nav-item" onclick="activateMode({prefix: '/search ', placeholder: 'Введите запрос для поиска...'}); closeSidebar();">
+      <div class="nav-item" onclick="activateMode({prefix: '/search ', label: '🔎 Веб-поиск', placeholder: 'Введите запрос для поиска...'}); closeSidebar();">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
         Веб-поиск
         <span class="nav-badge">Beta</span>
       </div>
 
-      <div class="nav-item" onclick="activateMode({prefix: '/image ', placeholder: 'Опишите изображение для генерации...'}); closeSidebar();">
+      <div class="nav-item" onclick="activateMode({prefix: '/image ', label: '🎨 Генерация изображений', placeholder: 'Опишите изображение для генерации...'}); closeSidebar();">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
         Генерация изображений
       </div>
 
-      <div class="nav-item" onclick="activateMode({prefix: '/code ', placeholder: 'Опишите, какой код создать...'}); closeSidebar();">
+      <div class="nav-item" onclick="activateMode({prefix: '/code ', label: '💻 Помощник кода', placeholder: 'Опишите, какой код создать...'}); closeSidebar();">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
         Помощник кода
       </div>
 
       <div class="nav-label">Сервисы</div>
 
-      <div class="nav-item" onclick="activateMode({prefix: '/services weather ', placeholder: 'Введите город для погоды...'}); closeSidebar();">
+      <div class="nav-item" onclick="activateMode({prefix: '/services weather ', label: '🌤 Погода', placeholder: 'Введите город для погоды...'}); closeSidebar();">
         <span style="font-size:16px;">🌤️</span> Погода
       </div>
-      <div class="nav-item" onclick="activateMode({prefix: '/services currency ', placeholder: 'Введите валюты (USD RUB)...'}); closeSidebar();">
+      <div class="nav-item" onclick="activateMode({prefix: '/services currency ', label: '💱 Курс валют', placeholder: 'Введите валюты (USD RUB)...'}); closeSidebar();">
         <span style="font-size:16px;">💱</span> Курс валют
       </div>
-      <div class="nav-item" onclick="activateMode({prefix: '/services wiki ', placeholder: 'Введите запрос для Википедии...'}); closeSidebar();">
+      <div class="nav-item" onclick="activateMode({prefix: '/services wiki ', label: '📚 Википедия', placeholder: 'Введите запрос для Википедии...'}); closeSidebar();">
         <span style="font-size:16px;">📚</span> Википедия
       </div>
 
@@ -105,7 +105,7 @@
 
     <!-- Top Bar -->
     <header class="topbar">
-      <button class="menu-btn" onclick="toggleSidebar()" aria-label="Меню">
+      <button class="menu-btn" id="btnNav" onclick="toggleSidebar()" aria-label="Открыть боковую панель" aria-expanded="false" title="Открыть боковую панель">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
       </button>
 
@@ -122,7 +122,7 @@
           <span class="media-model-label" id="mediaModelLabel">Медиа</span>
         </button>
 
-        <button class="icon-btn" id="btnTheme" title="Сменить тему стекла" onclick="cycleTheme()">
+        <button class="icon-btn" id="btnTheme" title="Тема оформления: Aurora" onclick="cycleTheme()">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 3a9 9 0 0 0 0 18z" fill="currentColor" stroke="none"/></svg>
         </button>
 
@@ -143,17 +143,17 @@
         <h1>Привет! Я <span>Khirad</span></h1>
         <p>Ваш интеллектуальный AI-ассистент. Задайте любой вопрос или используйте инструменты из боковой панели.</p>
         <div class="suggestions">
-          <div class="suggestion-card" onclick="activateMode({prefix: '/services weather ', placeholder: 'Введите город для погоды...'})">
+          <div class="suggestion-card" onclick="activateMode({prefix: '/services weather ', label: '🌤 Погода', placeholder: 'Введите город для погоды...'})">
             <div class="card-icon">🌤️</div>
             <div class="card-title">Погода</div>
             <div class="card-desc">Узнайте погоду в любом городе</div>
           </div>
-          <div class="suggestion-card" onclick="activateMode({prefix: '/code ', placeholder: 'Опишите, какой код создать...'})">
+          <div class="suggestion-card" onclick="activateMode({prefix: '/code ', label: '💻 Помощник кода', placeholder: 'Опишите, какой код создать...'})">
             <div class="card-icon">💻</div>
             <div class="card-title">Напиши код</div>
             <div class="card-desc">Сгенерировать код на любом языке</div>
           </div>
-          <div class="suggestion-card" onclick="activateMode({prefix: '/services currency ', placeholder: 'Введите валюты (USD RUB)...'})">
+          <div class="suggestion-card" onclick="activateMode({prefix: '/services currency ', label: '💱 Курс валют', placeholder: 'Введите валюты (USD RUB)...'})">
             <div class="card-icon">💱</div>
             <div class="card-title">Курс валют</div>
             <div class="card-desc">Актуальные курсы валют</div>
@@ -201,6 +201,12 @@
 
         <button class="toolbar-btn" id="btn-media" onclick="openMediaPicker()">🎨 Медиа</button>
         <button class="toolbar-btn" id="btn-calm" onclick="toggleCalmMotion()" title="Отключить фоновые анимации">✨ Анимации</button>
+      </div>
+
+      <div class="mode-active" id="modeActiveBar" hidden>
+        <span class="mode-active-dot"></span>
+        <span class="mode-active-text" id="modeActiveText"></span>
+        <button class="mode-active-clear" type="button" onclick="clearInputMode()" title="Выключить режим">×</button>
       </div>
 
       <div class="media-active" id="mediaActiveBar" hidden>

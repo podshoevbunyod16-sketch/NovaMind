@@ -25,8 +25,11 @@ let activeAbort    = null;      // AbortController текущего запрос
 let lastUserMessage = '';
 let aiStatus       = null;
 
-const THEMES = ['aurora', 'midnight', 'sunset', 'light'];
+// Тема одна — Aurora. Остальные палитры убраны из оборота,
+// чтобы интерфейс везде выглядел одинаково.
+const THEMES = ['aurora'];
 const THEME_LABEL = { aurora: 'Aurora', midnight: 'Midnight', sunset: 'Sunset', light: 'Light glass' };
+const ONLY_THEME = 'aurora';
 
 // ========== DOM-ЭЛЕМЕНТЫ ==========
 const input         = document.getElementById('chat-input');
@@ -35,6 +38,32 @@ const voiceBtn      = document.getElementById('voiceBtn');
 const voiceTooltip  = document.getElementById('voiceTooltip');
 const chatContainer = document.getElementById('chatContainer');
 const welcomeScreen = document.getElementById('welcomeScreen');
+
+/* ══════════════════════════════════════════════════════════════════
+   КОРОТКИЕ НАЗВАНИЯ МОДЕЛЕЙ
+   Имена моделей бывают на пол-экрана и выталкивают кнопки из шапки.
+   Показываем первые два слова (или первые буквы) + многоточие,
+   а полное название оставляем в подсказке по наведению.
+   ══════════════════════════════════════════════════════════════════ */
+function shortModelName(name, max = 26) {
+  const text = String(name ?? '').trim();
+  if (!text || text.length <= max) return text;
+  const words = text.split(/\s+/);
+  if (words.length > 2) {
+    const head = words.slice(0, 2).join(' ');
+    if (head.length + 1 <= max) return head + '…';
+  }
+  return text.slice(0, max).replace(/[\s·,—-]+$/, '') + '…';
+}
+
+/** Записывает короткое имя в элемент, полное — в title. */
+function setShortText(el, text, max) {
+  if (!el) return;
+  const full = String(text ?? '').trim();
+  el.textContent = shortModelName(full, max);
+  if (full) el.title = full;
+  else el.removeAttribute('title');
+}
 
 // ══════════════════════════════════════════
 // ЗАЩИТА ОТ КОПИРОВАНИЯ ИНТЕРФЕЙСА
@@ -99,17 +128,18 @@ function showNotification(message, type = 'info') {
 // ТЕМЫ И АНИМАЦИИ
 // ══════════════════════════════════════════
 function applyTheme(theme) {
-  document.documentElement.setAttribute('data-glass-theme', theme);
-  localStorage.setItem('nova_theme', theme);
+  const value = THEMES.includes(theme) ? theme : ONLY_THEME;
+  document.documentElement.setAttribute('data-glass-theme', value);
+  localStorage.setItem('nova_theme', value);
   const meta = document.querySelector('meta[name="theme-color"]');
-  if (meta) meta.setAttribute('content', theme === 'light' ? '#eef1fb' : '#070713');
+  if (meta) meta.setAttribute('content', '#070713');
+  return value;
 }
 
 function cycleTheme() {
-  const current = document.documentElement.getAttribute('data-glass-theme') || 'aurora';
-  const next = THEMES[(THEMES.indexOf(current) + 1) % THEMES.length];
-  applyTheme(next);
-  showNotification(`Тема: ${THEME_LABEL[next]}`, 'info');
+  // Переключать нечего: держим единственную тему и честно об этом говорим.
+  applyTheme(ONLY_THEME);
+  showNotification(`Тема ${THEME_LABEL[ONLY_THEME]} — единственная палитра`, 'info');
 }
 
 function toggleCalmMotion() {
@@ -121,7 +151,7 @@ function toggleCalmMotion() {
 }
 
 (function initAppearance() {
-  applyTheme(localStorage.getItem('nova_theme') || 'aurora');
+  applyTheme(ONLY_THEME);
   const motion = localStorage.getItem('nova_motion') || 'full';
   document.documentElement.setAttribute('data-motion', motion);
   document.getElementById('btn-calm')?.classList.toggle('active', motion === 'calm');
@@ -492,7 +522,7 @@ async function pickMediaModel(dataset) {
   }
 }
 
-async function clearMediaModel() {
+async function clearMediaModel(quiet = false) {
   try {
     await fetch('/api/media/select', {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ clear: true }),
@@ -500,7 +530,7 @@ async function clearMediaModel() {
   } catch (_) {}
   activeMediaModel = null;
   updateMediaChip();
-  showNotification('Обычный текстовый чат', 'info');
+  if (!quiet) showNotification('Обычный текстовый чат', 'info');
   renderPickerModels();
 }
 
@@ -523,17 +553,17 @@ function updateMediaChip() {
   const modelButton = document.getElementById('btnMediaModel');
   if (activeMediaModel) {
     const icon = MEDIA_KIND_ICON[activeMediaModel.media_type] || '🎨';
-    if (label) label.textContent = `${icon} ${activeMediaModel.name}`;
+    setShortText(label, `${icon} ${activeMediaModel.name}`, 22);
     if (bar) bar.hidden = false;
     if (text) {
       const badge = PRICING_BADGE[activeMediaModel.pricing_status] || PRICING_BADGE.unknown;
-      text.textContent = `${icon} ${activeMediaModel.name} · ${activeMediaModel.provider_name} · ${badge.label}`;
+      setShortText(text, `${icon} ${activeMediaModel.name} · ${activeMediaModel.provider_name} · ${badge.label}`, 44);
     }
     if (input && !inputMode) input.placeholder = `Опишите, что создать (${activeMediaModel.media_type}: ${activeMediaModel.name})…`;
     mediaBtn?.classList.add('active');
     modelButton?.classList.add('active');
   } else {
-    if (label) label.textContent = 'Медиа';
+    if (label) { label.textContent = 'Медиа'; label.removeAttribute('title'); }
     if (bar) bar.hidden = true;
     if (input && !inputMode) input.placeholder = 'Напишите сообщение...';
     mediaBtn?.classList.remove('active');
@@ -1073,11 +1103,16 @@ function setSendBusy(busy) {
 }
 
 function stopGeneration() {
+  if (!isTyping) return;
   if (activeAbort) {
     activeAbort.abort();
     activeAbort = null;
-    showNotification('Генерация остановлена', 'warn');
   }
+  // Кнопка сразу возвращается в обычный вид и разрешает новое сообщение;
+  // оборванный хвост бутыря доделывает обработчик AbortError.
+  isTyping = false;
+  setSendBusy(false);
+  showNotification('Генерация остановлена', 'warn');
 }
 
 // ══════════════════════════════════════════
@@ -1125,16 +1160,20 @@ async function streamMessage(message, turn) {
 
 /** Запасной путь: обычный /send, если поток не удалось прочитать. */
 async function sendOnce(message, turn) {
+  const controller = new AbortController();
+  activeAbort = controller;
   const response = await fetch('/send', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ message, reasoning: reasoningOn }),
+    signal: controller.signal,
   });
   const data = await response.json().catch(() => ({}));
   if (!response.ok || data.error) throw new Error(data.error || ('HTTP ' + response.status));
   turn.collapseStage();
   turn.appendText(data.reply || '');
   turn.finish({ model: data.model });
+  activeAbort = null;
   return data.reply;
 }
 
@@ -1186,6 +1225,9 @@ async function runSearchTurn(message, turn) {
       case 'result':
         result = event;
         if (Array.isArray(event.sources) && event.sources.length) turn.setSources(event.sources);
+        // Ответ мог прийти без потока (повторный запрос на сервере) —
+        // тогда текст лежит в result.reply, иначе пузырь остался бы пустым.
+        if (!turn.text && event.reply) turn.appendText(event.reply);
         break;
       case 'done':
         break;
@@ -1211,15 +1253,16 @@ async function runSearchTurn(message, turn) {
 // ОТПРАВКА СООБЩЕНИЙ
 // ══════════════════════════════════════════
 async function sendMessage(text) {
+  // Кнопка отправки во время генерации — это «стоп». Проверяем это ДО ввода:
+  // поле в это время пустое, и ранний return глушил остановку.
+  if (isTyping) { stopGeneration(); return; }
   const msg = String(text ?? input.value).trim();
   if (!msg) return;
-  if (isTyping) { stopGeneration(); return; }
 
   let finalMsg = msg;
   if (inputMode && !msg.startsWith('/')) {
     finalMsg = inputMode.prefix + msg;
-    inputMode = null;
-    input.placeholder = 'Напишите сообщение...';
+    clearInputMode(true);
   }
 
   hideWelcome();
@@ -1277,6 +1320,18 @@ async function sendMessage(text) {
           turn.collapseStage();
           turn.appendText(turn.text || '_Генерация остановлена._');
           turn.finish({ model: aiStatus?.model });
+        } else if (turn.sources.length) {
+          // Источники нашлись, но модель не ответила. Отвечать «по памяти»
+          // здесь нельзя — это выглядит будто свежих данных нет. Честно
+          // показываем, что произошло, и оставляем ссылки под рукой.
+          turn.collapseStage();
+          turn.appendText(
+            '_Источники найдены, но ответ модель не отдала._\n\n' +
+            'Откройте ссылки ниже или повторите запрос — обычно помогает ' +
+            'смена модели или повторный запуск поиска.'
+          );
+          turn.finish({ model: aiStatus?.model, provider: aiStatus?.provider, searched: true });
+          showNotification('Поиск нашёл ссылки, но модель не ответила', 'warn');
         } else {
           turn.step('⚠️', 'Поиск не удался — отвечаю без интернета');
           try {
@@ -1320,11 +1375,31 @@ async function sendMessage(text) {
 function sendSuggestion(text) { sendMessage(text); }
 
 // ========== РЕЖИМЫ КОМАНД ==========
+/** Плашка активного режима («Погода», «Курс валют»…) с крестиком отмены. */
+function paintModeChip() {
+  const bar = document.getElementById('modeActiveBar');
+  const text = document.getElementById('modeActiveText');
+  if (!bar) return;
+  bar.hidden = !inputMode;
+  if (inputMode && text) setShortText(text, inputMode.label || inputMode.prefix.trim(), 52);
+}
+
 function activateMode(mode) {
+  // Повторный клик по тому же пункту — выключить режим, а не «залипнуть» в нём.
+  if (inputMode && inputMode.prefix === mode.prefix) { clearInputMode(); return; }
   inputMode = mode;
   input.placeholder = mode.placeholder;
   input.value = '';
+  paintModeChip();
   input.focus();
+}
+
+function clearInputMode(quiet = false) {
+  if (!inputMode) return;
+  inputMode = null;
+  paintModeChip();
+  updateMediaChip();          // вернёт подсказку поля: медиа-модель или обычный чат
+  if (!quiet) showNotification('Режим выключен — обычный чат', 'info');
 }
 
 function hideWelcome() { if (welcomeScreen) welcomeScreen.style.display = 'none'; }
@@ -1550,6 +1625,40 @@ function isDrawerViewport() {
   }
 }
 
+// ══════════════════════════════════════════════════════════════
+// СОСТОЯНИЕ БОКОВОЙ ПАНЕЛИ НА КОМПЬЮТЕРЕ
+// Панель по умолчанию скрыта: переписка занимает всю ширину,
+// а кнопка-бургер в шапке открывает её в один клик. Выбор запоминается.
+// ══════════════════════════════════════════════════════════════
+const NAV_KEY = 'nova_nav_open';
+
+function navIsOpen() {
+  const app = document.querySelector('.app');
+  return !!app && !app.classList.contains('nav-off');
+}
+
+function setNavOpen(open, save = true) {
+  const app = document.querySelector('.app');
+  if (!app) return;
+  app.classList.toggle('nav-off', !open);
+  const btn = document.getElementById('btnNav');
+  if (btn) {
+    btn.classList.toggle('is-open', open);
+    btn.setAttribute('aria-expanded', String(open));
+    btn.title = open ? 'Скрыть боковую панель' : 'Открыть боковую панель';
+    btn.setAttribute('aria-label', btn.title);
+  }
+  if (save) {
+    try { localStorage.setItem(NAV_KEY, open ? '1' : '0'); } catch (_) {}
+  }
+}
+
+function initNav() {
+  let saved = null;
+  try { saved = localStorage.getItem(NAV_KEY); } catch (_) {}
+  setNavOpen(saved === '1', false);
+}
+
 function setSidebarOffset(offset, animate = false) {
   const app = document.querySelector('.app');
   const sidebar = document.getElementById('sidebar');
@@ -1583,9 +1692,13 @@ function getSidebarOffset() {
 function toggleSidebar() {
   const sidebar = document.getElementById('sidebar');
   if (!sidebar) return;
-  if (!isDrawerViewport()) return;
-  const width = drawerWidth();
-  setSidebarOffset(getSidebarOffset() > width * 0.5 ? 0 : width, true);
+  if (isDrawerViewport()) {
+    const width = drawerWidth();
+    setSidebarOffset(getSidebarOffset() > width * 0.5 ? 0 : width, true);
+    return;
+  }
+  // На широком экране панель просто убирается, освобождая место под чат.
+  setNavOpen(!navIsOpen());
 }
 
 function closeSidebar() {
@@ -1678,8 +1791,12 @@ function initSidebarSwipe() {
   window.addEventListener('resize', enableForViewport);
 }
 
-if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', initSidebarSwipe);
-else initSidebarSwipe();
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', () => { initNav(); initSidebarSwipe(); });
+} else {
+  initNav();
+  initSidebarSwipe();
+}
 
 function setActive(el) {
   document.querySelectorAll('.nav-item').forEach((n) => n.classList.remove('active'));
@@ -1691,6 +1808,9 @@ function newChat() {
   const store = historyLoad();
   store.activeId = null;
   historySave(store);
+  // Новый чат — чистый лист: никаких активных режимов и медиа-моделей.
+  clearInputMode(true);
+  clearMediaModel(true);
   historyReplay = true;
   try {
     chatContainer.innerHTML = '';
@@ -1715,7 +1835,15 @@ function shareChat() {
 
 function scrollToBottom() {
   requestAnimationFrame(() => {
-    chatContainer.scrollTo({ top: chatContainer.scrollHeight, behavior: 'smooth' });
+    // Прокручивается всё окно, поэтому целимся в нижний край панели ввода
+    // (она «прилипает» к низу и всегда закрывает собой хвост переписки).
+    const tail = document.querySelector('.input-area');
+    const anchor = tail || chatContainer;
+    const bottom = anchor.getBoundingClientRect().bottom;
+    const max = Math.max(0, document.documentElement.scrollHeight - window.innerHeight);
+    const target = Math.min(max, Math.max(0, window.scrollY + bottom));
+    if (Math.abs(target - window.scrollY) < 2) return;
+    window.scrollTo({ top: target, behavior: 'smooth' });
   });
 }
 
@@ -1906,7 +2034,8 @@ const CMDK_ACTIONS = [
   { icon: '🔍', label: 'Включить/выключить поиск в интернете', hint: '', run: () => toggleWebSearch() },
   { icon: '🧠', label: 'Включить/выключить рассуждения', hint: '', run: () => toggleReasoning() },
   { icon: '🎨', label: 'Открыть панель медиа-моделей', hint: '', run: () => openMediaPicker() },
-  { icon: '🎭', label: 'Сменить тему стекла', hint: '', run: () => cycleTheme() },
+  { icon: '🎭', label: 'Тема оформления: Aurora', hint: '', run: () => cycleTheme() },
+  { icon: '✖️', label: 'Выключить активный режим', hint: '', run: () => clearInputMode() },
   { icon: '✨', label: 'Спокойный режим анимаций', hint: '', run: () => toggleCalmMotion() },
   { icon: '🧹', label: 'Очистить чат', hint: '', run: () => clearChat() },
   { icon: '➕', label: 'Новый диалог', hint: '', run: () => newChat() },
@@ -1914,11 +2043,11 @@ const CMDK_ACTIONS = [
   { icon: '🩺', label: 'Проверить поиск и модель', hint: '', run: () => checkHealth(true) },
   { icon: '🔊', label: 'Озвучить последний ответ', hint: '', run: () => speakText(lastAnswerText()) },
   { icon: '/help', label: 'Команда: список команд', hint: '/help', run: () => sendMessage('/help') },
-  { icon: '🌤', label: 'Режим: погода', hint: '/services weather', run: () => activateMode({ prefix: '/services weather ', placeholder: 'Введите город…' }) },
-  { icon: '💱', label: 'Режим: курс валют', hint: '/services currency', run: () => activateMode({ prefix: '/services currency ', placeholder: 'USD RUB…' }) },
-  { icon: '📚', label: 'Режим: Википедия', hint: '/services wiki', run: () => activateMode({ prefix: '/services wiki ', placeholder: 'Запрос…' }) },
-  { icon: '💻', label: 'Режим: код', hint: '/code', run: () => activateMode({ prefix: '/code ', placeholder: 'Какой код создать…' }) },
-  { icon: '🖼', label: 'Режим: изображение', hint: '/image', run: () => activateMode({ prefix: '/image ', placeholder: 'Опишите изображение…' }) },
+  { icon: '🌤', label: 'Режим: погода', hint: '/services weather', run: () => activateMode({ prefix: '/services weather ', label: '🌤 Погода', placeholder: 'Введите город…' }) },
+  { icon: '💱', label: 'Режим: курс валют', hint: '/services currency', run: () => activateMode({ prefix: '/services currency ', label: '💱 Курс валют', placeholder: 'USD RUB…' }) },
+  { icon: '📚', label: 'Режим: Википедия', hint: '/services wiki', run: () => activateMode({ prefix: '/services wiki ', label: '📚 Википедия', placeholder: 'Запрос…' }) },
+  { icon: '💻', label: 'Режим: код', hint: '/code', run: () => activateMode({ prefix: '/code ', label: '💻 Помощник кода', placeholder: 'Какой код создать…' }) },
+  { icon: '🖼', label: 'Режим: изображение', hint: '/image', run: () => activateMode({ prefix: '/image ', label: '🎨 Генерация изображений', placeholder: 'Опишите изображение…' }) },
 ];
 
 let cmdkIndex = 0;
@@ -2015,13 +2144,13 @@ function paintStatus() {
   const providerLabel = document.getElementById('display-provider');
   if (!aiStatus) {
     if (dot) dot.className = 'lg-dot warn';
-    if (text) text.textContent = 'AI Ассистент';
+    setShortText(text, 'AI Ассистент', 26);
     return;
   }
   const model = aiStatus.model || 'модель';
   if (dot) dot.className = 'lg-dot ' + (aiStatus.offline ? 'warn' : 'ok') + ' pulse';
-  if (text) text.textContent = aiStatus.offline ? `Офлайн-модель · ${model}` : model;
-  if (providerLabel) providerLabel.textContent = `${aiStatus.provider_name || aiStatus.provider} · ${model}`;
+  setShortText(text, aiStatus.offline ? `Офлайн-модель · ${model}` : model, 26);
+  setShortText(providerLabel, `${aiStatus.provider_name || aiStatus.provider} · ${model}`, 22);
 }
 
 async function checkHealth(notify = false) {
