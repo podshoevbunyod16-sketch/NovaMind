@@ -12,4 +12,3 @@ novamind_chats.db
 node_modules/
 package-lock.json
 .pytest_cache/
-package.json

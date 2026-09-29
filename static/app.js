@@ -1614,7 +1614,8 @@ function stopRecording() {
 function openSettings() { window.location.href = '/settings'; }
 
 const DRAWER_BREAKPOINT = 860;
-const drawerWidth = () => Math.min(320, Math.max(260, window.innerWidth * 0.84));
+// Чуть у́же, чем раньше, чтобы сайдбар не перекрывал чат на телефоне.
+const drawerWidth = () => Math.min(300, Math.max(240, window.innerWidth * 0.84));
 
 /** matchMedia может отсутствовать (старые webview, тестовые окружения) — не падаем. */
 function isDrawerViewport() {
@@ -1674,6 +1675,8 @@ function setSidebarOffset(offset, animate = false) {
 
   const isOpen = x > width * 0.5;
   sidebar.classList.toggle('open', isOpen);
+  // Когда сайдбар открыт, чат блокируется — один скролл на экран.
+  document.body.classList.toggle('drawer-open', isOpen);
 
   if (overlay) {
     overlay.classList.toggle('visible', isOpen);
@@ -1718,6 +1721,7 @@ function initSidebarSwipe() {
     if (!swipeEnabled) {
       app.classList.remove('drawer-animate');
       sidebar.classList.remove('open');
+      document.body.classList.remove('drawer-open');
       if (overlay) {
         overlay.classList.remove('visible');
         overlay.style.pointerEvents = 'none';

@@ -103,6 +103,7 @@ html { overflow-x: hidden; }
 .sidebar-body {
   /* без собственного скролла — панель растёт вместе с окном (один ползунок) */
   flex: 1 0 auto; min-height: 0;
+  overscroll-behavior: contain;   /* не «протягивать» прокрутку в чат */
   padding: 12px 10px;
   display: flex; flex-direction: column; gap: 3px;
 }
@@ -143,7 +144,7 @@ html[data-glass-theme="light"] .nav-item.active { color: var(--accent); }
   box-shadow: 0 4px 12px -4px var(--accent-glow);
 }
 
-/* История чатов */
+/* История чатов — часть общего скролла сайдбара: один ползунок на всю панель */
 #historyContainer {
   flex: 0 1 auto; min-height: 0;
   display: flex; flex-direction: column; gap: 3px;
@@ -219,12 +220,13 @@ html[data-glass-theme="light"] .nav-item.active { color: var(--accent); }
   box-shadow: 0 6px 18px -6px var(--accent-glow), inset 0 1px 0 rgba(255,255,255,.4);
   overflow: hidden;
 }
-.user-name { font-size: 12.5px; font-weight: 700; }
-.user-plan { font-size: 10.5px; color: var(--text-4); }
+/* Имя и подпись обрезаются по месту: min-width: 0 даёт им сжиматься вместе с панелью */
 .user-card > div { min-width: 0; }
-.user-plan {
+.user-name { font-size: 12.5px; font-weight: 700; }
+.user-name, .user-plan {
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
+.user-plan { font-size: 10.5px; color: var(--text-4); }
 .logout-btn {
   background: color-mix(in srgb, var(--err) 14%, transparent);
   border: 1px solid color-mix(in srgb, var(--err) 30%, transparent);
@@ -284,7 +286,7 @@ html[data-glass-theme="light"] .menu-btn.is-open { color: var(--accent); }
 }
 /* Длинные названия моделей обрезаются многоточием, полное имя — в подсказке */
 #statusText {
-  min-width: 0; max-width: 34ch;
+  display: block; min-width: 0; max-width: min(46vw, 34ch);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .topbar-title .lg-dot { margin-right: 2px; flex-shrink: 0; }
@@ -1103,14 +1105,16 @@ html[data-glass-theme="light"] .eyebrow { color: var(--accent); }
   .sidebar {
     position: fixed; top: 0; left: 0; bottom: 0;
     margin: 0; min-height: 0; border-radius: 0 var(--r-lg) var(--r-lg) 0;
-    width: min(320px, 86vw);
-    /* Плавное раскрытие пальцем: --drawer-x задаёт drag-логика в app.js */
-    transform: translateX(calc(var(--drawer-x, 0px) - var(--drawer-width, 320px)));
+    /* Ширина и сдвиг берутся из ОДНОЙ переменной: закрытый сайдбар
+       уезжает ровно на свою ширину и не оставляет полосу на чате. */
+    width: var(--drawer-width, min(300px, 86vw));
+    transform: translateX(calc(var(--drawer-x, 0px) - var(--drawer-width, min(300px, 86vw))));
+    will-change: transform;
   }
   /* Выдвижной ящик — модальное окно, поэтому листается внутри себя */
   .sidebar-body { overflow-y: auto; }
-  .app.drawer-animate .sidebar { transition: transform .3s var(--ease-out); }
   .sidebar.open { box-shadow: var(--glass-shadow-lg); }
+  .app.drawer-animate .sidebar { transition: transform .3s var(--ease-out); }
   .menu-btn { display: flex; }
   .main { margin: 0; min-height: 100vh; min-height: 100dvh; border-radius: 0; border: none; }
   .topbar { top: 0; border-radius: 0; border-left: 0; border-right: 0; }
@@ -1122,6 +1126,11 @@ html[data-glass-theme="light"] .eyebrow { color: var(--accent); }
   .topbar { padding: 0 10px; }
   .media-model-label { display: none; }
   .stage-scene { height: 116px; }
+  #statusText { max-width: 38vw; }
+
+  /* Когда сайдбар открыт — чат неподвижен: один «ползунок» на экран */
+  body.drawer-open .main, body.drawer-open .chat-container { overflow: hidden; }
+  body.drawer-open { overflow: hidden; }
 }
 @media (max-width: 480px) {
   .toolbar-btn span { display: none; }
