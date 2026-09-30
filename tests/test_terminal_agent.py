@@ -397,3 +397,112 @@ def test_decide_detects_actions_and_text():
     assert decide("```\n{") is True
     assert decide("```python\nprint(1)") is False
     assert decide("```") is None
+
+
+# ══════════════ агент: ответ приходит всегда (перенесено из main) ══════════════
+
+def _fake_search(monkeypatch):
+    results = [{"title": "Список стран по ВВП", "url": "https://example.org/gdp", "snippet": "…", "host": "example.org"}]
+    monkeypatch.setattr(agent_routes, "nova_search", lambda query, limit=6: (
+        results, {"backend": "wiki", "elapsed_ms": 5, "query": query, "results": results, "count": 1, "trace": []}))
+
+
+def test_agent_answer_survives_real_meta_dict(admin_client, monkeypatch, sandbox):
+    """Регрессия: пустой поток + настоящий chat_completion с непустым meta — ответ не теряется."""
+    def empty_stream(messages, **kwargs):
+        yield "done", ""
+
+    monkeypatch.setattr(agent_routes, "chat_stream", empty_stream)
+    monkeypatch.setattr(agent_routes, "chat_completion", lambda messages, **kw: (
+        "Просто текстовый ответ модели", {"provider": "test", "model": "m", "offline": False}))
+    events = _ndjson(admin_client.post("/api/agent/stream", json={"message": "привет"}))
+    assert "Просто текстовый ответ" in _answer(events)
+    assert not [event for event in events if event["type"] == "error"]
+
+
+def test_agent_step_limit_still_gives_answer_from_findings(admin_client, monkeypatch, sandbox):
+    """Модель только ищет и даже после лимита шлёт JSON — ответ всё равно собирается."""
+    monkeypatch.setattr(agent_routes, "MAX_STEPS", 2)
+    _fake_search(monkeypatch)
+    queue = _stub_model(monkeypatch, [
+        '{"action":"search","query":"самая богатая страна"}',
+        '{"action":"search","query":"самая бедная страна"}',
+        '{"action":"search","query":"ещё раз"}',                    # лимит — а модель всё ищет
+        "Самая богатая — Люксембург, самая бедная — Бурунди.",     # финальный запрос
+    ])
+    events = _ndjson(admin_client.post("/api/agent/stream", json={"message": "богатая и бедная страна"}))
+    answer = _answer(events)
+    assert "Люксембург" in answer and '"action"' not in answer
+    assert not queue
+    sources = [event for event in events if event["type"] == "sources"][-1]
+    assert sources["sources"][0]["url"] == "https://example.org/gdp"
+
+
+def test_agent_stuck_model_falls_back_to_sources(admin_client, monkeypatch, sandbox):
+    """Даже финальный запрос вернул JSON — отдаём найденные ссылки, а не пустоту."""
+    monkeypatch.setattr(agent_routes, "MAX_STEPS", 1)
+    _fake_search(monkeypatch)
+    _stub_model(monkeypatch, [
+        '{"action":"search","query":"вопрос"}',
+        '{"action":"search","query":"ещё"}',
+        '{"action":"search","query":"и ещё"}',
+    ])
+    events = _ndjson(admin_client.post("/api/agent/stream", json={"message": "вопрос"}))
+    answer = _answer(events)
+    assert "https://example.org/gdp" in answer and '"action"' not in answer
+
+
+def test_agent_skips_repeated_action(admin_client, monkeypatch, sandbox):
+    _fake_search(monkeypatch)
+    _stub_model(monkeypatch, [
+        '{"action":"search","query":"вопрос"}',
+        '{"action":"search","query":"Вопрос "}',
+        "Ответ по найденному",
+    ])
+    events = _ndjson(admin_client.post("/api/agent/stream", json={"message": "вопрос"}))
+    assert sum(1 for event in events if event["type"] == "tool") == 1
+    assert any(event["type"] == "step" and "не повторяю" in event["text"] for event in events)
+    assert "Ответ по найденному" in _answer(events)
+
+
+def test_agent_strips_think_and_parses_multiline_json(admin_client, monkeypatch, sandbox):
+    _stub_model(monkeypatch, [
+        '<think>надо подумать {"action":"ls"}</think>{"action":"answer","text":"строка 1\nстрока 2"}',
+    ])
+    events = _ndjson(admin_client.post("/api/agent/stream", json={"message": "привет"}))
+    assert _answer(events) == "строка 1\nстрока 2"
+    assert not [event for event in events if event["type"] == "tool"]
+    assert "надо подумать" in "".join(e["token"] for e in events if e["type"] == "reasoning")
+
+
+def test_agent_think_before_text_answer_is_hidden(admin_client, monkeypatch, sandbox):
+    _stub_model(monkeypatch, ["<think>что ответить?</think>Привет! Чем помочь?"])
+    events = _ndjson(admin_client.post("/api/agent/stream", json={"message": "привет"}))
+    assert _answer(events) == "Привет! Чем помочь?"
+
+
+def test_agent_broken_json_is_retried(admin_client, monkeypatch, sandbox):
+    _stub_model(monkeypatch, ['{"action":"run","command":"ls', "Файлы на месте."])
+    events = _ndjson(admin_client.post("/api/agent/stream", json={"message": "что в папке?"}))
+    assert _answer(events) == "Файлы на месте."
+
+
+def test_agent_nova_search_via_run_collects_sources(admin_client, monkeypatch, sandbox):
+    """Модель вызвала `nova search` командой run — источники всё равно копятся."""
+    _fake_search(monkeypatch)
+    import routes.terminal as terminal
+    monkeypatch.setattr(terminal, "nova_search", agent_routes.nova_search)
+    _stub_model(monkeypatch, ['{"action":"run","command":"nova search страны ввп"}', "Готово"])
+    events = _ndjson(admin_client.post("/api/agent/stream", json={"message": "страны"}))
+    sources = [event for event in events if event["type"] == "sources"]
+    assert sources and sources[-1]["sources"][0]["url"] == "https://example.org/gdp"
+
+
+def test_think_filter_handles_split_tags():
+    thinker = agent_routes.ThinkFilter()
+    shown = thought = ""
+    for chunk in ["<th", "ink>abc", "</thi", "nk>Привет", " <b>ок"]:
+        visible, hidden = thinker.feed(chunk)
+        shown, thought = shown + visible, thought + hidden
+    visible, hidden = thinker.flush()
+    assert (shown + visible, thought + hidden) == ("Привет <b>ок", "abc")

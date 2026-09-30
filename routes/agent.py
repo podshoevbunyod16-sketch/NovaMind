@@ -158,9 +158,72 @@ def tools_enabled():
     return os.getenv("TERMINAL_ENABLED", "0") == "1" and can_use_workspace()
 
 
+_THINK_BLOCK = re.compile(r"<think(?:ing)?>.*?</think(?:ing)?>", re.S | re.I)
+_THINK_TAIL = re.compile(r"^.*?</think(?:ing)?>", re.S | re.I)
+_THINK_TAG = re.compile(r"</?think(?:ing)?>", re.I)
+_THINK_OPEN = re.compile(r"<think(?:ing)?>", re.I)
+_THINK_CLOSE = re.compile(r"</think(?:ing)?>", re.I)
+
+
+def strip_think(text):
+    """Убирает «рассуждения» <think>…</think>: nemotron, deepseek и др. кладут их прямо в ответ."""
+    text = _THINK_BLOCK.sub("", text or "")
+    text = _THINK_TAIL.sub("", text)          # закрывающий тег без открывающего
+    return _THINK_TAG.sub("", text).strip()
+
+
+class ThinkFilter:
+    """Потоковый разбор: текст внутри <think>…</think> уходит в рассуждения, а не в ответ.
+
+    feed(chunk) → (видимый текст, рассуждение). Хвост, похожий на начало тега,
+    придерживается до следующего кусочка, чтобы тег не разрезало пополам.
+    """
+    HOLD = len("</thinking>")
+
+    def __init__(self):
+        self.pending = ""
+        self.inside = False
+
+    def feed(self, chunk):
+        self.pending += chunk or ""
+        visible, thought = "", ""
+        while self.pending:
+            if self.inside:
+                match = _THINK_CLOSE.search(self.pending)
+                if match:
+                    thought += self.pending[:match.start()]
+                    self.pending = self.pending[match.end():]
+                    self.inside = False
+                    continue
+                cut = max(0, len(self.pending) - self.HOLD)
+                thought += self.pending[:cut]
+                self.pending = self.pending[cut:]
+                break
+            match = _THINK_OPEN.search(self.pending)
+            if match:
+                visible += self.pending[:match.start()]
+                self.pending = self.pending[match.end():]
+                self.inside = True
+                continue
+            tail = self.pending.rfind("<")
+            if tail >= 0 and len(self.pending) - tail < self.HOLD and \
+                    "<thinking>".startswith(self.pending[tail:].lower()):
+                visible += self.pending[:tail]
+                self.pending = self.pending[tail:]
+            else:
+                visible += self.pending
+                self.pending = ""
+            break
+        return visible, thought
+
+    def flush(self):
+        rest, self.pending = self.pending, ""
+        return ("", rest) if self.inside else (rest, "")
+
+
 def parse_action(raw):
     """Достаёт JSON-объект действия из ответа модели. None — не разобрали."""
-    text = (raw or "").strip()
+    text = strip_think(raw)
     if not text:
         return None
     fence = re.search(r"```(?:json)?\s*(\{.*\})\s*```", text, re.S)
@@ -179,6 +242,21 @@ def parse_action(raw):
         except (TypeError, ValueError):
             return None
     return data if isinstance(data, dict) and data.get("action") else None
+
+
+def looks_like_action(text):
+    """Похоже на JSON действия, но не разобралось (обрезан, кривые кавычки)."""
+    text = strip_think(text).lstrip()
+    return text.startswith(("{", "```")) and '"action"' in text
+
+
+def _action_key(action, kind):
+    """Ключ действия, чтобы не выполнять одно и то же дважды за ответ."""
+    value = (action.get("command") or action.get("query") or action.get("url")
+             or action.get("path") or action.get("prompt") or action.get("text") or "")
+    if kind == "write":
+        value = f"{value}|{str(action.get('content') or '')[:200]}"
+    return kind, " ".join(str(value).lower().split())
 
 
 def _action_share(text):
@@ -330,6 +408,7 @@ def agent_stream():
                  "searched": False, "announced": False, "media": [], "linux": False,
                  "use_tools": use_tools}
         messages = list(history) + [{"role": "user", "content": goal}]
+        done_actions = set()          # что уже выполнено — повторы не гоняем
 
         try:
             if search_mode:
@@ -353,12 +432,32 @@ def agent_stream():
                 if outcome["kind"] == "answer":
                     state["answer"] = outcome["text"]
                     break
+                if outcome["kind"] == "stuck":
+                    # Шаги кончились, а модель всё просит действий — отвечаем по собранному
+                    state["answer"] = yield from _final_answer(messages, provider, model, state)
+                    break
                 if outcome["kind"] == "error":
                     yield _ndjson({"type": "error", "text": str(outcome["error"] or "модель не ответила")})
                     break
+                if outcome["kind"] == "bad_json":
+                    messages.append({"role": "assistant", "content": clip(outcome["text"], 1500)})
+                    messages.append({"role": "user", "content":
+                                     "Не удалось разобрать JSON действия. Повтори ОДНИМ корректным "
+                                     "JSON-объектом или ответь пользователю обычным текстом."})
+                    continue
 
                 action = outcome["action"]
                 kind = str(action.get("action"))
+                key = _action_key(action, kind)
+                if kind not in ("plan", "task_done") and key in done_actions:
+                    yield _ndjson({"type": "step", "icon": "↩️", "text": "Это уже сделано — не повторяю"})
+                    messages.append({"role": "assistant",
+                                     "content": json.dumps(action, ensure_ascii=False)[:1000]})
+                    messages.append({"role": "user", "content":
+                                     "Это действие уже выполнено, его результат есть выше. Не повторяй его: "
+                                     "сделай другой шаг или, если данных хватает, ответь пользователю."})
+                    continue
+                done_actions.add(key)
                 if not state["announced"] and not search_mode and kind not in MEDIA_ACTIONS:
                     state["announced"] = True
                     title = "Работаю в Linux" if use_tools and kind in LINUX_ACTIONS else "Работаю над задачей"
@@ -434,6 +533,15 @@ def _model_step(messages, system, provider, model, reasoning=False, allow_action
     buffer = ""
     mode = None                   # None — ещё не решили, "action" / "text"
     failure = None
+    thinker = ThinkFilter()       # <think>…</think> прямо в тексте — это рассуждения, не ответ
+
+    def visible_tokens(chunk):
+        """Пропускает кусочек через фильтр рассуждений. Генератор событий, возвращает видимый текст."""
+        shown, thought = chunk
+        if thought:
+            yield _ndjson({"type": "reasoning", "token": thought})
+        return shown
+
     try:
         for kind, chunk in chat_stream(messages, provider=provider, model=model, system=system,
                                        temperature=0.3, timeout=STREAM_TIMEOUT,
@@ -448,6 +556,9 @@ def _model_step(messages, system, provider, model, reasoning=False, allow_action
             if kind == "done":
                 break
             if kind != "token" or not chunk:
+                continue
+            chunk = yield from visible_tokens(thinker.feed(chunk))
+            if not chunk:
                 continue
             buffer += chunk
             if mode is None:
@@ -465,14 +576,25 @@ def _model_step(messages, system, provider, model, reasoning=False, allow_action
     except Exception as exc:      # сеть или провайдер упали посреди потока
         failure = f"{exc.__class__.__name__}: {exc}"
 
+    tail = yield from visible_tokens(thinker.flush())
+    if tail:
+        buffer += tail
+        if mode == "text":
+            yield _ndjson({"type": "token", "token": tail})
+        elif mode is None and not _decide(buffer):
+            mode = "text"
+            yield _ndjson({"type": "token", "token": buffer})
+
     text = buffer.strip()
     if not text:
-        # Поток пустой — один повтор без стрима, затем честная ошибка
-        raw, error = chat_completion(messages, provider=provider, model=model, system=system,
-                                     temperature=0.3, timeout=STREAM_TIMEOUT)
-        if not raw or not str(raw).strip():
-            return {"kind": "error", "error": failure or error}
-        text, mode = str(raw).strip(), None
+        # Поток пустой — один повтор без стрима, затем честная ошибка.
+        # chat_completion: успех — (текст, meta-словарь), ошибка — (None, строка).
+        raw, meta = chat_completion(messages, provider=provider, model=model, system=system,
+                                    temperature=0.3, timeout=STREAM_TIMEOUT)
+        text, mode = strip_think(str(raw or "")), None
+        if not text:
+            error = meta if isinstance(meta, str) and meta else None
+            return {"kind": "error", "error": failure or error or "модель не ответила"}
 
     if mode == "text":
         # Текст уже напечатан. Бывает, что модель пишет фразу, а потом JSON действия —
@@ -491,8 +613,12 @@ def _model_step(messages, system, provider, model, reasoning=False, allow_action
         for chunk in _chunks(answer):
             yield _ndjson({"type": "token", "token": chunk})
         return {"kind": "answer", "text": answer}
-    if action and allow_action and action.get("action") in TOOL_ACTIONS:
-        return {"kind": "action", "action": action}
+    if action and action.get("action") in TOOL_ACTIONS:
+        if allow_action:
+            return {"kind": "action", "action": action}
+        return {"kind": "stuck", "action": action}      # шаги кончились, а модель всё действует
+    if allow_action and looks_like_action(text):
+        return {"kind": "bad_json", "text": text}       # JSON обрезан или кривой — попросим повторить
 
     # Не разобрали JSON (или действия сейчас нельзя) — показываем как есть
     for chunk in _chunks(text):
@@ -745,8 +871,53 @@ def _perform(action, kind, use_tools, state, goal=""):
     yield _ndjson({"type": "step", "icon": status, "text": f"{label} — код {result['code']}"})
     yield _ndjson({"type": "tool", "name": "run", "command": command, "code": result["code"],
                    "output": clip(output, 1500)})
+    if _is_search_command(command):
+        # Модель искала командой `nova search` — источники всё равно попадают под ответ
+        found = [{"title": title.strip(), "url": url} for title, url in _RESULT_LINE.findall(output)]
+        if _add_sources(state, found):
+            state["searched"] = True
+            yield _ndjson({"type": "sources", "sources": state["sources"]})
     body = output.strip() or "(пустой вывод)"
     return f"$ {command}\nкод выхода: {result['code']}\n{body}"
+
+
+_RESULT_LINE = re.compile(r"^\s*\d+\.\s+(.+)\n\s+(https?://\S+)", re.M)
+
+
+def _is_search_command(command):
+    parts = str(command or "").split()
+    return len(parts) >= 2 and parts[0] == "nova" and parts[1] == "search"
+
+
+# ───────────────────────── финальный ответ ─────────────────────────
+
+FINAL_PROMPT = ("Действий больше не будет. Напиши финальный ответ пользователю обычным текстом "
+                "(markdown), без JSON: сначала суть, затем коротко пояснение. Опирайся только на "
+                "результаты действий выше; чего не удалось узнать — скажи честно.")
+
+
+def _final_answer(messages, provider, model, state):
+    """Ответ по собранному, когда модель застряла на действиях. Генератор токенов → текст."""
+    raw, _meta = chat_completion(
+        messages + [{"role": "user", "content": FINAL_PROMPT}],
+        provider=provider, model=model, system=f"{_persona()}\nОтвечай по-русски, по делу. Никакого JSON.",
+        temperature=0.3, timeout=STREAM_TIMEOUT,
+    )
+    text = strip_think(str(raw or ""))
+    action = parse_action(text) if text.lstrip().startswith(("{", "```")) else None
+    if action:
+        text = str(action.get("text") or "").strip() if action.get("action") == "answer" else ""
+    if not text:
+        if state["sources"]:
+            links = "\n".join(f"{index}. [{item['title']}]({item['url']})"
+                              for index, item in enumerate(state["sources"][:6], 1))
+            text = ("Модель не смогла сформулировать итог, но вот что удалось найти:\n\n"
+                    f"{links}\n\nПопробуйте спросить ещё раз или сменить модель в настройках.")
+        else:
+            text = "Не удалось собрать ответ. Попробуйте ещё раз или смените модель в настройках."
+    for chunk in _chunks(text):
+        yield _ndjson({"type": "token", "token": chunk})
+    return text
 
 
 # ───────────────────────── медиа ─────────────────────────
