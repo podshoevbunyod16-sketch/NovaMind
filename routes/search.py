@@ -16,6 +16,8 @@ import os
 import re
 import time
 import threading
+import concurrent.futures
+from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import urlparse, quote_plus
 
 import requests
@@ -36,7 +38,8 @@ _HEADERS = {
     "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
 }
 
-DEFAULT_BACKENDS = ["apilayer", "serper", "searxng", "ddg", "ddg_lite", "wiki"]
+DEFAULT_BACKENDS = ["apilayer", "serper", "bing", "searxng", "mojeek",
+                     "ddg", "ddg_lite", "wiki"]
 
 SEARXNG_INSTANCES = [
     item.strip()
@@ -277,10 +280,147 @@ def search_web_wiki(query, num=6):
     return results, None
 
 
+def _get_html_with_fallback(url):
+    """HTML страницы: сначала напрямую, при блокировке — через Jina Reader."""
+    try:
+        resp = requests.get(url, headers=_HEADERS, timeout=SEARCH_TIMEOUT,
+                            allow_redirects=True)
+        if resp.status_code == 200 and len(resp.text or "") > 500:
+            return resp.text
+    except requests.RequestException:
+        pass
+    try:
+        resp = requests.get("https://r.jina.ai/" + url,
+                            headers={"User-Agent": "Mozilla/5.0",
+                                     "Accept": "text/plain,*/*"},
+                            timeout=READER_TIMEOUT)
+        if resp.status_code == 200 and len(resp.text or "") > 400:
+            return resp.text
+    except requests.RequestException:
+        pass
+    return None
+
+
+def search_web_bing(query, num=8):
+    """Bing HTML: работает без ключа; при блокировке — через Jina Reader.
+
+    Бесплатный запасной бэкенд: у DDG и публичных SearXNG бывают блокировки
+    и пустые выдачи, а Bing стабильно отдаёт органику по русским запросам.
+    """
+    html = _get_html_with_fallback(
+        "https://www.bing.com/search?q=" + quote_plus(query) + "&setlang=ru")
+    if not html:
+        return [], "Bing недоступен"
+    results, seen = [], set()
+    pattern = re.compile(
+        r'<li class="b_algo".*?<h2><a[^>]+href="([^"]+)"[^>]*>(.*?)</a></h2>',
+        re.DOTALL | re.IGNORECASE)
+    for match in pattern.finditer(html):
+        link, raw_title = match.group(1), match.group(2)
+        title = re.sub(r"<[^>]+>", "", raw_title).strip()
+        if not title or link in seen or "bing.com" in link:
+            continue
+        seen.add(link)
+        window = html[match.end():match.end() + 600]
+        snip = re.search(r"<p[^>]*>(.*?)</p>", window, re.DOTALL | re.IGNORECASE)
+        snippet = re.sub(r"<[^>]+>", "", snip.group(1)).strip() if snip else ""
+        results.append(_norm_result(title, link, snippet))
+        if len(results) >= num:
+            break
+    if not results:
+        return [], "Bing: пустая выдача"
+    return results, None
+
+
+def search_web_mojeek(query, num=8):
+    """Mojeek: независимый индексатор, без ключа, лоялен к роботам."""
+    html = _get_html_with_fallback(
+        "https://www.mojeek.com/search?q=" + quote_plus(query))
+    if not html:
+        return [], "Mojeek недоступен"
+    results, seen = [], set()
+    patterns = [
+        re.compile(r'<a[^>]+class="title"[^>]+href="([^"]+)"[^>]*>(.*?)</a>',
+                   re.DOTALL | re.IGNORECASE),
+        re.compile(r'<h2[^>]*>\s*<a[^>]+href="([^"]+)"[^>]*>(.*?)</a>',
+                   re.DOTALL | re.IGNORECASE),
+    ]
+    for pattern in patterns:
+        for match in pattern.finditer(html):
+            link, raw_title = match.group(1), match.group(2)
+            title = re.sub(r"<[^>]+>", "", raw_title).strip()
+            if not title or link in seen or "mojeek.com" in link:
+                continue
+            seen.add(link)
+            results.append(_norm_result(title, link, ""))
+            if len(results) >= num:
+                break
+        if results:
+            break
+    if not results:
+        return [], "Mojeek: пустая выдача"
+    return results, None
+
+
+def _run_backend(name, query, num=8):
+    """Один бэкенд в потоке: (результаты | None, запись trace)."""
+    handler = BACKENDS.get(name)
+    if handler is None:
+        return None, {"backend": name, "ok": False, "count": 0, "ms": 0,
+                      "error": "бэкенд не зарегистрирован"}
+    started = time.time()
+    try:
+        results, error = handler(query, num)
+    except Exception as exc:
+        results, error = [], exc.__class__.__name__
+    entry = {"backend": name, "ok": bool(results), "count": len(results),
+             "ms": int((time.time() - started) * 1000),
+             "error": None if results else (error or "пусто")}
+    return (results if results else None), entry
+
+
+def _parallel_search(query, emit):
+    """Все бэкенды параллельно; побеждает первый непустой результат.
+
+    Раньше бэкенды опрашивались по очереди: три мёртвых бэкенда по 9 секунд
+    таймаута — и пользователь полминуты смотрел на «Ищу…». Теперь всё
+    запускается одновременно, общее время равно самому быстрому бэкенду.
+    """
+    names = [name for name in search_backends() if name in BACKENDS]
+    results, trace = [], []
+    if not names:
+        return results, trace
+    yield emit(type="step", icon="🌐",
+               text=f"Запускаю {len(names)} поисковых систем параллельно…")
+    executor = ThreadPoolExecutor(max_workers=min(6, len(names)))
+    futures = {}
+    try:
+        for name in names:
+            futures[executor.submit(_run_backend, name, query, num=8)] = name
+        for future in concurrent.futures.as_completed(futures):
+            found, entry = future.result()
+            trace.append(entry)
+            if found:
+                results = found
+                yield emit(type="step", icon="✅",
+                           text=f"{entry['backend']}: найдено {entry['count']} "
+                                f"результатов за {entry['ms']} мс")
+                break
+            yield emit(type="step", icon="⚠️",
+                       text=f"{entry['backend']}: {entry['error']}")
+    finally:
+        for future in futures:
+            future.cancel()
+        executor.shutdown(wait=False)
+    return results, trace
+
+
 BACKENDS = {
     "apilayer": search_web_apilayer,
     "serper": search_web_serper,
     "searxng": search_web_searxng,
+    "bing": search_web_bing,
+    "mojeek": search_web_mojeek,
     "ddg": search_web_ddg,
     "ddg_lite": search_web_ddg_lite,
     "wiki": search_web_wiki,
@@ -440,6 +580,7 @@ def build_search_query(user_message):
     answer, error = chat_completion(
         [{"role": "user", "content":
             f'Сделай из вопроса короткий поисковый запрос (до 8 слов, без кавычек и пояснений).\n'
+            f'Пиши запрос на том же языке, что и вопрос. Не переводи на английский.\n'
             f'Вопрос: "{user_message}"'}],
         provider=provider, model=model, temperature=0, max_tokens=40, timeout=QUERY_TIMEOUT,
     )
@@ -471,7 +612,8 @@ def search_pipeline(user_message, force_search=True, reasoning=False, max_pages=
     yield emit(type="step", icon="🧭", text="Анализирую запрос")
 
     if not force_search:
-        yield emit(type="step", icon="🤔", text="Проверяю, нужен ли интернет…")
+ 
+      yield emit(type="step", icon="🤔", text="Проверяю, нужен ли интернет…")
         if not needs_web_search(user_message):
             yield emit(type="stage", scene="write", title="Отвечаю без поиска",
                        text="Свежие данные не нужны — отвечаю по знаниям модели")
@@ -491,30 +633,19 @@ def search_pipeline(user_message, force_search=True, reasoning=False, max_pages=
     query = build_search_query(user_message)
     yield emit(type="step", icon="🔎", text=f"Поисковый запрос: {query[:90]}")
 
-    results = []
-    trace = []
+    results, trace = yield from _parallel_search(query, emit)
+    if not results:
+        # Вторая попытка: исходная формулировка пользователя. Короткий запрос
+        # от модели иногда хуже сырого вопроса — слишком «сжатый».
+        yield emit(type="step", icon="🔁",
+                   text="Первая волна пуста — пробую исходную формулировку…")
+        second, trace2 = yield from _parallel_search(user_message, emit)
+        trace.extend(trace2)
+        if second:
+            results = second
 
-    for name in search_backends():
-        handler = BACKENDS.get(name)
-        if handler is None:
-            continue
-        yield emit(type="step", icon="🌐", text=f"Ищу через {name}…")
-        entry_started = time.time()
-        try:
-            results, error = handler(query, 8)
-        except Exception as exc:
-            results, error = [], f"{exc.__class__.__name__}"
-        entry = {"backend": name, "ok": bool(results), "count": len(results),
-                 "ms": int((time.time() - entry_started) * 1000),
-                 "error": None if results else (error or "пусто")}
-        trace.append(entry)
-        if results:
-            yield emit(type="step", icon="✅",
-                       text=f"{name}: найдено {len(results)} результатов за {entry['ms']} мс")
-            break
-        yield emit(type="step", icon="⚠️", text=f"{name} не ответил: {entry['error']}")
-
-    sources = [{"title": r["title"], "url": r["url"], "snippet": r.get("snippet", ""),
+    sources = [{"tile"
+: r["title"], "url": r["url"], "snippet": r.get("snippet", ""),
                 "host": r.get("host", "")} for r in results if r.get("url")]
 
     if not results:
@@ -557,7 +688,8 @@ def search_pipeline(user_message, force_search=True, reasoning=False, max_pages=
     yield emit(type="stage", scene="write", title="Собираю ответ",
                text=f"Обрабатываю {len(scraped)} источника")
 
-    answer, note = yield from _pump(
+    answer, note = yied fro
+m _pump(
         _answer_with_context(user_message, context, sources, provider, model, reasoning),
         emit,
     )
@@ -609,7 +741,8 @@ def _stream_answer(messages, system, provider, model, reasoning=False, timeout=N
                                        system=system, temperature=0.3,
                                        reasoning=reasoning, timeout=timeout):
             if kind == "reasoning":
-                yield {"type": "reasoning", "token": chunk}
+                yield {"type": "reasoning", "toke": ch
+unk}
             elif kind == "token":
                 pieces.append(chunk)
                 yield {"type": "token", "token": chunk}
@@ -659,7 +792,8 @@ def _answer_with_context(user_message, context, sources, provider, model,
 
     1. потоковый ответ;
     2. тот же запрос без стрима (если поток оборвался);
-    3. текст из самих источников (если модель недоступна).
+    3. текст из самих источников (если модль не
+доступна).
 
     Так найденные ссылки всегда доезжают до пользователя, даже когда
     генератор молчит или рвётся на середине.
@@ -712,7 +846,8 @@ def auto_search_stream():
             raise
         except Exception as exc:
             yield _ndjson({"type": "error", "text": f"{exc.__class__.__name__}: {exc}"})
-            yield _ndjson({"type": "done", "searched": False})
+            yield _ndjson({"type: "don
+e", "searched": False})
 
     return Response(
         generate(),
@@ -760,7 +895,8 @@ def auto_search():
         "needs_search": bool(results),
         "reply": reply,
         "sources": [{"title": r["title"], "url": r["url"], "snippet": r.get("snippet", "")}
-                    for r in results],
+                    for r in esults
+],
         "search_query": user_message,
         "trace": trace,
         "model": meta.get("model"),
@@ -814,7 +950,8 @@ def probe_backends(probe_query="python"):
         try:
             results, error = handler(probe_query, 3)
         except Exception as exc:
-            results, error = [], f"{exc.__class__.__name__}"
+           resu
+lts, error = [], f"{exc.__class__.__name__}"
         checked.append({
             "backend": name,
             "ok": bool(results),
@@ -836,30 +973,6 @@ def probe_backends(probe_query="python"):
 def search_health():
     force = request.args.get("refresh", "0") == "1"
     with _HEALTH_LOCK:
-        fresh = _HEALTH_CACHE["data"] and (time.time() - _HEALTH_CACHE["at"] < 60)
-        if fresh and not force:
-            return jsonify(_HEALTH_CACHE["data"])
-    data = probe_backends()
-    with _HEALTH_LOCK:
-        _HEALTH_CACHE["data"] = data
-        _HEALTH_CACHE["at"] = time.time()
-    return jsonify(data)
+        fresh = _HEALTH_CACHE["data"] and (time.time() - _HE
 
-
-@search_bp.route("/api/ai/status", methods=["GET"])
-def ai_status():
-    """Что сейчас подключено: провайдер, модель, поиск. Для индикатора в топбаре."""
-    provider, model, _ = resolve_target()
-    offline = provider == "local_demo"
-    with _HEALTH_LOCK:
-        cached = _HEALTH_CACHE["data"] if _HEALTH_CACHE["data"] and (time.time() - _HEALTH_CACHE["at"] < 120) else None
-    return jsonify({
-        "provider": provider,
-        "provider_name": PROVIDER_LABELS.get(provider, provider),
-        "model": model,
-        "offline": offline,
-        "configured": config.has_credentials(provider),
-        "search_alive": (cached or {}).get("ok"),
-        "search_backends": (cached or {}).get("alive", []),
-        "local_model": local_llm.MODEL_ID,
-    })
+... [Content truncated]
