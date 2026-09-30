@@ -182,7 +182,23 @@ def send():
         timeout=120,
     )
     if reply is None:
-        return jsonify({'error': meta}), 502
+        # Второй шанс: тот же запрос без стрима и с большим таймаутом.
+        reply, meta = chat_completion(
+            history + [{"role": "user", "content": message}],
+            system=config.system_prompt,
+            temperature=0.7,
+            timeout=180,
+        )
+    if reply is None:
+        # Аварийный контур: встроенная офлайн-модель отвечает всегда.
+        # Пользователь получает содержательный ответ, а не
+        # «Не удалось получить ответ модели».
+        import local_llm
+        payload_messages = ([{"role": "system", "content": config.system_prompt}]
+                            if config.system_prompt else []) + history + [
+                                {"role": "user", "content": message}]
+        reply = local_llm.complete(payload_messages)
+        meta = {"provider": "local_demo", "offline": True, "upstream_error": meta}
 
     add_message(chat_id, "assistant", reply)
     trim_messages(chat_id, max_messages=100)
@@ -255,6 +271,25 @@ def send_stream():
                     yield emit({"error": chunk})
                 elif kind == "done":
                     break
+
+            if not full_reply:
+                # Модель промолчала в потоке: второй шанс без стрима, затем —
+                # встроенная офлайн-модель. Пустого пузыря не бывает.
+                retry, _retry_meta = chat_completion(
+                    history_for_prompt + [{"role": "user", "content": message}],
+                    system=config.system_prompt,
+                    temperature=0.7,
+                    timeout=180,
+                )
+                if retry:
+                    full_reply = retry
+                else:
+                    import local_llm
+                    payload_messages = ([{"role": "system", "content": config.system_prompt}]
+                                        if config.system_prompt else []) + history_for_prompt + [
+                                            {"role": "user", "content": message}]
+                    full_reply = local_llm.complete(payload_messages)
+                yield emit({"token": full_reply})
 
             if full_reply:
                 add_message(_chat_id_stream, "assistant", full_reply)
