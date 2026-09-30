@@ -267,7 +267,17 @@ def chat_completion(messages, provider=None, model=None, system=None,
     if error:
         return None, error
     try:
-        text = (data.get("choices") or [{}])[0].get("message", {}).get("content") or ""
+        message = (data.get("choices") or [{}])[0].get("message") or {}
+        text = message.get("content") or ""
+        if isinstance(text, list):
+            text = "".join(str(p.get("text", "")) for p in text if isinstance(p, dict))
+        text = str(text)
+        if not text.strip():
+            # reasoning-модели при малом max_tokens возвращают только
+            # рассуждение — используем его как ответ, а не молчим.
+            thought = message.get("reasoning") or message.get("reasoning_content") or ""
+            if isinstance(thought, str) and thought.strip():
+                text = thought.strip()
     except (AttributeError, IndexError, TypeError):
         return None, "Провайдер вернул ответ в неожиданном формате"
     if not text.strip():
@@ -276,7 +286,7 @@ def chat_completion(messages, provider=None, model=None, system=None,
 
 
 def chat_stream(messages, provider=None, model=None, system=None, temperature=0.7,
-                max_tokens=None, timeout=90, reasoning=False, reasoning_effort="medium"):
+                max_tokens=None, timeout=90, reasoning=False, reasoning_effort="low"):
     """
     Потоковый ответ. Генератор кортежей (kind, text), где kind:
       "reasoning" — ход мыслей модели (если провайдер его отдаёт),
@@ -305,10 +315,14 @@ def chat_stream(messages, provider=None, model=None, system=None, temperature=0.
         "max_tokens": int(max_tokens or cfg.get("max_tokens", 8192)),
         "stream": True,
     }
-    # Groq отдаёт reasoning только для gpt-oss; остальным такой параметр не шлём,
-    # иначе часть провайдеров отвечает 400 на неизвестное поле.
-    if want_reasoning and provider == "groq" and supports_reasoning(model):
-        payload["reasoning"] = {"effort": reasoning_effort}
+    # Groq: параметры рассуждений по документации — reasoning_effort (строка)
+    # и reasoning_format. Раньше уходило поле "reasoning": {"effort": ...} в
+    # стиле OpenRouter: Groq мог ответить 400, и пользователь получал
+    # «Не удалось получить ответ модели».
+    if provider == "groq" and "gpt-oss" in str(model or "").lower():
+        payload["reasoning_effort"] = reasoning_effort if want_reasoning else "low"
+        if not want_reasoning:
+            payload["reasoning_format"] = "hidden"
 
     # Предварительный «план рассуждений» для моделей без нативного reasoning.
     prepass_needed = want_reasoning and not (provider == "groq" and supports_reasoning(model))
@@ -335,10 +349,26 @@ def chat_stream(messages, provider=None, model=None, system=None, temperature=0.
                 print(f"[reasoning prepass] {chunk}")
                 break
 
+    tokens_seen = False
+    reasoning_tail = []
     for kind, chunk in _raw_stream(provider, model, payload, cfg, timeout):
         if kind == "reasoning":
             produced_reasoning = True
+            reasoning_tail.append(chunk)
+            if len(reasoning_tail) > 400:
+                reasoning_tail.pop(0)
+        elif kind == "token":
+            tokens_seen = True
+            reasoning_tail = []
         yield kind, chunk
+
+    # Страховка: reasoning-модель может закончить поток рассуждением, не вернув
+    # content. Молчать нельзя — хвост рассуждения отдаём как ответ, чтобы
+    # пузырь пользователя не остался пустым.
+    if not tokens_seen and reasoning_tail:
+        tail = "".join(reasoning_tail).strip()
+        if tail:
+            yield "token", tail
 
     if want_reasoning and not produced_reasoning:
         yield "reasoning", (
