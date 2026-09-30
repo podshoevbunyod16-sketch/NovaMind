@@ -612,8 +612,7 @@ def search_pipeline(user_message, force_search=True, reasoning=False, max_pages=
     yield emit(type="step", icon="🧭", text="Анализирую запрос")
 
     if not force_search:
- 
-      yield emit(type="step", icon="🤔", text="Проверяю, нужен ли интернет…")
+        yield emit(type="step", icon="🤔", text="Проверяю, нужен ли интернет…")
         if not needs_web_search(user_message):
             yield emit(type="stage", scene="write", title="Отвечаю без поиска",
                        text="Свежие данные не нужны — отвечаю по знаниям модели")
@@ -644,8 +643,7 @@ def search_pipeline(user_message, force_search=True, reasoning=False, max_pages=
         if second:
             results = second
 
-    sources = [{"tile"
-: r["title"], "url": r["url"], "snippet": r.get("snippet", ""),
+    sources = [{"title": r["title"], "url": r["url"], "snippet": r.get("snippet", ""),
                 "host": r.get("host", "")} for r in results if r.get("url")]
 
     if not results:
@@ -688,8 +686,7 @@ def search_pipeline(user_message, force_search=True, reasoning=False, max_pages=
     yield emit(type="stage", scene="write", title="Собираю ответ",
                text=f"Обрабатываю {len(scraped)} источника")
 
-    answer, note = yied fro
-m _pump(
+    answer, note = yield from _pump(
         _answer_with_context(user_message, context, sources, provider, model, reasoning),
         emit,
     )
@@ -741,8 +738,7 @@ def _stream_answer(messages, system, provider, model, reasoning=False, timeout=N
                                        system=system, temperature=0.3,
                                        reasoning=reasoning, timeout=timeout):
             if kind == "reasoning":
-                yield {"type": "reasoning", "toke": ch
-unk}
+                yield {"type": "reasoning", "token": chunk}
             elif kind == "token":
                 pieces.append(chunk)
                 yield {"type": "token", "token": chunk}
@@ -792,8 +788,7 @@ def _answer_with_context(user_message, context, sources, provider, model,
 
     1. потоковый ответ;
     2. тот же запрос без стрима (если поток оборвался);
-    3. текст из самих источников (если модль не
-доступна).
+    3. текст из самих источников (если модель недоступна).
 
     Так найденные ссылки всегда доезжают до пользователя, даже когда
     генератор молчит или рвётся на середине.
@@ -846,8 +841,7 @@ def auto_search_stream():
             raise
         except Exception as exc:
             yield _ndjson({"type": "error", "text": f"{exc.__class__.__name__}: {exc}"})
-            yield _ndjson({"type: "don
-e", "searched": False})
+            yield _ndjson({"type": "done", "searched": False})
 
     return Response(
         generate(),
@@ -895,8 +889,7 @@ def auto_search():
         "needs_search": bool(results),
         "reply": reply,
         "sources": [{"title": r["title"], "url": r["url"], "snippet": r.get("snippet", "")}
-                    for r in esults
-],
+                    for r in results],
         "search_query": user_message,
         "trace": trace,
         "model": meta.get("model"),
@@ -950,8 +943,7 @@ def probe_backends(probe_query="python"):
         try:
             results, error = handler(probe_query, 3)
         except Exception as exc:
-           resu
-lts, error = [], f"{exc.__class__.__name__}"
+            results, error = [], f"{exc.__class__.__name__}"
         checked.append({
             "backend": name,
             "ok": bool(results),
@@ -973,6 +965,30 @@ lts, error = [], f"{exc.__class__.__name__}"
 def search_health():
     force = request.args.get("refresh", "0") == "1"
     with _HEALTH_LOCK:
-        fresh = _HEALTH_CACHE["data"] and (time.time() - _HE
+        fresh = _HEALTH_CACHE["data"] and (time.time() - _HEALTH_CACHE["at"] < 60)
+        if fresh and not force:
+            return jsonify(_HEALTH_CACHE["data"])
+    data = probe_backends()
+    with _HEALTH_LOCK:
+        _HEALTH_CACHE["data"] = data
+        _HEALTH_CACHE["at"] = time.time()
+    return jsonify(data)
 
-... [Content truncated]
+
+@search_bp.route("/api/ai/status", methods=["GET"])
+def ai_status():
+    """Что сейчас подключено: провайдер, модель, поиск. Для индикатора в топбаре."""
+    provider, model, _ = resolve_target()
+    offline = provider == "local_demo"
+    with _HEALTH_LOCK:
+        cached = _HEALTH_CACHE["data"] if _HEALTH_CACHE["data"] and (time.time() - _HEALTH_CACHE["at"] < 120) else None
+    return jsonify({
+        "provider": provider,
+        "provider_name": PROVIDER_LABELS.get(provider, provider),
+        "model": model,
+        "offline": offline,
+        "configured": config.has_credentials(provider),
+        "search_alive": (cached or {}).get("ok"),
+        "search_backends": (cached or {}).get("alive", []),
+        "local_model": local_llm.MODEL_ID,
+    })
