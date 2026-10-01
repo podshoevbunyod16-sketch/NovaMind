@@ -190,15 +190,8 @@ def send():
             timeout=180,
         )
     if reply is None:
-        # Аварийный контур: встроенная офлайн-модель отвечает всегда.
-        # Пользователь получает содержательный ответ, а не
-        # «Не удалось получить ответ модели».
-        import local_llm
-        payload_messages = ([{"role": "system", "content": config.system_prompt}]
-                            if config.system_prompt else []) + history + [
-                                {"role": "user", "content": message}]
-        reply = local_llm.complete(payload_messages)
-        meta = {"provider": "local_demo", "offline": True, "upstream_error": meta}
+        error = str(meta or "Провайдер не вернул ответ")
+        return jsonify({'error': error, 'chat_id': chat_id}), 502
 
     add_message(chat_id, "assistant", reply)
     trim_messages(chat_id, max_messages=100)
