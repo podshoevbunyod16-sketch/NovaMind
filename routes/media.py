@@ -13,6 +13,7 @@ from ai_providers import groq_request_with_rotation
 from groq_rotation import get_groq_key, GROQ_KEYS
 import config
 import media_generation as mg
+from i18n import with_language, language_rule
 
 media_bp = Blueprint("media", __name__)
 
@@ -76,8 +77,8 @@ def analyze_attachment():
         prompt = (
             f"Файл: {filename}\n\nЗадача: {instruction}\n\n"
             f"Содержимое:\n{text[:120000]}\n\n"
-            "Отвечай на русском языке в Markdown. Не выдумывай данные. "
-            "Для кода указывай конкретные ошибки и исправления."
+            "Отвечай в Markdown. Не выдумывай данные. "
+            "Для кода указывай конкретные ошибки и исправления.\n\n" + language_rule()
         )
         reply, error = _call_selected_text_ai(prompt)
         if error:
@@ -276,7 +277,7 @@ def _call_selected_text_ai(prompt):
     payload = {
         'model': config.current_model,
         'messages': [
-            {'role': 'system', 'content': config.system_prompt},
+            {'role': 'system', 'content': with_language(config.system_prompt)},
             {'role': 'user', 'content': prompt}
         ],
         'temperature': 0.3,

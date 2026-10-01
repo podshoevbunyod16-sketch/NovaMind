@@ -86,12 +86,12 @@
     const dot = document.getElementById('statusDot');
     if (!dot) return;
     if (!on) {
-      dot.title = (state.status && state.status.hint) || 'ИИ-агент недоступен';
+      dot.title = (state.status && state.status.hint) || t('ИИ-агент недоступен');
       return;
     }
-    const skills = ['ищет в интернете', 'рисует, озвучивает и делает видео'];
-    if (hasLinux()) skills.unshift('работает в Linux (код, файлы, терминал)');
-    dot.title = `ИИ-агент сам выбирает, что делать: ${skills.join(', ')}`;
+    const skills = [t('ищет в интернете'), t('рисует, озвучивает и делает видео')];
+    if (hasLinux()) skills.unshift(t('работает в Linux (код, файлы, терминал)'));
+    dot.title = t("ИИ-агент сам выбирает, что делать: {v0}", { v0: skills.join(', ') });
   }
 
   async function init() {
@@ -122,8 +122,8 @@
 
     const search = !!options.search;
     const turn = createAssistantTurn();
-    if (search) turn.beginSearch('Поищу в интернете');
-    else turn.beginIdle(options.reasoning ? 'Рассуждаю…' : 'Думаю…');
+    if (search) turn.beginSearch(t('Поищу в интернете'));
+    else turn.beginIdle(options.reasoning ? t('Рассуждаю…') : t('Думаю…'));
 
     const controller = new AbortController();
     activeAbort = controller;           // кнопка «Стоп» в app.js останавливает и ИИ
@@ -134,7 +134,7 @@
       const response = await fetch('/api/agent/stream', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message, search, reasoning: !!options.reasoning }),
+        body: JSON.stringify({ message, search, reasoning: !!options.reasoning, lang: I18N.lang }),
         signal: controller.signal,
       });
       if (!response.ok) {
@@ -176,7 +176,7 @@
         }
       });
       activeAbort = null;
-      if (!turn.text) throw new Error(failure || 'ИИ не вернул ответ');
+      if (!turn.text) throw new Error(failure || t('ИИ не вернул ответ'));
       turn.finish({
         model: result.model,
         provider: result.provider,
@@ -189,10 +189,10 @@
       activeAbort = null;
       if (error.name === 'AbortError') {
         turn.collapseStage();
-        turn.appendText(turn.text || '_Остановлено._');
+        turn.appendText(turn.text || t('_Остановлено._'));
         turn.finish({ model: result.model });
       } else {
-        turn.fail(error.message || 'ИИ недоступен');
+        turn.fail(error.message || t('ИИ недоступен'));
       }
     }
     return true;
@@ -201,9 +201,9 @@
   // ───────────────────────── кнопки у блоков кода ─────────────────────────
 
   const CODE_PROMPTS = {
-    run: 'Запусти этот код в Linux-окружении и покажи, что он выводит. Если есть ошибки — исправь и запусти снова.',
-    explain: 'Объясни этот код по пунктам: что делает, где может сломаться, что улучшить.',
-    tests: 'Напиши тесты к этому коду, запусти их в Linux-окружении и покажи результат.',
+    run: t('Запусти этот код в Linux-окружении и покажи, что он выводит. Если есть ошибки — исправь и запусти снова.'),
+    explain: t('Объясни этот код по пунктам: что делает, где может сломаться, что улучшить.'),
+    tests: t('Напиши тесты к этому коду, запусти их в Linux-окружении и покажи результат.'),
   };
 
   function codeOf(node) {
@@ -226,7 +226,7 @@
     const prompt = CODE_PROMPTS[button.dataset.code];
     if (!prompt) return;
     if (typeof isTyping !== 'undefined' && isTyping) {
-      notify('Дождитесь окончания ответа', 'warn');
+      notify(t('Дождитесь окончания ответа'), 'warn');
       return;
     }
     window.sendMessage(`${prompt}\n\n\`\`\`${lang}\n${text}\n\`\`\``);

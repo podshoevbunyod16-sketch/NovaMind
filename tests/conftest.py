@@ -62,6 +62,9 @@ def client(tmp_path, monkeypatch, isolated_env):
     from app import app as flask_app
     flask_app.config.update(TESTING=True)
     with flask_app.test_client() as test_client:
+        # Тесты сверяют исходные русские тексты. Без cookie сервер отвечает
+        # на языке по умолчанию — таджикском (см. tests/test_i18n.py).
+        test_client.set_cookie("nova_lang", "ru")
         yield test_client
 
 

@@ -1,10 +1,11 @@
 <!DOCTYPE html>
-<html lang="ru">
+<html lang="tg">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Админ-панель | AI Assistant</title>
     <link rel="stylesheet" href="/static/liquid-glass.css">
+    <script src="/static/i18n.js"></script>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
     <style>
@@ -300,6 +301,7 @@
     <div class="header">
         <h1>⚙️ Админ-панель</h1>
         <div class="header-actions">
+            <div data-lang-picker="compact"></div>
             <a href="/" class="btn">🏠 Главная</a>
             <button class="btn danger" onclick="logout()">🚪 Выйти</button>
         </div>
@@ -388,7 +390,7 @@ print('Привет из админ-панели!')" rows="8"></textarea>
             const errorEl = document.getElementById('loginError');
             
             if (!username || !code) {
-                errorEl.textContent = 'Заполните все поля';
+                errorEl.textContent = t('Заполните все поля');
                 return;
             }
             
@@ -406,7 +408,7 @@ print('Привет из админ-панели!')" rows="8"></textarea>
                     checkAuth();
                 }
             } catch(e) {
-                errorEl.textContent = 'Ошибка сети';
+                errorEl.textContent = t('Ошибка сети');
             }
         }
 
@@ -424,10 +426,10 @@ print('Привет из админ-панели!')" rows="8"></textarea>
                 
                 // Статистика
                 document.getElementById('statsGrid').innerHTML = `
-                    <div class="stat-item"><div class="stat-value">${data.history_messages || 0}</div><div class="stat-label">Сообщений в истории</div></div>
-                    <div class="stat-item"><div class="stat-value">${data.plugins_loaded?.length || 0}</div><div class="stat-label">Плагинов</div></div>
-                    <div class="stat-item"><div class="stat-value">${data.custom_commands?.length || 0}</div><div class="stat-label">Своих команд</div></div>
-                    <div class="stat-item"><div class="stat-value">${data.voice_enabled ? 'Да' : 'Нет'}</div><div class="stat-label">Озвучка</div></div>
+                    <div class="stat-item"><div class="stat-value">${data.history_messages || 0}</div><div class="stat-label">${t("Сообщений в истории")}</div></div>
+                    <div class="stat-item"><div class="stat-value">${data.plugins_loaded?.length || 0}</div><div class="stat-label">${t("Плагинов")}</div></div>
+                    <div class="stat-item"><div class="stat-value">${data.custom_commands?.length || 0}</div><div class="stat-label">${t("Своих команд")}</div></div>
+                    <div class="stat-item"><div class="stat-value">${data.voice_enabled ? t('Да') : t('Нет')}</div><div class="stat-label">${t("Озвучка")}</div></div>
                 `;
                 
                 // Системный промпт
@@ -437,7 +439,7 @@ print('Привет из админ-панели!')" rows="8"></textarea>
                 loadSavedFiles();
                 
             } catch(e) {
-                showToast('Ошибка загрузки дашборда', true);
+                showToast(t('Ошибка загрузки дашборда'), true);
             }
         }
 
@@ -451,10 +453,10 @@ print('Привет из админ-панели!')" rows="8"></textarea>
                     body: JSON.stringify({system_prompt: prompt})
                 });
                 const data = await resp.json();
-                if (data.success) showToast('Настройки сохранены!');
-                else showToast('Ошибка сохранения', true);
+                if (data.success) showToast(t('Настройки сохранены!'));
+                else showToast(t('Ошибка сохранения'), true);
             } catch(e) {
-                showToast('Ошибка сети', true);
+                showToast(t('Ошибка сети'), true);
             }
         }
 
@@ -471,13 +473,13 @@ print('Привет из админ-панели!')" rows="8"></textarea>
                 });
                 const data = await resp.json();
                 if (data.success) {
-                    showToast('Код сохранён: ' + data.filepath);
+                    showToast(t('Код сохранён: ') + data.filepath);
                     loadSavedFiles();
                 } else {
-                    showToast(data.error || 'Ошибка сохранения', true);
+                    showToast(data.error || t('Ошибка сохранения'), true);
                 }
             } catch(e) {
-                showToast('Ошибка сети', true);
+                showToast(t('Ошибка сети'), true);
             }
         }
 
@@ -491,7 +493,7 @@ print('Привет из админ-панели!')" rows="8"></textarea>
         async function runSavedCode() {
             const filename = document.getElementById('codeFilename').value.trim() || 'script.py';
             const outputBox = document.getElementById('codeOutput');
-            outputBox.textContent = 'Запуск...';
+            outputBox.textContent = t('Запуск...');
             
             try {
                 const resp = await fetch('/api/admin/run_saved_code', {
@@ -501,12 +503,12 @@ print('Привет из админ-панели!')" rows="8"></textarea>
                 });
                 const data = await resp.json();
                 if (data.error) {
-                    outputBox.textContent = 'Ошибка: ' + data.error;
+                    outputBox.textContent = t('Ошибка: ') + data.error;
                 } else {
-                    outputBox.textContent = data.result || 'Нет вывода';
+                    outputBox.textContent = data.result || t('Нет вывода');
                 }
             } catch(e) {
-                outputBox.textContent = 'Ошибка сети: ' + e;
+                outputBox.textContent = t('Ошибка сети: ') + e;
             }
         }
 
@@ -517,14 +519,14 @@ print('Привет из админ-панели!')" rows="8"></textarea>
                 const data = await resp.json();
                 const container = document.getElementById('savedFiles');
                 if (!data.files || data.files.length === 0) {
-                    container.innerHTML = '<span style="color:var(--text-muted);">Нет сохранённых файлов</span>';
+                    container.innerHTML = `<span style="color:var(--text-muted);">${t("Нет сохранённых файлов")}</span>`;
                     return;
                 }
                 container.innerHTML = data.files.map(f => `
                     <button class="btn" onclick="loadCode('${f}')">📄 ${f}</button>
                 `).join('');
             } catch(e) {
-                document.getElementById('savedFiles').innerHTML = 'Ошибка загрузки';
+                document.getElementById('savedFiles').innerHTML = t('Ошибка загрузки');
             }
         }
 
@@ -536,10 +538,10 @@ print('Привет из админ-панели!')" rows="8"></textarea>
                 if (data.code) {
                     document.getElementById('codeFilename').value = filename;
                     document.getElementById('codeEditor').value = data.code;
-                    showToast('Файл загружен: ' + filename);
+                    showToast(t('Файл загружен: ') + filename);
                 }
             } catch(e) {
-                showToast('Ошибка загрузки', true);
+                showToast(t('Ошибка загрузки'), true);
             }
         }
 

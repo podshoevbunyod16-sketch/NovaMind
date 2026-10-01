@@ -1,16 +1,17 @@
 <!DOCTYPE html>
-<html lang="ru" data-glass-theme="aurora">
+<html lang="tg" data-glass-theme="aurora">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
   <meta name="theme-color" content="#070713" />
   <title>NovaMind · Liquid Glass</title>
   <link rel="stylesheet" href="/static/liquid-glass.css">
+  <script src="/static/i18n.js"></script>
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
 
-<!-- Живой фон: зерно + виньетка поверх aurora-слоёв -->
+<!-- Фон: зерно + виньетка поверх статичных aurora-слоёв -->
 <div class="lg-grain" aria-hidden="true"></div>
 <div class="lg-vignette" aria-hidden="true"></div>
 
@@ -80,6 +81,10 @@
 
     <!-- ═══════════════ ФУТЕР БОКОВОЙ ПАНЕЛИ ═══════════════ -->
     <div class="sidebar-footer">
+      <div class="sidebar-lang">
+        <span class="sidebar-lang-label">🌐 Язык</span>
+        <div data-lang-picker="compact"></div>
+      </div>
       <a href="/admin/login" class="user-card" id="admin-link" style="display: none; text-decoration: none; color: inherit;">
         <div class="user-avatar">⚙️</div>
         <div>
@@ -167,7 +172,6 @@
           <button class="toolbar-btn" onclick="attachVideo()">🎬 Видео</button>
         </div>
 
-        <button class="toolbar-btn" id="btn-calm" onclick="toggleCalmMotion()" title="Отключить фоновые анимации">✨ <span>Анимации</span></button>
       </div>
 
       <div class="mode-active" id="modeActiveBar" hidden>

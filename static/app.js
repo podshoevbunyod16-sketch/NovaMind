@@ -84,7 +84,7 @@ function setShortText(el, text, max) {
 
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'c' && !insideMessage && !inField) {
       e.preventDefault();
-      showNotification('Копирование интерфейса запрещено. Выделите текст в сообщении.', 'warn');
+      showNotification(t('Копирование интерфейса запрещено. Выделите текст в сообщении.'), 'warn');
       return false;
     }
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'a' && !insideMessage && !inField) {
@@ -135,19 +135,10 @@ function applyTheme(theme) {
   return value;
 }
 
-function toggleCalmMotion() {
-  const calm = document.documentElement.getAttribute('data-motion') === 'calm';
-  document.documentElement.setAttribute('data-motion', calm ? 'full' : 'calm');
-  localStorage.setItem('nova_motion', calm ? 'full' : 'calm');
-  document.getElementById('btn-calm')?.classList.toggle('active', !calm);
-  showNotification(calm ? 'Анимации включены' : 'Спокойный режим: фоновые анимации выключены', 'info');
-}
-
+// Фоновых анимаций больше нет — переключатель «спокойного режима» не нужен
 (function initAppearance() {
   applyTheme(ONLY_THEME);
-  const motion = localStorage.getItem('nova_motion') || 'full';
-  document.documentElement.setAttribute('data-motion', motion);
-  document.getElementById('btn-calm')?.classList.toggle('active', motion === 'calm');
+  localStorage.removeItem('nova_motion');
 })();
 
 // ========== ПРОВЕРКА АВТОРИЗАЦИИ ==========
@@ -161,7 +152,7 @@ if (!localStorage.getItem('nova_user_nick')) {
   const adminLink = document.getElementById('admin-link');
   const displayNick = document.getElementById('display-nick');
   if (displayNick) {
-    displayNick.textContent = localStorage.getItem('nova_user_nick') || 'Пользователь';
+    displayNick.textContent = localStorage.getItem('nova_user_nick') || t('Пользователь');
   }
   if (isAdmin && adminLink) adminLink.style.display = 'flex';
 
@@ -206,12 +197,12 @@ function setWebSearch(state, silent = false) {
   btn?.classList.toggle('active', state);
   btn?.classList.toggle('is-live', state);
   const label = document.getElementById('searchBtnText');
-  if (label) label.textContent = state ? 'Поиск вкл' : 'Поиск';
+  if (label) label.textContent = state ? t('Поиск вкл') : t('Поиск');
   btn?.setAttribute('aria-pressed', state ? 'true' : 'false');
   if (!silent) {
     showNotification(state
-      ? '🔍 Автопоиск включён — ИИ ищет в интернете через Linux и отвечает с источниками'
-      : 'Автопоиск выключен', state ? 'ok' : 'info');
+      ? t('🔍 Автопоиск включён — ИИ ищет в интернете через Linux и отвечает с источниками')
+      : t('Автопоиск выключен'), state ? 'ok' : 'info');
   }
 }
 
@@ -222,14 +213,14 @@ function toggleReasoning() {
   localStorage.setItem('nova_reasoning', reasoningOn ? '1' : '0');
   document.getElementById('btn-reasoning')?.classList.toggle('active', reasoningOn);
   showNotification(reasoningOn
-    ? '🧠 Режим рассуждения включён — покажу ход мыслей модели'
-    : 'Рассуждение выключено', reasoningOn ? 'ok' : 'info');
+    ? t('🧠 Режим рассуждения включён — покажу ход мыслей модели')
+    : t('Рассуждение выключено'), reasoningOn ? 'ok' : 'info');
 }
 
 function toggleAutoSearch() {
   autoSearchOn = !autoSearchOn;
   document.getElementById('btn-auto-search')?.classList.toggle('active', autoSearchOn);
-  showNotification(autoSearchOn ? '🔍 Авто-поиск включён' : 'Авто-поиск выключен', 'info');
+  showNotification(autoSearchOn ? t('🔍 Авто-поиск включён') : t('Авто-поиск выключен'), 'info');
 }
 
 // ========== ПРИКРЕПИТЬ ==========
@@ -241,20 +232,20 @@ async function analyzeAttachment(file, kind) {
   document.getElementById('attachDropdown').classList.remove('open');
 
   const defaultPrompt = kind === 'image'
-    ? 'Подробно опиши изображение, распознай текст на нём и объясни важные детали.'
-    : 'Проанализируй этот файл и объясни главное. Если это код — найди ошибки и предложи исправления.';
+    ? t('Подробно опиши изображение, распознай текст на нём и объясни важные детали.')
+    : t('Проанализируй этот файл и объясни главное. Если это код — найди ошибки и предложи исправления.');
 
   const userDesc = prompt(
     kind === 'image'
-      ? '📷 Что сделать с изображением?\n\nОставь пустым — AI сам распознает изображение и текст.'
-      : '📁 Что сделать с файлом?\n\nМожно написать: найди ошибки, сделай резюме, объясни код и т.д.',
+      ? t('📷 Что сделать с изображением?\n\nОставь пустым — AI сам распознает изображение и текст.')
+      : t('📁 Что сделать с файлом?\n\nМожно написать: найди ошибки, сделай резюме, объясни код и т.д.'),
     ''
   );
   if (userDesc === null) return;
 
   appendMessage('user', `${kind === 'image' ? '📷' : '📁'} ${file.name}${userDesc ? '\n💬 ' + userDesc : ''}`);
   const turn = createAssistantTurn();
-  turn.beginIdle('Читаю файл…');
+  turn.beginIdle(t('Читаю файл…'));
 
   const formData = new FormData();
   formData.append('file', file);
@@ -265,15 +256,15 @@ async function analyzeAttachment(file, kind) {
     const raw = await response.text();
     let data;
     try { data = JSON.parse(raw); }
-    catch (_) { throw new Error('Сервер вернул не JSON (HTTP ' + response.status + ')'); }
+    catch (_) { throw new Error(t('Сервер вернул не JSON (HTTP ') + response.status + ')'); }
     if (!response.ok || data.error) {
-      throw new Error(data.error || ('Ошибка обработки файла: HTTP ' + response.status));
+      throw new Error(data.error || (t('Ошибка обработки файла: HTTP ') + response.status));
     }
     turn.collapseStage();
-    turn.appendText(data.result || 'Анализ завершён, но ответ пустой.');
+    turn.appendText(data.result || t('Анализ завершён, но ответ пустой.'));
     turn.finish({ model: aiStatus?.model });
   } catch (error) {
-    turn.fail(error.message || 'Ошибка анализа вложения');
+    turn.fail(error.message || t('Ошибка анализа вложения'));
   }
 }
 
@@ -311,7 +302,7 @@ function attachAudio() {
   pickMediaFile('audio/*', (file) => {
     appendMessage('user', `🎧 ${file.name}`);
     const turn = createAssistantTurn();
-    turn.beginIdle('Расшифровываю аудио…');
+    turn.beginIdle(t('Расшифровываю аудио…'));
     const data = new FormData();
     data.append('file', file);
     fetch('/api/media/transcribe', { method: 'POST', body: data })
@@ -322,10 +313,10 @@ function attachAudio() {
         autoResize(input);
         sendBtn.disabled = !input.value.trim();
         turn.collapseStage();
-        turn.appendText(`**Расшифровка ${file.name}:**\n\n${result.text || 'Текст не распознан.'}`);
+        turn.appendText(t("**Расшифровка {name}:**\n\n{v1}", { name: file.name, v1: result.text || t('Текст не распознан.') }));
         turn.finish({ model: 'whisper' });
       })
-      .catch((error) => turn.fail(error.message || 'Ошибка загрузки аудио'));
+      .catch((error) => turn.fail(error.message || t('Ошибка загрузки аудио')));
   });
 }
 
@@ -333,7 +324,7 @@ function attachVideo() {
   pickMediaFile('video/*', (file) => {
     appendMessage('user', `🎬 ${file.name}`);
     const turn = createAssistantTurn();
-    turn.beginIdle('Загружаю видео…');
+    turn.beginIdle(t('Загружаю видео…'));
     const data = new FormData();
     data.append('file', file);
     fetch('/api/media/upload', { method: 'POST', body: data })
@@ -341,9 +332,9 @@ function attachVideo() {
       .then((result) => {
         turn.remove();
         if (result.error) appendMessage('ai', '❌ ' + result.error);
-        else appendMediaMessage('video', result.url, `Видео: ${file.name}`);
+        else appendMediaMessage('video', result.url, t("Видео: {name}", { name: file.name }));
       })
-      .catch(() => { turn.remove(); appendMessage('ai', '❌ Ошибка загрузки видео'); });
+      .catch(() => { turn.remove(); appendMessage('ai', t('❌ Ошибка загрузки видео')); });
   });
 }
 
@@ -355,7 +346,7 @@ function appendMediaMessage(kind, url, title) {
     : kind === 'video'
       ? `<video controls playsinline preload="metadata" src="${url}"></video>`
       : `<img src="${url}" alt="${escapeHtml(title)}">`;
-  wrap.innerHTML = `<div class="msg-avatar">✦</div><div class="msg-body"><div class="msg-name">NovaMind</div><div class="msg-bubble media-bubble"><div class="media-title">${escapeHtml(title)}</div>${media}<div class="media-actions"><a class="media-download" href="${url}" target="_blank" rel="noopener">Открыть файл</a></div></div></div>`;
+  wrap.innerHTML = `<div class="msg-avatar">✦</div><div class="msg-body"><div class="msg-name">NovaMind</div><div class="msg-bubble media-bubble"><div class="media-title">${escapeHtml(title)}</div>${media}<div class="media-actions"><a class="media-download" href="${url}" target="_blank" rel="noopener">${t("Открыть файл")}</a></div></div></div>`;
   chatContainer.appendChild(wrap);
   scrollToBottom();
 }
@@ -366,7 +357,7 @@ function appendMediaMessage(kind, url, title) {
 function mediaBubbleHtml(payload) {
   const kind = payload.kind || 'image';
   const url = payload.url || '';
-  const title = payload.title || (kind === 'image' ? 'Изображение' : kind === 'audio' ? 'Аудио' : 'Видео');
+  const title = payload.title || (kind === 'image' ? t('Изображение') : kind === 'audio' ? t('Аудио') : t('Видео'));
   const provider = payload.provider ? ` · ${escapeHtml(payload.provider)}` : '';
   const seconds = payload.elapsed_ms ? ` · ${(payload.elapsed_ms / 1000).toFixed(1)} c` : '';
   let player;
@@ -379,8 +370,8 @@ function mediaBubbleHtml(payload) {
       <div class="media-title">${escapeHtml(title)}${provider}${seconds}</div>
       ${player}
       <div class="media-actions">
-        <a class="media-download" href="${escapeHtml(url)}" download="${escapeHtml(downloadName)}">⬇ Скачать</a>
-        <a href="${escapeHtml(url)}" target="_blank" rel="noopener">Открыть в новой вкладке</a>
+        <a class="media-download" href="${escapeHtml(url)}" download="${escapeHtml(downloadName)}">${t("⬇ Скачать")}</a>
+        <a href="${escapeHtml(url)}" target="_blank" rel="noopener">${t("Открыть в новой вкладке")}</a>
       </div>
     </div>`;
 }
@@ -393,18 +384,18 @@ const MEDIA_ICON = { image: '🖼', audio: '🔊', video: '🎬' };
 
 function turnMediaPlayer(item) {
   const url = escapeHtml(item.url || '');
-  const alt = escapeHtml(item.prompt || item.title || 'Сгенерировано ИИ');
+  const alt = escapeHtml(item.prompt || item.title || t('Сгенерировано ИИ'));
   if (item.kind === 'audio') return `<audio controls preload="metadata" src="${url}"></audio>`;
   if (item.kind === 'video') return `<video controls playsinline preload="metadata" src="${url}"></video>`;
   return `<a class="turn-media-open" href="${url}" target="_blank" rel="noopener"><img src="${url}" alt="${alt}" loading="lazy"></a>`;
 }
 
 function turnMediaCaption(item) {
-  const bits = [`${MEDIA_ICON[item.kind] || '✦'} ${escapeHtml(item.model_name || item.model || 'ИИ')}`];
+  const bits = [`${MEDIA_ICON[item.kind] || '✦'} ${escapeHtml(item.model_name || item.model || t('ИИ'))}`];
   if (item.elapsed_ms) bits.push(`${(item.elapsed_ms / 1000).toFixed(1)} c`);
   const name = escapeHtml(item.filename || `novamind_${item.kind || 'media'}`);
   return `<figcaption><span class="turn-media-meta">${bits.join(' · ')}</span>`
-    + `<a class="turn-media-dl" href="${escapeHtml(item.url || '')}" download="${name}" title="Скачать">⬇ Скачать</a></figcaption>`;
+    + `<a class="turn-media-dl" href="${escapeHtml(item.url || '')}" download="${name}" title="${t("Скачать")}">${t("⬇ Скачать")}</a></figcaption>`;
 }
 
 function turnMediaItemHtml(item) {
@@ -424,23 +415,23 @@ async function pollTurnMediaJob(item, figure) {
       data = await response.json();
       if (!response.ok) throw new Error(data.error || ('HTTP ' + response.status));
     } catch (error) {
-      if (statusEl) statusEl.textContent = 'Не удалось узнать статус: ' + error.message;
+      if (statusEl) statusEl.textContent = t('Не удалось узнать статус: ') + error.message;
       continue;
     }
     if (data.state === 'succeeded' && data.media) {
       const ready = { ...item, ...data.media, kind: 'video', job_id: null };
       figure.outerHTML = turnMediaItemHtml(ready);
-      historyAddMessage('ai', 'MEDIA_RESULT:' + JSON.stringify({ ...ready, title: item.prompt || 'Видео' }));
+      historyAddMessage('ai', 'MEDIA_RESULT:' + JSON.stringify({ ...ready, title: item.prompt || t('Видео') }));
       return;
     }
     if (['failed', 'cancelled', 'error'].includes(data.state)) {
-      if (statusEl) statusEl.textContent = '❌ ' + (data.error || 'Провайдер отменил задачу');
+      if (statusEl) statusEl.textContent = '❌ ' + (data.error || t('Провайдер отменил задачу'));
       figure.classList.add('is-error');
       return;
     }
-    if (statusEl) statusEl.textContent = `Видео готовится у провайдера… (${data.state}, проверок: ${data.polls})`;
+    if (statusEl) statusEl.textContent = t("Видео готовится у провайдера… ({state}, проверок: {polls})", { state: data.state, polls: data.polls });
   }
-  if (statusEl) statusEl.textContent = 'Видео всё ещё готовится — загляните позже.';
+  if (statusEl) statusEl.textContent = t('Видео всё ещё готовится — загляните позже.');
 }
 
 function appendMediaResult(payload, options = {}) {
@@ -463,9 +454,9 @@ function appendMediaJobCard(job) {
   wrap.innerHTML = `<div class="msg-avatar">✦</div><div class="msg-body">
     <div class="msg-name">NovaMind</div>
     <div class="msg-bubble media-bubble media-job">
-      <div class="media-title">🎬 Задача видео у провайдера</div>
-      <div class="media-status" data-role="status">Статус: ${escapeHtml(job.state || 'queued')}</div>
-      <div class="media-status-sub" data-role="sub">ID задачи: ${escapeHtml(job.job_id || '')}</div>
+      <div class="media-title">${t("🎬 Задача видео у провайдера")}</div>
+      <div class="media-status" data-role="status">${t("Статус:")} ${escapeHtml(job.state || 'queued')}</div>
+      <div class="media-status-sub" data-role="sub">${t("ID задачи:")} ${escapeHtml(job.job_id || '')}</div>
       <div class="media-status-log" data-role="log"></div>
     </div></div>`;
   chatContainer.appendChild(wrap);
@@ -484,22 +475,22 @@ async function pollMediaJob(jobId, card) {
       data = await response.json();
       if (!response.ok) throw new Error(data.error || ('HTTP ' + response.status));
     } catch (error) {
-      if (statusEl) statusEl.textContent = 'Не удалось опросить задачу: ' + error.message;
+      if (statusEl) statusEl.textContent = t('Не удалось опросить задачу: ') + error.message;
       continue;
     }
-    if (statusEl) statusEl.textContent = `Статус провайдера: ${data.state} (опросов: ${data.polls})`;
+    if (statusEl) statusEl.textContent = t("Статус провайдера: {state} (опросов: {polls})", { state: data.state, polls: data.polls });
     if (logEl && (data.events || []).length) logEl.textContent = data.events[data.events.length - 1].status;
     if (data.state === 'succeeded' && data.media) {
       card.remove();
-      appendMediaResult({ ...data.media, kind: 'video', title: data.model || 'Видео', provider: data.provider });
+      appendMediaResult({ ...data.media, kind: 'video', title: data.model || t('Видео'), provider: data.provider });
       return;
     }
     if (['failed', 'cancelled', 'error'].includes(data.state)) {
-      if (statusEl) statusEl.textContent = '❌ ' + (data.error || 'Провайдер отменил задачу');
+      if (statusEl) statusEl.textContent = '❌ ' + (data.error || t('Провайдер отменил задачу'));
       return;
     }
   }
-  if (statusEl) statusEl.textContent = 'Опрос остановлен: задача всё ещё выполняется у провайдера.';
+  if (statusEl) statusEl.textContent = t('Опрос остановлен: задача всё ещё выполняется у провайдера.');
 }
 
 // ══════════════════════════════════════════════════════════════════
@@ -600,7 +591,7 @@ function createAssistantTurn(options = {}) {
     element: wrap,
 
     /** Пустой пузырь с едва заметным индикатором (поиск выключен). */
-    beginIdle(label = 'Думаю…') {
+    beginIdle(label = t('Думаю…')) {
       ensureStage(null, label);
       stage.innerHTML = `
         <div class="stage-idle">
@@ -613,7 +604,7 @@ function createAssistantTurn(options = {}) {
     },
 
     /** Сцена поиска: сначала анимация, через паузу — подпись. */
-    beginSearch(title = 'Поищу в интернете') {
+    beginSearch(title = t('Поищу в интернете')) {
       ensureStage('search', title);
       const head = stage.querySelector('.stage-head');
       setTimeout(() => {
@@ -660,7 +651,7 @@ function createAssistantTurn(options = {}) {
         box.className = 'stage-plan';
         stage.insertBefore(box, stepsEl);
       }
-      box.innerHTML = `<span class="stage-plan-label">План</span><span class="stage-plan-text">${escapeHtml(text)}</span>`;
+      box.innerHTML = `<span class="stage-plan-label">${t("План")}</span><span class="stage-plan-text">${escapeHtml(text)}</span>`;
       scrollToBottom();
     },
 
@@ -680,7 +671,7 @@ function createAssistantTurn(options = {}) {
         box.innerHTML = `
           <button type="button" class="agent-term-head">
             <span class="agent-term-ico">⌨️</span>
-            <span class="agent-term-title">${window.Linux && window.Linux.hasLinux && !window.Linux.hasLinux() ? 'Шаги ИИ' : 'Работа в Linux'}</span>
+            <span class="agent-term-title">${window.Linux && window.Linux.hasLinux && !window.Linux.hasLinux() ? t('Шаги ИИ') : t('Работа в Linux')}</span>
             <span class="agent-term-meta"></span>
             <span class="caret">▼</span>
           </button>
@@ -707,11 +698,8 @@ function createAssistantTurn(options = {}) {
       box.querySelector('.agent-term-log').appendChild(row);
       const count = box.querySelectorAll('.agent-term-row').length;
       const done = box.querySelectorAll('.agent-term-row.is-error').length;
-      const n10 = count % 10, n100 = count % 100;
-      const word = (n10 === 1 && n100 !== 11) ? 'шаг'
-        : (n10 >= 2 && n10 <= 4 && (n100 < 12 || n100 > 14)) ? 'шага' : 'шагов';
       box.querySelector('.agent-term-meta').textContent =
-        `${count} ${word}${done ? ` · ошибок: ${done}` : ''}`;
+        `${count} ${tn(count, 'шаг', 'шага', 'шагов')}${done ? t(" · ошибок: {done}", { done: done }) : ''}`;
       // Блок остаётся свёрнутым: раскрывается только по нажатию пользователя
       scrollToBottom();
     },
@@ -734,10 +722,10 @@ function createAssistantTurn(options = {}) {
         bubble.insertBefore(box, answerEl);
       }
       const steps = (task.steps || []).length;
-      const statusLabel = { todo: 'к выполнению', doing: 'в работе', done: 'готово' }[task.status] || task.status;
+      const statusLabel = { todo: t('к выполнению'), doing: t('в работе'), done: t('готово') }[task.status] || task.status;
       box.innerHTML = `<span class="agent-task-ico">${task.status === 'done' ? '✔' : '📋'}</span>
-        <span class="agent-task-title">${escapeHtml(task.title || 'Задача')}</span>
-        <span class="agent-task-meta">${escapeHtml(statusLabel)}${steps ? ` · шагов: ${steps}` : ''}</span>`;
+        <span class="agent-task-title">${escapeHtml(task.title || t('Задача'))}</span>
+        <span class="agent-task-meta">${escapeHtml(statusLabel)}${steps ? t(" · шагов: {steps}", { steps: steps }) : ''}</span>`;
       scrollToBottom();
     },
 
@@ -754,8 +742,8 @@ function createAssistantTurn(options = {}) {
       if (item.job_id && !item.url) {
         holder.innerHTML = `<figure class="turn-media-item is-pending" data-kind="video">
           <div class="turn-media-wait"><span class="turn-media-spin"></span>
-          <span class="turn-media-status">Видео готовится у провайдера…</span></div>
-          <figcaption><span class="turn-media-meta">🎬 ${escapeHtml(item.model_name || 'видео')}</span></figcaption></figure>`;
+          <span class="turn-media-status">${t("Видео готовится у провайдера…")}</span></div>
+          <figcaption><span class="turn-media-meta">🎬 ${escapeHtml(item.model_name || t('видео'))}</span></figcaption></figure>`;
         box.appendChild(holder.firstElementChild);
         pollTurnMediaJob(item, box.lastElementChild);
       } else {
@@ -777,7 +765,7 @@ function createAssistantTurn(options = {}) {
             <svg class="reasoning-brain" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <path d="M9.5 2A2.5 2.5 0 0 0 7 4.5v.5a2.5 2.5 0 0 0-2 4.4A2.5 2.5 0 0 0 6.5 14a2.5 2.5 0 0 0 3 3.9V19a2.5 2.5 0 0 0 5 0v-1.1A2.5 2.5 0 0 0 17.5 14a2.5 2.5 0 0 0 1.5-4.6A2.5 2.5 0 0 0 17 5v-.5A2.5 2.5 0 0 0 14.5 2z"/>
             </svg>
-            <span>Рассуждение</span>
+            <span>${t("Рассуждение")}</span>
             <span class="caret">▶</span>
           </div>
           <div class="reasoning-body"><div class="reasoning-text"></div></div>`;
@@ -824,7 +812,7 @@ function createAssistantTurn(options = {}) {
       }
       box.innerHTML = `
         <div class="sources-head">
-          <span>🔗 Источники · ${sourcesData.length}</span>
+          <span>${t("🔗 Источники ·")} ${sourcesData.length}</span>
           <span class="caret">▼</span>
         </div>
         <div class="sources-list">
@@ -848,20 +836,20 @@ function createAssistantTurn(options = {}) {
 
       const seconds = ((Date.now() - startedAt) / 1000).toFixed(1);
       const bits = [];
-      if (meta.model) bits.push(`модель: ${escapeHtml(meta.model)}`);
+      if (meta.model) bits.push(t("модель: {v0}", { v0: escapeHtml(meta.model) }));
       if (meta.provider) bits.push(escapeHtml(meta.provider));
-      if (meta.offline) bits.push('офлайн');
-      if (meta.searched) bits.push('с поиском');
+      if (meta.offline) bits.push(t('офлайн'));
+      if (meta.searched) bits.push(t('с поиском'));
       if (meta.agent || meta.linux) bits.push('Linux');
-      if (meta.steps) bits.push(`шагов: ${meta.steps}`);
-      if (sourcesData.length) bits.push(`источников: ${sourcesData.length}`);
+      if (meta.steps) bits.push(t("шагов: {steps}", { steps: meta.steps }));
+      if (sourcesData.length) bits.push(t("источников: {length}", { length: sourcesData.length }));
       bits.push(`${seconds} c`);
       metaEl.innerHTML = `<span>${bits.join(' · ')}</span>`;
 
       actionsEl.innerHTML = `
-        <button type="button" data-act="copy" title="Скопировать ответ">📋 Копировать</button>
-        <button type="button" data-act="speak" title="Озвучить ответ">🔊 Озвучить</button>
-        <button type="button" data-act="regen" title="Ответить заново">↻ Заново</button>`;
+        <button type="button" data-act="copy" title="${t("Скопировать ответ")}">${t("📋 Копировать")}</button>
+        <button type="button" data-act="speak" title="${t("Озвучить ответ")}">${t("🔊 Озвучить")}</button>
+        <button type="button" data-act="regen" title="${t("Ответить заново")}">${t("↻ Заново")}</button>`;
       actionsEl.querySelector('[data-act="copy"]').addEventListener('click', () => {
         copyText(answerText || bubble.innerText);
       });
@@ -888,9 +876,9 @@ function createAssistantTurn(options = {}) {
       api.finishTerm();
       stopTimer();
       wrap.classList.remove('is-working');
-      answerEl.innerHTML = `<span style="color:var(--err)">❌ ${escapeHtml(message || 'Неизвестная ошибка')}</span>`;
-      actionsEl.innerHTML = `<button type="button" data-act="copy">📋 Копировать</button>
-        <button type="button" data-act="regen">↻ Повторить</button>`;
+      answerEl.innerHTML = `<span style="color:var(--err)">❌ ${escapeHtml(message || t('Неизвестная ошибка'))}</span>`;
+      actionsEl.innerHTML = `<button type="button" data-act="copy">${t("📋 Копировать")}</button>
+        <button type="button" data-act="regen">${t("↻ Повторить")}</button>`;
       actionsEl.querySelector('[data-act="copy"]').addEventListener('click', () => copyText(message || ''));
       actionsEl.querySelector('[data-act="regen"]').addEventListener('click', () => {
         if (lastUserMessage) sendMessage(lastUserMessage);
@@ -938,7 +926,7 @@ function copyText(text) {
   const value = String(text || '');
   if (navigator.clipboard?.writeText) {
     navigator.clipboard.writeText(value)
-      .then(() => showNotification('Скопировано в буфер обмена', 'ok'))
+      .then(() => showNotification(t('Скопировано в буфер обмена'), 'ok'))
       .catch(() => fallbackCopy(value));
   } else fallbackCopy(value);
 }
@@ -950,31 +938,38 @@ function fallbackCopy(value) {
   area.style.opacity = '0';
   document.body.appendChild(area);
   area.select();
-  try { document.execCommand('copy'); showNotification('Скопировано', 'ok'); }
-  catch (_) { showNotification('Не удалось скопировать', 'warn'); }
+  try { document.execCommand('copy'); showNotification(t('Скопировано'), 'ok'); }
+  catch (_) { showNotification(t('Не удалось скопировать'), 'warn'); }
   area.remove();
 }
 
 let speechUtterance = null;
 function speakText(text) {
   if (!('speechSynthesis' in window)) {
-    showNotification('Браузер не поддерживает озвучку', 'warn');
+    showNotification(t('Браузер не поддерживает озвучку'), 'warn');
     return;
   }
   window.speechSynthesis.cancel();
   const clean = String(text || '').replace(/[*#`|]/g, '').slice(0, 4000);
   speechUtterance = new SpeechSynthesisUtterance(clean);
-  speechUtterance.lang = 'ru-RU';
+  // Голос под язык интерфейса. Таджикского голоса в браузерах обычно нет —
+  // тогда кириллицу читает русский голос, а не английский по умолчанию.
+  const wanted = I18N.speechLang();
+  const voices = window.speechSynthesis.getVoices();
+  const voice = voices.find((v) => v.lang.toLowerCase().startsWith(wanted.slice(0, 2)))
+    || (I18N.lang === 'tg' ? voices.find((v) => v.lang.toLowerCase().startsWith('ru')) : null);
+  if (voice) { speechUtterance.voice = voice; speechUtterance.lang = voice.lang; }
+  else speechUtterance.lang = I18N.lang === 'tg' ? 'ru-RU' : wanted;
   speechUtterance.rate = 1.02;
   window.speechSynthesis.speak(speechUtterance);
-  showNotification('🔊 Читаю ответ…', 'info');
+  showNotification(t('🔊 Читаю ответ…'), 'info');
 }
 
 // ══════════════════════════════════════════
 // ПОТОКОВАЯ ОБРАБОТКА NDJSON
 // ══════════════════════════════════════════
 async function consumeNdjson(response, onEvent) {
-  if (!response.body) throw new Error('Браузер не поддерживает потоковый ответ');
+  if (!response.body) throw new Error(t('Браузер не поддерживает потоковый ответ'));
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let buffer = '';
@@ -999,7 +994,7 @@ function setSendBusy(busy) {
   if (!sendBtn) return;
   sendBtn.classList.toggle('is-stop', busy);
   sendBtn.disabled = busy ? false : !input.value.trim();
-  sendBtn.title = busy ? 'Остановить генерацию' : 'Отправить (Enter)';
+  sendBtn.title = busy ? t('Остановить генерацию') : t('Отправить (Enter)');
   sendBtn.innerHTML = busy
     ? '<svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>'
     : '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>';
@@ -1015,7 +1010,7 @@ function stopGeneration() {
   // оборванный хвост бутыря доделывает обработчик AbortError.
   isTyping = false;
   setSendBusy(false);
-  showNotification('Генерация остановлена', 'warn');
+  showNotification(t('Генерация остановлена'), 'warn');
 }
 
 // ══════════════════════════════════════════
@@ -1028,7 +1023,7 @@ async function streamMessage(message, turn) {
   const response = await fetch('/send_stream', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ message, reasoning: reasoningOn }),
+    body: JSON.stringify({ message, reasoning: reasoningOn, lang: I18N.lang }),
     signal: controller.signal,
   });
 
@@ -1056,7 +1051,7 @@ async function streamMessage(message, turn) {
   activeAbort = null;
 
   if (failure && !turn.text) throw new Error(failure);
-  if (!turn.text) throw new Error('AI не вернул текст ответа');
+  if (!turn.text) throw new Error(t('AI не вернул текст ответа'));
   turn.finish({ model: meta.model, provider: meta.provider, offline: meta.offline });
   return turn.text;
 }
@@ -1068,7 +1063,7 @@ async function sendOnce(message, turn) {
   const response = await fetch('/send', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ message, reasoning: reasoningOn }),
+    body: JSON.stringify({ message, reasoning: reasoningOn, lang: I18N.lang }),
     signal: controller.signal,
   });
   const data = await response.json().catch(() => ({}));
@@ -1090,7 +1085,7 @@ async function runSearchTurn(message, turn) {
   const response = await fetch('/api/auto_search_stream', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ message, force: true, reasoning: reasoningOn }),
+    body: JSON.stringify({ message, force: true, reasoning: reasoningOn, lang: I18N.lang }),
     signal: controller.signal,
   });
 
@@ -1141,7 +1136,7 @@ async function runSearchTurn(message, turn) {
   activeAbort = null;
 
   if (!turn.text) {
-    throw new Error(failure || 'Поиск завершился без ответа модели');
+    throw new Error(failure || t('Поиск завершился без ответа модели'));
   }
   turn.finish({
     model: result.model || aiStatus?.model,
@@ -1184,7 +1179,7 @@ async function sendMessage(text) {
     // ── Команды ──
     if (isCommand) {
       const turn = createAssistantTurn();
-      turn.beginIdle('Выполняю команду…');
+      turn.beginIdle(t('Выполняю команду…'));
       try {
         const resp = await fetch('/command', {
           method: 'POST',
@@ -1193,11 +1188,11 @@ async function sendMessage(text) {
         });
         const data = await resp.json().catch(() => ({}));
         turn.collapseStage();
-        if (data.error) turn.appendText('Ошибка: ' + data.error);
-        else turn.appendText(data.result || data.reply || 'Готово');
+        if (data.error) turn.appendText(t('Ошибка: ') + data.error);
+        else turn.appendText(data.result || data.reply || t('Готово'));
         turn.finish({ model: 'command' });
       } catch (error) {
-        turn.fail(error.message || 'Ошибка соединения');
+        turn.fail(error.message || t('Ошибка соединения'));
       }
       return;
     }
@@ -1217,13 +1212,13 @@ async function sendMessage(text) {
     // ── Запасной путь без окружения: поиск в интернете ──
     if (webSearchOn || autoSearchOn) {
       const turn = createAssistantTurn();
-      turn.beginSearch('Поищу в интернете');
+      turn.beginSearch(t('Поищу в интернете'));
       try {
         await runSearchTurn(finalMsg, turn);
       } catch (error) {
         if (error.name === 'AbortError') {
           turn.collapseStage();
-          turn.appendText(turn.text || '_Генерация остановлена._');
+          turn.appendText(turn.text || t('_Генерация остановлена._'));
           turn.finish({ model: aiStatus?.model });
         } else if (turn.sources.length) {
           // Источники нашлись, но модель не ответила. Отвечать «по памяти»
@@ -1231,21 +1226,21 @@ async function sendMessage(text) {
           // показываем, что произошло, и оставляем ссылки под рукой.
           turn.collapseStage();
           turn.appendText(
-            '_Источники найдены, но ответ модель не отдала._\n\n' +
-            'Откройте ссылки ниже или повторите запрос — обычно помогает ' +
-            'смена модели или повторный запуск поиска.'
+            t('_Источники найдены, но ответ модель не отдала._\n\n') +
+            t('Откройте ссылки ниже или повторите запрос — обычно помогает ') +
+            t('смена модели или повторный запуск поиска.')
           );
           turn.finish({ model: aiStatus?.model, provider: aiStatus?.provider, searched: true });
-          showNotification('Поиск нашёл ссылки, но модель не ответила', 'warn');
+          showNotification(t('Поиск нашёл ссылки, но модель не ответила'), 'warn');
         } else {
-          turn.step('⚠️', 'Поиск не удался — отвечаю без интернета');
+          turn.step('⚠️', t('Поиск не удался — отвечаю без интернета'));
           try {
             await streamMessage(finalMsg, turn);
           } catch (fallbackError) {
             try {
               await sendOnce(finalMsg, turn);
             } catch (lastError) {
-              turn.fail(`${error.message} · затем ${lastError.message}`);
+              turn.fail(t("{message} · затем {message_}", { message: error.message, message_: lastError.message }));
             }
           }
         }
@@ -1255,13 +1250,13 @@ async function sendMessage(text) {
 
     // ── Обычный чат: пузырь сначала пустой ──
     const turn = createAssistantTurn();
-    turn.beginIdle(reasoningOn ? 'Рассуждаю…' : 'Думаю…');
+    turn.beginIdle(reasoningOn ? t('Рассуждаю…') : t('Думаю…'));
     try {
       await streamMessage(finalMsg, turn);
     } catch (error) {
       if (error.name === 'AbortError') {
         turn.collapseStage();
-        turn.appendText(turn.text || '_Генерация остановлена._');
+        turn.appendText(turn.text || t('_Генерация остановлена._'));
         turn.finish({ model: aiStatus?.model });
         return;
       }
@@ -1291,7 +1286,9 @@ function paintModeChip() {
 function activateMode(mode) {
   // Повторный клик по тому же пункту — выключить режим, а не «залипнуть» в нём.
   if (inputMode && inputMode.prefix === mode.prefix) { clearInputMode(); return; }
-  inputMode = mode;
+  // подписи режимов из разметки приходят по-русски — переводим здесь
+  inputMode = { ...mode, label: t(mode.label || ''), placeholder: t(mode.placeholder || '') };
+  mode = inputMode;
   input.placeholder = mode.placeholder;
   input.value = '';
   paintModeChip();
@@ -1302,8 +1299,8 @@ function clearInputMode(quiet = false) {
   if (!inputMode) return;
   inputMode = null;
   paintModeChip();
-  if (input) input.placeholder = input.dataset.defaultPlaceholder || 'Напишите сообщение...';
-  if (!quiet) showNotification('Режим выключен — обычный чат', 'info');
+  if (input) input.placeholder = t(input.dataset.defaultPlaceholder || 'Напишите сообщение...');
+  if (!quiet) showNotification(t('Режим выключен — обычный чат'), 'info');
 }
 
 function hideWelcome() { if (welcomeScreen) welcomeScreen.style.display = 'none'; }
@@ -1362,24 +1359,24 @@ function appendMessage(role, content, meta = null) {
   const sources = Array.isArray(meta?.sources) ? meta.sources.filter((s) => s && s.url) : [];
   const sourcesHtml = sources.length ? `
     <div class="sources min">
-      <div class="sources-head"><span>🔗 Источники · ${sources.length}</span><span class="caret">▼</span></div>
+      <div class="sources-head"><span>${t("🔗 Источники ·")} ${sources.length}</span><span class="caret">▼</span></div>
       <div class="sources-list">${sources.map(sourceItemHtml).join('')}</div>
     </div>` : '';
 
   wrap.innerHTML = `
     <div class="msg-avatar">${isAI ? '✦' : '👤'}</div>
     <div class="msg-body">
-      <div class="msg-name">${isAI ? 'NovaMind' : 'Вы'}</div>
+      <div class="msg-name">${isAI ? 'NovaMind' : t('Вы')}</div>
       <div class="msg-bubble">
-        ${meta?.reasoning ? `<div class="reasoning"><div class="reasoning-head"><span>🧠</span><span>Рассуждение</span><span class="caret">▶</span></div><div class="reasoning-body"><div class="reasoning-text">${escapeHtml(meta.reasoning)}</div></div></div>` : ''}
+        ${meta?.reasoning ? `<div class="reasoning"><div class="reasoning-head"><span>🧠</span><span>${t("Рассуждение")}</span><span class="caret">▶</span></div><div class="reasoning-body"><div class="reasoning-text">${escapeHtml(meta.reasoning)}</div></div></div>` : ''}
         ${mediaHtml}
         <div class="answer">${formatted}${imageHtml}</div>
         ${sourcesHtml}
       </div>
-      ${isAI && meta?.model ? `<div class="msg-meta"><span>модель: ${escapeHtml(String(meta.model))}${meta.elapsed_ms ? ' · ' + (meta.elapsed_ms / 1000).toFixed(1) + ' c' : ''}</span></div>` : ''}
+      ${isAI && meta?.model ? `<div class="msg-meta"><span>${t("модель:")} ${escapeHtml(String(meta.model))}${meta.elapsed_ms ? ' · ' + (meta.elapsed_ms / 1000).toFixed(1) + ' c' : ''}</span></div>` : ''}
       ${isAI ? `<div class="msg-actions">
-        <button type="button" data-act="copy">📋 Копировать</button>
-        <button type="button" data-act="speak">🔊 Озвучить</button>
+        <button type="button" data-act="copy">${t("📋 Копировать")}</button>
+        <button type="button" data-act="speak">${t("🔊 Озвучить")}</button>
       </div>` : ''}
     </div>`;
 
@@ -1413,12 +1410,12 @@ function formatContent(text) {
     codeBlocks.push(
       `<div class="code-block" data-lang="${escapeHtml(lang || '')}">`
       + '<div class="code-bar">'
-      + `<span class="code-lang">${escapeHtml(lang || 'код')}</span>`
+      + `<span class="code-lang">${escapeHtml(lang || t('код'))}</span>`
       + '<span class="code-acts">'
-      + '<button type="button" data-code="run" title="ИИ запустит этот код в Linux и покажет результат">▶<span class="code-act-label"> Запустить</span></button>'
-      + '<button type="button" data-code="explain" title="Объяснить этот код">💡<span class="code-act-label"> Объясни</span></button>'
-      + '<button type="button" data-code="tests" title="Написать и запустить тесты">🧪<span class="code-act-label"> Тесты</span></button>'
-      + '<button type="button" data-code="copy" title="Скопировать код">📋</button>'
+      + `<button type="button" data-code="run" title="${t("ИИ запустит этот код в Linux и покажет результат")}">▶<span class="code-act-label"> ${t("Запустить")}</span></button>`
+      + `<button type="button" data-code="explain" title="${t("Объяснить этот код")}">💡<span class="code-act-label"> ${t("Объясни")}</span></button>`
+      + `<button type="button" data-code="tests" title="${t("Написать и запустить тесты")}">🧪<span class="code-act-label"> ${t("Тесты")}</span></button>`
+      + `<button type="button" data-code="copy" title="${t("Скопировать код")}">📋</button>`
       + '</span></div>'
       + `<pre><code>${code.replace(/\s+$/, '').replace(/^\n+/, '')}</code></pre>`
       + '</div>');
@@ -1455,7 +1452,7 @@ function formatContent(text) {
       tableHtml += '</tr>';
     });
     tableHtml += '</table>';
-    const hint = needsScroll ? '<div class="tbl-scroll-hint show">← прокрути вправо →</div>' : '';
+    const hint = needsScroll ? `<div class="tbl-scroll-hint show">${t("← прокрути вправо →")}</div>` : '';
     return `<div class="tbl-wrap">${tableHtml}</div>${hint}`;
   });
 
@@ -1475,23 +1472,23 @@ function escapeHtml(text) {
 // ========== ГОЛОС ==========
 function toggleVoice() {
   if (!('webkitSpeechRecognition' in window) && !('SpeechRecognition' in window)) {
-    showNotification('Браузер не поддерживает голосовой ввод', 'warn');
+    showNotification(t('Браузер не поддерживает голосовой ввод'), 'warn');
     return;
   }
   isRecording ? stopRecording() : startRecording();
 }
 
-function startRecording() {
+function startRecording(langOverride) {
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
   recognition = new SR();
-  recognition.lang = 'ru-RU';
+  recognition.lang = langOverride || I18N.speechLang();
   recognition.continuous = true;
   recognition.interimResults = true;
   let finalTranscript = '';
   recognition.onstart = () => {
     isRecording = true;
     voiceBtn.classList.add('recording');
-    voiceTooltip.textContent = '● Слушаю... Нажмите для остановки';
+    voiceTooltip.textContent = t('● Слушаю... Нажмите для остановки');
   };
   recognition.onresult = (e) => {
     let interimTranscript = '';
@@ -1508,13 +1505,19 @@ function startRecording() {
     if (isRecording) {
       isRecording = false;
       voiceBtn.classList.remove('recording');
-      voiceTooltip.textContent = 'Готово — проверьте текст';
+      voiceTooltip.textContent = t('Готово — проверьте текст');
       recognition = null;
     }
   };
   recognition.onerror = (event) => {
+    // Если распознавание таджикского недоступно — слушаем по-русски
+    if (event.error === 'language-not-supported' && !langOverride && I18N.lang === 'tg') {
+      stopRecording();
+      startRecording('ru-RU');
+      return;
+    }
     if (event.error !== 'no-speech' && event.error !== 'aborted') {
-      showNotification('Ошибка голосового ввода: ' + event.error, 'warn');
+      showNotification(t('Ошибка голосового ввода: ') + event.error, 'warn');
     }
     stopRecording();
   };
@@ -1522,7 +1525,7 @@ function startRecording() {
     recognition.start();
   } catch (error) {
     stopRecording();
-    showNotification('Не удалось запустить голосовой ввод', 'warn');
+    showNotification(t('Не удалось запустить голосовой ввод'), 'warn');
   }
 }
 
@@ -1530,7 +1533,7 @@ function stopRecording() {
   const activeRecognition = recognition;
   isRecording = false;
   voiceBtn.classList.remove('recording');
-  voiceTooltip.textContent = input.value.trim() ? 'Готово — проверьте текст' : 'Нажмите для записи';
+  voiceTooltip.textContent = input.value.trim() ? t('Готово — проверьте текст') : t('Нажмите для записи');
   recognition = null;
   if (activeRecognition) {
     try { activeRecognition.stop(); } catch (_) {}
@@ -1573,7 +1576,7 @@ function setNavOpen(open, save = true) {
   if (btn) {
     btn.classList.toggle('is-open', open);
     btn.setAttribute('aria-expanded', String(open));
-    btn.title = open ? 'Скрыть боковую панель' : 'Открыть боковую панель';
+    btn.title = open ? t('Скрыть боковую панель') : t('Открыть боковую панель');
     btn.setAttribute('aria-label', btn.title);
   }
   if (save) {
@@ -1756,7 +1759,7 @@ function newChat() {
 function clearChat() {
   newChat();
   fetch('/api/history/clear', { method: 'DELETE' }).catch(() => {});
-  showNotification('Чат очищен', 'info');
+  showNotification(t('Чат очищен'), 'info');
 }
 
 function shareChat() {
@@ -1789,7 +1792,7 @@ function historyLoad() {
       .filter((chat) => chat && chat.id)
       .map((chat) => ({
         ...chat,
-        title: String(chat.title || 'Новый диалог'),
+        title: String(chat.title || t('Новый диалог')),
         messages: Array.isArray(chat.messages) ? chat.messages : [],
         createdAt: Number(chat.createdAt) || Number(chat.updatedAt) || Date.now(),
         updatedAt: Number(chat.updatedAt) || Number(chat.createdAt) || Date.now(),
@@ -1851,7 +1854,7 @@ function renderChatList() {
   container.innerHTML = '';
 
   if (!chats.length) {
-    container.innerHTML = '<div class="history-empty">💬<br>Начни диалог —<br>он появится здесь</div>';
+    container.innerHTML = `<div class="history-empty">💬<br>${t("Начни диалог —")}<br>${t("он появится здесь")}</div>`;
     return;
   }
 
@@ -1873,29 +1876,29 @@ function renderChatList() {
     if (!group.length) continue;
     const heading = document.createElement('div');
     heading.className = 'history-group-label';
-    heading.textContent = label;
+    heading.textContent = t(label);
     container.appendChild(heading);
 
     for (const chat of group) {
       const item = document.createElement('div');
       item.className = 'history-item' + (chat.id === active ? ' active' : '');
-      item.title = chat.title || 'Новый диалог';
+      item.title = chat.title || t('Новый диалог');
 
       const updated = new Date(Number(chat.updatedAt) || Number(chat.createdAt) || Date.now());
-      const date = updated.toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit', year: 'numeric' });
-      const time = updated.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
+      const date = updated.toLocaleDateString(I18N.locale(), { day: '2-digit', month: '2-digit', year: 'numeric' });
+      const time = updated.toLocaleTimeString(I18N.locale(), { hour: '2-digit', minute: '2-digit' });
       const count = (chat.messages || []).length;
 
       item.innerHTML = `
         <div class="history-item-icon">💬</div>
         <div class="history-item-body">
-          <div class="history-item-title">${escapeHtml(chat.title || 'Новый диалог')}</div>
+          <div class="history-item-title">${escapeHtml(chat.title || t('Новый диалог'))}</div>
           <div class="history-item-meta">
             <span class="history-item-datetime">${date} · ${time}</span>
-            <span class="history-item-count">${count} сообщ.</span>
+            <span class="history-item-count">${count} ${t("сообщ.")}</span>
           </div>
         </div>
-        <button class="hist-del-btn" type="button" title="Удалить чат">×</button>`;
+        <button class="hist-del-btn" type="button" title="${t("Удалить чат")}">×</button>`;
 
       item.addEventListener('click', (e) => {
         if (e.target.closest('.hist-del-btn')) return;
@@ -1961,20 +1964,19 @@ function loadChatList() {
 // КОМАНДНАЯ ПАНЕЛЬ (Ctrl+K)
 // ══════════════════════════════════════════
 const CMDK_ACTIONS = [
-  { icon: '🔍', label: 'Включить/выключить поиск в интернете', hint: '', run: () => toggleWebSearch() },
-  { icon: '🧠', label: 'Включить/выключить рассуждения', hint: '', run: () => toggleReasoning() },
-  { icon: '✖️', label: 'Выключить активный режим', hint: '', run: () => clearInputMode() },
-  { icon: '✨', label: 'Спокойный режим анимаций', hint: '', run: () => toggleCalmMotion() },
-  { icon: '🧹', label: 'Очистить чат', hint: '', run: () => clearChat() },
-  { icon: '➕', label: 'Новый диалог', hint: '', run: () => newChat() },
-  { icon: '⚙️', label: 'Настройки ИИ и провайдеров', hint: '', run: () => openSettings() },
-  { icon: '🩺', label: 'Проверить поиск и модель', hint: '', run: () => checkHealth(true) },
-  { icon: '🔊', label: 'Озвучить последний ответ', hint: '', run: () => speakText(lastAnswerText()) },
-  { icon: '/help', label: 'Команда: список команд', hint: '/help', run: () => sendMessage('/help') },
-  { icon: '🌤', label: 'Режим: погода', hint: '/services weather', run: () => activateMode({ prefix: '/services weather ', label: '🌤 Погода', placeholder: 'Введите город…' }) },
-  { icon: '💱', label: 'Режим: курс валют', hint: '/services currency', run: () => activateMode({ prefix: '/services currency ', label: '💱 Курс валют', placeholder: 'USD RUB…' }) },
-  { icon: '📚', label: 'Режим: Википедия', hint: '/services wiki', run: () => activateMode({ prefix: '/services wiki ', label: '📚 Википедия', placeholder: 'Запрос…' }) },
-  { icon: '💻', label: 'Режим: код', hint: '/code', run: () => activateMode({ prefix: '/code ', label: '💻 Помощник кода', placeholder: 'Какой код создать…' }) },
+  { icon: '🔍', label: t('Включить/выключить поиск в интернете'), hint: '', run: () => toggleWebSearch() },
+  { icon: '🧠', label: t('Включить/выключить рассуждения'), hint: '', run: () => toggleReasoning() },
+  { icon: '✖️', label: t('Выключить активный режим'), hint: '', run: () => clearInputMode() },
+  { icon: '🧹', label: t('Очистить чат'), hint: '', run: () => clearChat() },
+  { icon: '➕', label: t('Новый диалог'), hint: '', run: () => newChat() },
+  { icon: '⚙️', label: t('Настройки ИИ и провайдеров'), hint: '', run: () => openSettings() },
+  { icon: '🩺', label: t('Проверить поиск и модель'), hint: '', run: () => checkHealth(true) },
+  { icon: '🔊', label: t('Озвучить последний ответ'), hint: '', run: () => speakText(lastAnswerText()) },
+  { icon: '/help', label: t('Команда: список команд'), hint: '/help', run: () => sendMessage('/help') },
+  { icon: '🌤', label: t('Режим: погода'), hint: '/services weather', run: () => activateMode({ prefix: '/services weather ', label: t('🌤 Погода'), placeholder: t('Введите город…') }) },
+  { icon: '💱', label: t('Режим: курс валют'), hint: '/services currency', run: () => activateMode({ prefix: '/services currency ', label: t('💱 Курс валют'), placeholder: 'USD RUB…' }) },
+  { icon: '📚', label: t('Режим: Википедия'), hint: '/services wiki', run: () => activateMode({ prefix: '/services wiki ', label: t('📚 Википедия'), placeholder: t('Запрос…') }) },
+  { icon: '💻', label: t('Режим: код'), hint: '/code', run: () => activateMode({ prefix: '/code ', label: t('💻 Помощник кода'), placeholder: t('Какой код создать…') }) },
 ];
 
 let cmdkIndex = 0;
@@ -2009,7 +2011,7 @@ function renderCmdk() {
   const list = document.getElementById('cmdkList');
   if (!list) return;
   if (!cmdkFiltered.length) {
-    list.innerHTML = '<div class="cmdk-empty">Ничего не найдено</div>';
+    list.innerHTML = `<div class="cmdk-empty">${t("Ничего не найдено")}</div>`;
     return;
   }
   list.innerHTML = cmdkFiltered.map((action, index) => `
@@ -2071,13 +2073,13 @@ function paintStatus() {
   const providerLabel = document.getElementById('display-provider');
   if (!aiStatus) {
     if (dot) dot.className = 'lg-dot warn';
-    setShortText(text, 'AI Ассистент', 26);
+    setShortText(text, t('AI Ассистент'), 26);
     return;
   }
-  const model = aiStatus.model || 'модель';
+  const model = aiStatus.model || t('модель');
   if (dot) dot.className = 'lg-dot ' + (aiStatus.offline ? 'warn' : 'ok') + ' pulse';
-  setShortText(text, aiStatus.offline ? `Офлайн-модель · ${model}` : model, 26);
-  setShortText(providerLabel, `${aiStatus.provider_name || aiStatus.provider} · ${model}`, 22);
+  setShortText(text, aiStatus.offline ? t("Офлайн-модель · {model}", { model: model }) : model, 26);
+  setShortText(providerLabel, `${t(aiStatus.provider_name || aiStatus.provider)} · ${model}`, 22);
 }
 
 async function checkHealth(notify = false) {
@@ -2089,14 +2091,14 @@ async function checkHealth(notify = false) {
     if (dot) dot.className = 'lg-dot ' + (data.ok ? 'ok' : 'err');
     if (notify) {
       showNotification(data.ok
-        ? `Поиск работает: ${data.alive.join(', ')}`
-        : 'Поисковые бэкенды недоступны — проверьте интернет или SEARCH_BACKENDS в .env',
+        ? t("Поиск работает: {v0}", { v0: data.alive.join(', ') })
+        : t('Поисковые бэкенды недоступны — проверьте интернет или SEARCH_BACKENDS в .env'),
         data.ok ? 'ok' : 'warn');
     }
     return data;
   } catch (error) {
     if (dot) dot.className = 'lg-dot err';
-    if (notify) showNotification('Не удалось проверить поиск: ' + error.message, 'warn');
+    if (notify) showNotification(t('Не удалось проверить поиск: ') + error.message, 'warn');
     return null;
   }
 }
@@ -2115,7 +2117,7 @@ function renderComposioCards(cards) {
   const grid = cards.map((card) => {
     const icon = COMPOSIO_ICONS[card.slug] || '🔗';
     const statusColor = card.connected ? 'var(--ok)' : 'var(--text-3)';
-    const statusText = card.connected ? '✅ Подключено' : 'Нажми — подключить';
+    const statusText = card.connected ? t('✅ Подключено') : t('Нажми — подключить');
     return `
       <div onclick="composioAuthFromChat('${card.slug}')" class="suggestion-card" style="text-align:center;cursor:pointer">
         <div class="card-icon">${icon}</div>
@@ -2125,10 +2127,10 @@ function renderComposioCards(cards) {
   }).join('');
 
   return `
-    <div style="font-weight:700;margin-bottom:10px">🧩 Интеграции Composio — нажми для подключения:</div>
+    <div style="font-weight:700;margin-bottom:10px">${t("🧩 Интеграции Composio — нажми для подключения:")}</div>
     <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(120px,1fr));gap:8px">${grid}</div>
     <div style="margin-top:10px;font-size:11px;color:var(--text-4)">
-      💡 После подключения используй <code>/composio accounts</code> для проверки
+      ${t("💡 После подключения используй")} <code>/composio accounts</code> ${t("для проверки")}
     </div>`;
 }
 
@@ -2137,14 +2139,14 @@ function renderComposioAuth(toolkit, url) {
   return `
     <div style="padding:4px 2px">
       <div style="font-size:26px;margin-bottom:8px">${icon}</div>
-      <div style="font-size:14px;font-weight:700;margin-bottom:6px">Подключить ${escapeHtml(String(toolkit).toUpperCase())}</div>
+      <div style="font-size:14px;font-weight:700;margin-bottom:6px">${t("Подключить")} ${escapeHtml(String(toolkit).toUpperCase())}</div>
       <div style="font-size:12px;color:var(--text-2);margin-bottom:14px">
-        Нажми кнопку ниже — откроется страница авторизации.<br>
-        После входа вернись и введи <code>/composio accounts</code>
+        ${t("Нажми кнопку ниже — откроется страница авторизации.")}<br>
+        ${t("После входа вернись и введи")} <code>/composio accounts</code>
       </div>
-      <a class="media-download" href="${escapeHtml(url)}" target="_blank" rel="noopener">🔐 Войти →</a>
+      <a class="media-download" href="${escapeHtml(url)}" target="_blank" rel="noopener">${t("🔐 Войти →")}</a>
       <div style="margin-top:10px;font-size:11px;color:var(--text-4)">
-        После: <code>/composio tools ${escapeHtml(toolkit)}</code>
+        ${t("После:")} <code>/composio tools ${escapeHtml(toolkit)}</code>
       </div>
     </div>`;
 }
@@ -2172,7 +2174,7 @@ document.addEventListener('keydown', (event) => {
   }
   if (mod && key === '/') {
     event.preventDefault();
-    showNotification('Ctrl+K — команды · Enter — отправить · Shift+Enter — новая строка · Esc — закрыть', 'info');
+    showNotification(t('Ctrl+K — команды · Enter — отправить · Shift+Enter — новая строка · Esc — закрыть'), 'info');
     return;
   }
   if (mod && key.toLowerCase() === 'b') {
@@ -2200,9 +2202,9 @@ document.addEventListener('click', (event) => {
   renderChatList();
 
   window.addEventListener('online', () => {
-    showNotification('Соединение восстановлено', 'ok');
+    showNotification(t('Соединение восстановлено'), 'ok');
     refreshAiStatus();
     checkHealth(false);
   });
-  window.addEventListener('offline', () => showNotification('Нет соединения с интернетом', 'warn'));
+  window.addEventListener('offline', () => showNotification(t('Нет соединения с интернетом'), 'warn'));
 })();

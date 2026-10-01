@@ -18,6 +18,7 @@ from ai_providers import chat_completion, chat_stream, resolve_target
 from groq_rotation import get_groq_key, mark_groq_key_exhausted, GROQ_KEYS
 import config
 import media_generation as mg
+from i18n import with_language
 
 # In-memory compatibility cache. Persistent chat history is stored in the database.
 contents = []
@@ -177,7 +178,7 @@ def send():
     # (Groq / Gemini / OpenRouter / локальный llama-server / офлайн-модель).
     reply, meta = chat_completion(
         history + [{"role": "user", "content": message}],
-        system=config.system_prompt,
+        system=with_language(config.system_prompt),
         temperature=0.7,
         timeout=120,
     )
@@ -185,7 +186,7 @@ def send():
         # Второй шанс: тот же запрос без стрима и с большим таймаутом.
         reply, meta = chat_completion(
             history + [{"role": "user", "content": message}],
-            system=config.system_prompt,
+            system=with_language(config.system_prompt),
             temperature=0.7,
             timeout=180,
         )
@@ -194,8 +195,7 @@ def send():
         # Пользователь получает содержательный ответ, а не
         # «Не удалось получить ответ модели».
         import local_llm
-        payload_messages = ([{"role": "system", "content": config.system_prompt}]
-                            if config.system_prompt else []) + history + [
+        payload_messages = [{"role": "system", "content": with_language(config.system_prompt)}] + history + [
                                 {"role": "user", "content": message}]
         reply = local_llm.complete(payload_messages)
         meta = {"provider": "local_demo", "offline": True, "upstream_error": meta}
@@ -255,7 +255,7 @@ def send_stream():
                 history_for_prompt + [{"role": "user", "content": message}],
                 provider=provider,
                 model=model,
-                system=config.system_prompt,
+                system=with_language(config.system_prompt),
                 temperature=0.7,
                 max_tokens=provider_cfg.get("max_tokens", 8192),
                 timeout=120,
@@ -277,7 +277,7 @@ def send_stream():
                 # встроенная офлайн-модель. Пустого пузыря не бывает.
                 retry, _retry_meta = chat_completion(
                     history_for_prompt + [{"role": "user", "content": message}],
-                    system=config.system_prompt,
+                    system=with_language(config.system_prompt),
                     temperature=0.7,
                     timeout=180,
                 )
@@ -285,8 +285,7 @@ def send_stream():
                     full_reply = retry
                 else:
                     import local_llm
-                    payload_messages = ([{"role": "system", "content": config.system_prompt}]
-                                        if config.system_prompt else []) + history_for_prompt + [
+                    payload_messages = [{"role": "system", "content": with_language(config.system_prompt)}] + history_for_prompt + [
                                             {"role": "user", "content": message}]
                     full_reply = local_llm.complete(payload_messages)
                 yield emit({"token": full_reply})

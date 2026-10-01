@@ -1,11 +1,12 @@
 <!DOCTYPE html>
-<html lang="ru">
+<html lang="tg">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=yes">
     <title>Khirad — Вход</title>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
     <link rel="stylesheet" href="/static/liquid-glass.css">
+    <script src="/static/i18n.js"></script>
     <style>
         /* ═══ ОКНО ВХОДА · LIQUID GLASS ═══ */
         body {
@@ -20,11 +21,6 @@
                 radial-gradient(45vmax 45vmax at 15% 20%, color-mix(in srgb, var(--accent) 40%, transparent), transparent 65%),
                 radial-gradient(40vmax 40vmax at 85% 25%, color-mix(in srgb, var(--accent-2) 34%, transparent), transparent 62%),
                 radial-gradient(46vmax 46vmax at 70% 85%, color-mix(in srgb, var(--accent-3) 30%, transparent), transparent 64%);
-            animation: mesh-drift 34s var(--ease) infinite alternate;
-        }
-        @keyframes mesh-drift {
-            from { transform: translate3d(0,0,0) scale(1.02); }
-            to   { transform: translate3d(-2%, 3%, 0) scale(1.1); }
         }
 
         .auth-modal { width: 100%; max-width: 430px; }
@@ -45,20 +41,6 @@
             from { opacity: 0; transform: translateY(26px) scale(.96); }
             to   { opacity: 1; transform: none; }
         }
-        /* Бегущий блик по стеклу карточки */
-        .auth-modal__container::after {
-            content: "";
-            position: absolute; top: -60%; left: -70%;
-            width: 55%; height: 220%;
-            background: linear-gradient(100deg, transparent, rgba(255,255,255,.14), transparent);
-            transform: skewX(-18deg);
-            animation: glass-sheen 7s var(--ease) infinite;
-            pointer-events: none;
-        }
-        @keyframes glass-sheen {
-            0%, 62% { left: -70%; }
-            100%    { left: 140%; }
-        }
 
         .auth-form { display: none; position: relative; z-index: 1; }
         .auth-form.active { display: block; animation: lg-fade-in .45s var(--ease-out) both; }
@@ -76,11 +58,6 @@
             background: radial-gradient(circle at 32% 28%, rgba(255,255,255,.85), transparent 46%),
                         linear-gradient(140deg, var(--accent), var(--accent-2));
             box-shadow: 0 10px 26px -10px var(--accent-glow), inset 0 1px 0 rgba(255,255,255,.5);
-            animation: orb-breathe 5s var(--ease) infinite;
-        }
-        @keyframes orb-breathe {
-            0%, 100% { transform: scale(1); }
-            50%      { transform: scale(1.05); }
         }
         .auth-form__header h2 { font-size: 21px; letter-spacing: -.03em; margin-bottom: 6px; }
         .auth-form__header p { font-size: 12.5px; color: var(--text-3); line-height: 1.6; }
@@ -210,6 +187,7 @@
 
     <div class="auth-modal">
         <div class="auth-modal__container">
+            <div class="auth-lang" data-lang-picker></div>
 
             <!-- ═══════════ ВХОД ═══════════ -->
             <div class="auth-form active" id="loginForm">
@@ -361,7 +339,7 @@
 
                 window.location.href = '/chat';
             } catch (e) {
-                document.getElementById('loginError').textContent = 'Ошибка входа через Google';
+                document.getElementById('loginError').textContent = t('Ошибка входа через Google');
             }
         }
 
@@ -393,7 +371,7 @@
             const errorEl = document.getElementById('loginError');
 
             if (!nick || !code) {
-                errorEl.textContent = 'Заполните все поля';
+                errorEl.textContent = t('Заполните все поля');
                 return;
             }
 
@@ -421,10 +399,10 @@
             const agree = document.getElementById('regAgree').checked;
             const errorEl = document.getElementById('regError');
 
-            if (!nick || !code) { errorEl.textContent = 'Заполните все поля'; return; }
-            if (code.length < 3) { errorEl.textContent = 'Код должен быть не менее 3 символов'; return; }
-            if (code !== confirm) { errorEl.textContent = 'Коды не совпадают'; return; }
-            if (!agree) { errorEl.textContent = 'Примите условия использования'; return; }
+            if (!nick || !code) { errorEl.textContent = t('Заполните все поля'); return; }
+            if (code.length < 3) { errorEl.textContent = t('Код должен быть не менее 3 символов'); return; }
+            if (code !== confirm) { errorEl.textContent = t('Коды не совпадают'); return; }
+            if (!agree) { errorEl.textContent = t('Примите условия использования'); return; }
 
             localStorage.setItem('nova_user_nick', nick);
             localStorage.setItem('nova_user_code', code);

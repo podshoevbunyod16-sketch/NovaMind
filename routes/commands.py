@@ -12,6 +12,7 @@ from database import (get_or_create_session_chat, get_chat_history, add_message,
                       create_chat)
 from ai_providers import groq_request_with_rotation
 from groq_rotation import get_groq_key
+from i18n import with_language
 from routes.search import search_web
 from config import PROVIDERS, plugins, save_custom_commands
 import config
@@ -104,7 +105,7 @@ def handle_command():
             provider = PROVIDERS[config.current_provider]
             payload = {
                 "model": config.current_model,
-                "messages": [{"role": "system", "content": config.system_prompt}] + history +
+                "messages": [{"role": "system", "content": with_language(config.system_prompt)}] + history +
                           [{"role": "user", "content": rendered_prompt}],
                 "temperature": 0.7,
                 "max_tokens": 3000,

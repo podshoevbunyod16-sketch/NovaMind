@@ -22,8 +22,15 @@ import threading
 import time
 
 import media_generation as mg
+from i18n import tr, variants
 
 KINDS = ("image", "audio", "video")
+def is_attempt(message):
+    """Строка «Пробую <модель>» на любом языке интерфейса (для краткого статуса в чате)."""
+    prefixes = tuple(text.split("{")[0] for text in variants("Пробую {name} ({provider})"))
+    return str(message or "").startswith(prefixes)
+
+
 KIND_LABELS = {"image": "изображение", "audio": "аудио", "video": "видео"}
 
 # Какого провайдера пробовать первым для каждого типа медиа.
@@ -263,7 +270,8 @@ def generate(kind: str, prompt: str, options=None, wanted_model: str = "", on_st
     errors = []
     for model in models[:max(1, MAX_ATTEMPTS)]:
         if on_status:
-            on_status(f"Пробую {model.get('name')} ({model.get('provider_name')})")
+            on_status(tr("Пробую {name} ({provider})", name=model.get('name'),
+                         provider=model.get('provider_name')))
         # Цену уже проверили при отборе кандидатов — подтверждаем за пользователя
         # только то, что разрешено политикой выше.
         result, error = mg.generate_media(

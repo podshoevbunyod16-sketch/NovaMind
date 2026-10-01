@@ -39,6 +39,7 @@ import re
 import time
 
 import media_agent
+from i18n import tr, with_language
 from ai_providers import chat_completion, chat_stream, resolve_target
 from routes.terminal import (run_agent as run_terminal, safe_path, relative_to_workspace,
                              ensure_workspace, nova_search, nova_read, _save_research,
@@ -128,8 +129,9 @@ Linux-окружение сейчас выключено: команды run/rea
 в ответе сам и предупреди, что код не запускался."""
 
 
-def build_system_prompt(use_tools, search_mode=False, date=None):
-    """Системный промпт агента: веб и медиа — всегда, Linux — если включён."""
+def build_system_prompt(use_tools, search_mode=False, date=None, lang=None):
+    """Системный промпт агента: веб и медиа — всегда, Linux — если включён.
+    В конце — правило языка ответа (язык интерфейса пользователя)."""
     prompt = AGENT_SYSTEM_PROMPT.format(
         persona=_persona(), date=date or time.strftime("%Y-%m-%d"),
         linux_line=LINUX_LINE if use_tools else "",
@@ -138,7 +140,7 @@ def build_system_prompt(use_tools, search_mode=False, date=None):
     )
     if search_mode:
         prompt += SEARCH_ADDON
-    return prompt
+    return with_language(prompt, lang)
 
 
 SEARCH_ADDON = """
@@ -353,12 +355,12 @@ def agent_status():
     tools = tools_enabled()
     hint = ""
     if not enabled:
-        hint = "ИИ-агент выключен (AGENT_ENABLED=0) — чат отвечает без инструментов"
+        hint = tr("ИИ-агент выключен (AGENT_ENABLED=0) — чат отвечает без инструментов")
     elif not user:
-        hint = "Войдите в аккаунт, чтобы ИИ мог искать, генерировать медиа и работать в Linux"
+        hint = tr("Войдите в аккаунт, чтобы ИИ мог искать, генерировать медиа и работать в Linux")
     elif os.getenv("TERMINAL_ENABLED", "0") != "1":
-        hint = ("ИИ ищет в интернете и генерирует медиа. Для Linux-окружения добавьте "
-                "TERMINAL_ENABLED=1 в .env и перезапустите сервер")
+        hint = tr("ИИ ищет в интернете и генерирует медиа. Для Linux-окружения добавьте "
+                  "TERMINAL_ENABLED=1 в .env и перезапустите сервер")
     return jsonify({
         "enabled": enabled,
         "tools": tools,
@@ -378,11 +380,11 @@ def agent_stream():
     data = request.get_json(silent=True) or {}
     goal = (data.get("message") or "").strip()
     if not goal:
-        return jsonify({"error": "Пустое сообщение"}), 400
+        return jsonify({"error": tr("Пустое сообщение")}), 400
     if not is_enabled():
-        return jsonify({"error": "ИИ-агент выключен (AGENT_ENABLED=0)"}), 403
+        return jsonify({"error": tr("ИИ-агент выключен (AGENT_ENABLED=0)")}), 403
     if not signed_in():
-        return jsonify({"error": "Войдите в аккаунт, чтобы ИИ мог работать с инструментами"}), 403
+        return jsonify({"error": tr("Войдите в аккаунт, чтобы ИИ мог работать с инструментами")}), 403
 
     search_mode = bool(data.get("search"))
     reasoning = bool(data.get("reasoning"))
@@ -424,7 +426,7 @@ def agent_stream():
                 allow = step_no < MAX_STEPS and not out_of_time
                 if not allow and step_no > 0:
                     note = "Время вышло" if out_of_time else "Шаги закончились"
-                    yield _ndjson({"type": "step", "icon": "⏱", "text": f"{note} — собираю ответ"})
+                    yield _ndjson({"type": "step", "icon": "⏱", "text": tr("{note} — собираю ответ", note=tr(note))})
                     messages.append({"role": "user", "content":
                                      f"{note}. Больше никаких действий: напиши финальный ответ "
                                      f"пользователю обычным текстом по тому, что удалось сделать."})
@@ -442,7 +444,7 @@ def agent_stream():
                     state["answer"] = yield from _final_answer(messages, provider, model, state)
                     break
                 if outcome["kind"] == "error":
-                    yield _ndjson({"type": "error", "text": str(outcome["error"] or "модель не ответила")})
+                    yield _ndjson({"type": "error", "text": str(outcome["error"] or tr("модель не ответила"))})
                     break
                 if outcome["kind"] == "bad_json":
                     messages.append({"role": "assistant", "content": clip(outcome["text"], 1500)})
@@ -455,7 +457,7 @@ def agent_stream():
                 kind = str(action.get("action"))
                 key = _action_key(action, kind)
                 if kind not in ("plan", "task_done") and key in done_actions:
-                    yield _ndjson({"type": "step", "icon": "↩️", "text": "Это уже сделано — не повторяю"})
+                    yield _ndjson({"type": "step", "icon": "↩️", "text": tr("Это уже сделано — не повторяю")})
                     messages.append({"role": "assistant",
                                      "content": json.dumps(action, ensure_ascii=False)[:1000]})
                     messages.append({"role": "user", "content":
@@ -465,9 +467,9 @@ def agent_stream():
                 done_actions.add(key)
                 if not state["announced"] and not search_mode and kind not in MEDIA_ACTIONS:
                     state["announced"] = True
-                    title = "Работаю в Linux" if use_tools and kind in LINUX_ACTIONS else "Работаю над задачей"
+                    title = tr("Работаю в Linux") if use_tools and kind in LINUX_ACTIONS else tr("Работаю над задачей")
                     yield _ndjson({"type": "stage", "scene": "agent", "title": title,
-                                   "text": "Иду к цели по шагам…"})
+                                   "text": tr("Иду к цели по шагам…")})
                 state["steps"] += 1
                 thought = str(action.get("thought") or "").strip()
                 if thought:
@@ -485,7 +487,7 @@ def agent_stream():
             yield _ndjson({"type": "error", "text": f"{exc.__class__.__name__}: {exc}"})
 
         if not state["answer"]:
-            state["answer"] = "Не удалось получить ответ модели. Проверьте модель в настройках и повторите."
+            state["answer"] = tr("Не удалось получить ответ модели. Проверьте модель в настройках и повторите.")
             for chunk in _chunks(state["answer"]):
                 yield _ndjson({"type": "token", "token": chunk})
 
@@ -680,15 +682,15 @@ def _auto_search(goal, state, messages):
 
     query = _search_query(goal)
     state["searched"] = True
-    yield _ndjson({"type": "stage", "scene": "search", "title": "Поищу в интернете",
-                   "text": "Ищу через Linux-окружение…" if state.get("use_tools", True) else "Ищу источники…"})
+    yield _ndjson({"type": "stage", "scene": "search", "title": tr("Поищу в интернете"),
+                   "text": tr("Ищу через Linux-окружение…") if state.get("use_tools", True) else tr("Ищу источники…")})
     results, meta = nova_search(query, limit=8)
     numbered = _add_sources(state, results)
     listing = _format_numbered(query, numbered, meta.get("backend"), meta.get("elapsed_ms", 0))
     action = {"action": "search", "query": query}
 
     if not numbered:
-        yield _ndjson({"type": "step", "icon": "⚠️", "text": "Поиск ничего не дал — попробую по-другому"})
+        yield _ndjson({"type": "step", "icon": "⚠️", "text": tr("Поиск ничего не дал — попробую по-другому")})
         messages.append({"role": "assistant", "content": json.dumps(action, ensure_ascii=False)})
         messages.append({"role": "user", "content":
                          "Результат действия: поиск ничего не нашёл. Попробуй другой запрос "
@@ -696,7 +698,8 @@ def _auto_search(goal, state, messages):
         return
 
     yield _ndjson({"type": "step", "icon": "🔎",
-                   "text": f"Нашёл {len(numbered)} источников ({meta.get('backend') or 'поиск'})"})
+                   "text": tr("Нашёл {count} источников ({backend})", count=len(numbered),
+                             backend=meta.get('backend') or tr('поиск'))})
     yield _ndjson({"type": "tool", "name": "search", "command": f"nova search {query}",
                    "code": 0, "output": listing, "results": results})
     yield _ndjson({"type": "sources", "sources": state["sources"]})
@@ -704,7 +707,7 @@ def _auto_search(goal, state, messages):
     pages = []
     top = [item for _, item in numbered[:max(0, SEARCH_PAGES)]]
     if top:
-        yield _ndjson({"type": "step", "icon": "📄", "text": f"Читаю {len(top)} страницы…"})
+        yield _ndjson({"type": "step", "icon": "📄", "text": tr("Читаю {count} страницы…", count=len(top))})
         pages = _read_pages(top)
         for page in pages:
             yield _ndjson({"type": "tool", "name": "open", "command": f"nova read {page['url']}",
@@ -723,12 +726,12 @@ def _auto_search(goal, state, messages):
         try:
             stamp = time.strftime("%Y-%m-%d %H:%M")
             saved = _save_research(query, f"# {query}\n\n_поиск {stamp}_\n\n{context}\n", "search")
-            yield _ndjson({"type": "step", "icon": "💾", "text": f"Сохранил выдержки: {saved}"})
+            yield _ndjson({"type": "step", "icon": "💾", "text": tr("Сохранил выдержки: {saved}", saved=saved)})
         except OSError as exc:
             print(f"[agent] не удалось сохранить заметку: {exc}")
 
-    yield _ndjson({"type": "stage", "scene": "write", "title": "Разбираю найденное",
-                   "text": "Решаю, хватает ли данных"})
+    yield _ndjson({"type": "stage", "scene": "write", "title": tr("Разбираю найденное"),
+                   "text": tr("Решаю, хватает ли данных")})
     messages.append({"role": "assistant", "content": json.dumps(action, ensure_ascii=False)})
     messages.append({"role": "user", "content":
                      f"Результат действия (поиск и чтение страниц):\n{clip(context, 9000)}\n\n"
@@ -766,7 +769,7 @@ def _perform(action, kind, use_tools, state, goal=""):
         state["task_id"] = task["id"]
         database.append_task_step(task["id"], "Задача заведена", status="doing", log=goal[:1000])
         yield _ndjson({"type": "task", "task": task})
-        yield _ndjson({"type": "step", "icon": "📋", "text": f"Задача: {task['title']}"})
+        yield _ndjson({"type": "step", "icon": "📋", "text": tr("Задача: {title}", title=task['title'])})
         return f"Задача создана, id={task['id']}. Дальше выполняй её по шагам."
 
     if kind == "task_done":
@@ -794,12 +797,13 @@ def _perform(action, kind, use_tools, state, goal=""):
         numbered = _add_sources(state, results)
         text = _format_numbered(query, numbered, meta.get("backend"), meta.get("elapsed_ms", 0))
         if not numbered:
-            yield _ndjson({"type": "step", "icon": "⚠️", "text": f"Поиск «{query}» ничего не дал"})
+            yield _ndjson({"type": "step", "icon": "⚠️", "text": tr("Поиск «{query}» ничего не дал", query=query)})
             text += "\nНичего не нашлось. Попробуй другой запрос."
         else:
             state["searched"] = True
             yield _ndjson({"type": "step", "icon": "🔎",
-                           "text": f"Нашёл {len(numbered)} по запросу «{query}» ({meta.get('backend')})"})
+                           "text": tr("Нашёл {count} по запросу «{query}» ({backend})", count=len(numbered),
+                                     query=query, backend=meta.get('backend'))})
             yield _ndjson({"type": "tool", "name": "search", "command": f"nova search {query}",
                            "code": 0, "output": text, "results": results})
             yield _ndjson({"type": "sources", "sources": state["sources"]})
@@ -816,13 +820,13 @@ def _perform(action, kind, use_tools, state, goal=""):
         if state["task_id"]:
             database.append_task_step(state["task_id"], f"Прочитал {url}", status="done",
                                       log=(text or "")[:1200])
-        yield _ndjson({"type": "step", "icon": "📰", "text": f"Прочитал {url} ({elapsed} мс)"})
+        yield _ndjson({"type": "step", "icon": "📰", "text": tr("Прочитал {url} ({ms} мс)", url=url, ms=elapsed)})
         yield _ndjson({"type": "tool", "name": "open", "command": url, "code": 0 if text else 1,
-                       "output": (text or "страница пустая")[:1500]})
+                       "output": (text or tr("страница пустая"))[:1500]})
         return text or "Страница не прочиталась."
 
     if kind == "ls":
-        command, label = "ls -la", "Смотрю файлы"
+        command, label = "ls -la", tr("Смотрю файлы")
     elif kind == "read":
         try:
             path = safe_path(action.get("path", ""))
@@ -830,11 +834,11 @@ def _perform(action, kind, use_tools, state, goal=""):
             return str(exc)
         if not os.path.isfile(path):
             yield _ndjson({"type": "tool", "name": "read", "command": f"cat {action.get('path', '')}",
-                           "code": 1, "output": "Файла нет"})
+                           "code": 1, "output": tr("Файла нет")})
             return f"Файла {action.get('path', '')} нет. Посмотри список: {{\"action\":\"ls\"}}"
         with open(path, "r", encoding="utf-8", errors="replace") as handle:
             content = handle.read(MAX_OBSERVATION)
-        yield _ndjson({"type": "step", "icon": "📖", "text": f"Читаю {relative_to_workspace(path)}"})
+        yield _ndjson({"type": "step", "icon": "📖", "text": tr("Читаю {path}", path=relative_to_workspace(path))})
         yield _ndjson({"type": "tool", "name": "read", "command": f"cat {relative_to_workspace(path)}",
                        "code": 0, "output": clip(content, 600)})
         return content or "(файл пустой)"
@@ -854,7 +858,7 @@ def _perform(action, kind, use_tools, state, goal=""):
         if state["task_id"]:
             database.append_task_step(state["task_id"], f"Записал {relative}",
                                       status="doing", log=clip(content, 800))
-        yield _ndjson({"type": "step", "icon": "✍️", "text": f"Записал {relative}"})
+        yield _ndjson({"type": "step", "icon": "✍️", "text": tr("Записал {path}", path=relative)})
         yield _ndjson({"type": "tool", "name": "write", "command": f"write {relative}",
                        "code": 0, "output": clip(content, 600)})
         return f"Файл {relative} записан ({len(content)} символов)."
@@ -873,7 +877,7 @@ def _perform(action, kind, use_tools, state, goal=""):
             log=clip(output, 1200) or f"код {result['code']}",
         )
     status = "❌" if result["code"] else "✅"
-    yield _ndjson({"type": "step", "icon": status, "text": f"{label} — код {result['code']}"})
+    yield _ndjson({"type": "step", "icon": status, "text": tr("{label} — код {code}", label=label, code=result['code'])})
     yield _ndjson({"type": "tool", "name": "run", "command": command, "code": result["code"],
                    "output": clip(output, 1500)})
     if _is_search_command(command):
@@ -905,7 +909,7 @@ def _final_answer(messages, provider, model, state):
     """Ответ по собранному, когда модель застряла на действиях. Генератор токенов → текст."""
     raw, _meta = chat_completion(
         messages + [{"role": "user", "content": FINAL_PROMPT}],
-        provider=provider, model=model, system=f"{_persona()}\nОтвечай по-русски, по делу. Никакого JSON.",
+        provider=provider, model=model, system=with_language(f"{_persona()}\nОтвечай по делу. Никакого JSON."),
         temperature=0.3, timeout=STREAM_TIMEOUT,
     )
     text = strip_think(str(raw or ""))
@@ -916,10 +920,10 @@ def _final_answer(messages, provider, model, state):
         if state["sources"]:
             links = "\n".join(f"{index}. [{item['title']}]({item['url']})"
                               for index, item in enumerate(state["sources"][:6], 1))
-            text = ("Модель не смогла сформулировать итог, но вот что удалось найти:\n\n"
-                    f"{links}\n\nПопробуйте спросить ещё раз или сменить модель в настройках.")
+            text = tr("Модель не смогла сформулировать итог, но вот что удалось найти:\n\n"
+                      "{links}\n\nПопробуйте спросить ещё раз или сменить модель в настройках.", links=links)
         else:
-            text = "Не удалось собрать ответ. Попробуйте ещё раз или смените модель в настройках."
+            text = tr("Не удалось собрать ответ. Попробуйте ещё раз или смените модель в настройках.")
     for chunk in _chunks(text):
         yield _ndjson({"type": "token", "token": chunk})
     return text
@@ -949,7 +953,7 @@ def _perform_media(action, kind, state):
     """
     if kind == "media_models":
         wanted = str(action.get("type") or "all").strip().lower()
-        yield _ndjson({"type": "step", "icon": "🧩", "text": "Смотрю, какие модели генерации доступны"})
+        yield _ndjson({"type": "step", "icon": "🧩", "text": tr("Смотрю, какие модели генерации доступны")})
         return media_agent.describe(wanted if wanted in media_agent.KINDS else "all")
 
     prompt = str(action.get("prompt") or action.get("text") or "").strip()
@@ -958,7 +962,7 @@ def _perform_media(action, kind, state):
         return f'Пустое описание. Повтори с {{"action":"{kind}","{field}":"..."}}.'
 
     icon, title = MEDIA_STAGE[kind]
-    yield _ndjson({"type": "stage", "scene": "media", "title": title,
+    yield _ndjson({"type": "stage", "scene": "media", "title": tr(title),
                    "text": clip(prompt, 140)})
     events = []
     result, model, errors = media_agent.generate(
@@ -966,13 +970,13 @@ def _perform_media(action, kind, state):
         wanted_model=str(action.get("model") or ""), on_status=events.append,
     )
     # На телефоне достаточно «какой моделью пробовал» — служебные строки провайдера прячем
-    attempts = [message for message in events if message.startswith("Пробую")] or events[-1:]
+    attempts = [message for message in events if media_agent.is_attempt(message)] or events[-1:]
     for message in attempts[-3:]:
         yield _ndjson({"type": "step", "icon": icon, "text": clip(message, 160)})
 
     if not result:
-        reason = "; ".join(errors) or "неизвестная ошибка"
-        yield _ndjson({"type": "step", "icon": "⚠️", "text": clip(f"Не получилось: {reason}", 220)})
+        reason = "; ".join(errors) or tr("неизвестная ошибка")
+        yield _ndjson({"type": "step", "icon": "⚠️", "text": clip(tr("Не получилось: {reason}", reason=reason), 220)})
         return (f"Генерация ({media_agent.KIND_LABELS[kind]}) не удалась: {clip(reason, 1200)}\n"
                 f"Объясни пользователю коротко и по-человечески, что случилось и что подключить.")
 
