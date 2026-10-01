@@ -52,6 +52,11 @@ AGENT_SYSTEM_PROMPT = """Ты — агент NovaMind внутри «мален�
   {"action":"task_done","note":"что сделано"}               задача выполнена
   {"action":"answer","text":"ответ пользователю"}            закончить и ответить
 
+GitHub и git: можешь клонировать репозитории, читать и редактировать файлы,
+запускать тесты, делать git add/commit и выполнять git push только если
+пользователь явно попросил опубликовать изменения. Не выдумывай URL, ветку
+или результат push — сначала проверь git remote, status и текущую ветку.
+
 Правила:
 1. Ты ДОЛЖЕН отвечать ровно одним JSON-объектом и ничего больше — без слов вокруг.
 2. Сначала разберись в задаче (run/read/ls), потом действуй, потом answer.
@@ -213,6 +218,7 @@ def agent_status():
     return jsonify({
         "enabled": enabled,
         "tools": tools_enabled(),
+        "available": bool(enabled and tools_enabled()),
         "max_steps": MAX_STEPS,
         "user": signed_in(),
         "admin": bool(session.get("admin_logged_in")),
