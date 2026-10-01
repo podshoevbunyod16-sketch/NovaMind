@@ -465,4 +465,4 @@ def test_agent_nova_search_via_run_collects_sources(admin_client, monkeypatch, s
     ])
     events = _ndjson(admin_client.post("/api/agent/stream", json={"message": "страны"}))
     assert any(event["type"] == "sources" for event in events)
->>>>>>> d42dfa25f0f2c0d68742da19cdd015831aee836a
+
