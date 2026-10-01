@@ -277,6 +277,9 @@ def agent_stream():
 
     provider, model, _ = resolve_target()
     use_tools = tools_enabled()
+    prior = session.get("agent_history", [])
+    if not isinstance(prior, list):
+        prior = []
     if use_tools:
         bootstrap_default_tools()
         ensure_workspace()
@@ -290,7 +293,35 @@ def agent_stream():
         # 1. Один первый запрос: простой вопрос получает обычный ответ без лишнего plan/stage.
         # Если модель вернула action=plan, показываем его как план и продолжаем цикл.
         history = [{"role": "system", "content": AGENT_SYSTEM_PROMPT + "\n\nAVAILABLE TOOL REGISTRY:\n" + json.dumps(tool_schemas(), ensure_ascii=False) if use_tools else AGENT_SYSTEM_PROMPT}]
+        for item in prior[-8:]:
+            if isinstance(item, dict) and item.get("role") in ("user", "assistant"):
+                history.append({"role": item["role"], "content": str(item.get("content") or "")[:4000]})
         history.append({"role": "user", "content": f"Задача: {goal}"})
+
+        if data.get("search") and use_tools:
+            yield _ndjson({"type": "stage", "scene": "search", "title": "Поиск в интернете",
+                           "text": "Ищу свежие данные и проверяю страницы…"})
+            pre = call_tool("web_search", query=goal, limit=3)
+            pre_results = pre.get("results") or []
+            pre_text = "\n".join(f"{i}. {x.get('title','')}\n   {x.get('url','')}\n   {x.get('snippet','')}"
+                                  for i, x in enumerate(pre_results, 1))
+            if pre_results:
+                state["research"] += 1
+                _add_sources(state, pre_results)
+                _note(state, f"поиск «{goal}»", pre_text)
+                yield _ndjson({"type": "tool", "name": "search", "command": f"nova search {goal}",
+                               "code": 0, "output": pre_text, "results": pre_results})
+                for item in pre_results:
+                    opened = call_tool("web_open", url=item.get("url"), max_chars=3000)
+                    page = opened.get("content") or ""
+                    if page:
+                        page = "Текст страницы:\n" + page if not page.startswith("Текст страницы") else page
+                        _note(state, f"страница {item.get('url')}", page)
+                        yield _ndjson({"type": "tool", "name": "open", "command": item.get("url"),
+                                       "code": 0, "output": clip(page, 1500)})
+            else:
+                yield _ndjson({"type": "step", "icon": "⚠️", "text": "Поиск ничего не дал"})
+            history.append({"role": "user", "content": "ПОИСК ВКЛЮЧЁН. Используй найденные данные. Если их достаточно — ответь; если нет — можешь выполнить ещё один search."})
 
         # 2. Цикл действий
         seen, duplicates, parse_fails = set(), 0, 0
@@ -376,6 +407,9 @@ def agent_stream():
             history.append({"role": "user", "content":
                             f"Результат действия:\n{observation}" + (f"\n\n{nudge}" if nudge else "")})
 
+        if state["steps"] >= MAX_STEPS and not state["answer"]:
+            yield _ndjson({"type": "step", "icon": "⏹", "text": "Шаги закончились — готовлю итог"})
+
         # 3. Нет ответа (лимит шагов, таймаут, повторы, сбой) — собираем его по найденному
         if not state["answer"] and (use_tools or state["notes"]):
             yield _ndjson({"type": "step", "icon": "✍️", "text": "Готовлю ответ по найденному"})
@@ -406,6 +440,8 @@ def agent_stream():
                                           log=clip(state["answer"], 1500))
                 yield _ndjson({"type": "task", "task": database.get_task(state["task_id"])})
 
+        session["agent_history"] = (prior + [{"role": "user", "content": goal},
+                                             {"role": "assistant", "content": state["answer"]}])[-10:]
         yield _ndjson({"type": "result", "reply": state["answer"], "steps": state["steps"],
                        "task_id": state["task_id"], "model": model,
                        "sources": state["sources"],
