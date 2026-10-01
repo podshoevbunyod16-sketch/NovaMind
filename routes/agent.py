@@ -92,23 +92,54 @@ def strip_think(text):
     return _THINK_OPEN.sub("", text).strip()
 
 
+def _extract_json_object(text):
+    start = text.find("{")
+    if start < 0:
+        return None
+    depth = 0
+    quoted = False
+    escaped = False
+    for i in range(start, len(text)):
+        ch = text[i]
+        if quoted:
+            if escaped: escaped = False
+            elif ch == "\\": escaped = True
+            elif ch == '"': quoted = False
+            continue
+        if ch == '"': quoted = True
+        elif ch == "{": depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0: return text[start:i + 1]
+    return None
+
 def parse_action(raw):
-    """Достаёт JSON-объект действия из ответа модели. None — не разобрали."""
     text = strip_think(raw)
-    if not text:
-        return None
-    fence = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.S)
-    block = fence.group(1) if fence else None
-    if not block:
-        start, end = text.find("{"), text.rfind("}")
-        block = text[start:end + 1] if 0 <= start < end else None
-    if not block:
-        return None
-    try:
-        data = json.loads(block, strict=False)     # strict=False: переносы строк внутри строк
-    except (TypeError, ValueError):
-        return None
-    return data if isinstance(data, dict) and data.get("action") else None
+    if not text: return None
+    candidates = []
+    fence = re.search(r"\`\`\`(?:json)?\s*(.*?)\s*\`\`\`", text, re.S | re.I)
+    if fence: candidates.append(fence.group(1))
+    obj = _extract_json_object(text)
+    if obj: candidates.append(obj)
+    candidates.append(text)
+    for block in candidates:
+        try:
+            data = json.loads(block.strip(), strict=False)
+            if isinstance(data, dict) and data.get("action"): return data
+        except (TypeError, ValueError):
+            pass
+    match = re.search(r"(?im)^ACTION\s*:\s*(SEARCH|OPEN|SHELL|READ|WRITE|ANSWER)\s*(.*)$", text)
+    if match:
+        action, rest = match.group(1).lower(), match.group(2).strip()
+        if action == "search": return {"action":"search","query":rest}
+        if action == "open": return {"action":"open","url":rest}
+        if action == "shell": return {"action":"run","command":rest}
+        if action == "read": return {"action":"read","path":rest}
+        if action == "write":
+            try: return {"action":"write", **json.loads(rest)}
+            except ValueError: return None
+        return {"action":"answer","text":rest}
+    return None
 
 
 def looks_like_action(raw):
@@ -261,7 +292,7 @@ def agent_stream():
                 plan_text = clip(plan_answer, 900)
                 yield _ndjson({"type": "plan", "text": plan_text})
 
-        history = [{"role": "system", "content": AGENT_SYSTEM_PROMPT}]
+        history = [{"role": "system", "content": AGENT_SYSTEM_PROMPT + "\n\nAVAILABLE TOOL REGISTRY:\n" + json.dumps(tool_schemas(), ensure_ascii=False) if use_tools else AGENT_SYSTEM_PROMPT}]
         if plan_text:
             history.append({"role": "assistant", "content": f"План:\n{plan_text}"})
         history.append({"role": "user", "content": f"Задача: {goal}"})
@@ -315,6 +346,13 @@ def agent_stream():
 
             history.append({"role": "assistant", "content": json.dumps(action, ensure_ascii=False)[:2000]})
             observation = clip(observation)
+            verification = _verify_action(kind, observation)
+            yield _ndjson({"type": "verify", "ok": verification["ok"], "tool": kind,
+                           "text": verification["message"]})
+            if not verification["ok"]:
+                history.append({"role": "user", "content":
+                                "VERIFY: действие не подтверждено. Не повторяй вслепую; "
+                                "исправь параметры или выбери другой инструмент."})
             nudge = _nudge(state, MAX_STEPS - step)
             history.append({"role": "user", "content":
                             f"Результат действия:\n{observation}" + (f"\n\n{nudge}" if nudge else "")})
@@ -376,6 +414,17 @@ def _action_key(action, kind):
     if kind == "write":
         value = f"{value}|{str(action.get('content') or '')[:200]}"
     return (kind, " ".join(str(value).lower().split()))
+
+
+def _verify_action(kind, observation):
+    text = str(observation or "").strip()
+    if kind in ("search", "open", "read", "run", "write", "ls") and not text:
+        return {"ok": False, "message": "Проверка не пройдена: инструмент вернул пустой результат."}
+    if kind == "run" and "код -1" in text:
+        return {"ok": False, "message": "Проверка не пройдена: команда не выполнилась."}
+    if kind == "search" and "ничего не вернул" in text.lower():
+        return {"ok": False, "message": "Поиск не подтвердил наличие результатов."}
+    return {"ok": True, "message": "Результат инструмента получен и принят."}
 
 
 def _nudge(state, remaining):
