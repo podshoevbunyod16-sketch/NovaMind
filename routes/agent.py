@@ -113,9 +113,14 @@ LINUX-ОКРУЖЕНИЕ
 Рабочая папка с терминалом, файлами, python3, node, git и интернетом. Посчитать, запустить
 или проверить код, создать или прочитать файлы — делай это в окружении, а не в уме.
 Код, который пользователю пригодится, покажи в ответе.
-Одна команда за раз, без |, >, &&, $(), sudo. Сложную логику пиши в файл (write)
-и запускай (run: python3 файл.py). Разрешены: ls, cat, grep, find, head, tail, wc,
-mkdir, cp, mv, rm, python3, pip, node, npm, git, curl, sqlite3, date и похожие.
+Терминал понимает обычный синтаксис shell: конвейеры |, цепочки && || ;, перенаправления
+> >> 2>&1 <, кавычки, переменные, маски *.py и cd. Например:
+  curl -s "https://api.github.com/repos/python/cpython" | jq .stargazers_count
+  git clone --depth 1 https://github.com/user/repo && cd repo && git log --oneline | head -5
+  pip install requests && python3 app.py > out.txt 2>&1 ; tail -20 out.txt
+Есть curl, wget, git, python3, pip, node, npm, npx, go, cargo, gcc, make, jq, sqlite3, ffmpeg,
+tar, zip и другие привычные утилиты. Нельзя: $(…), `…`, фоновый &, here-doc << и запись
+за пределы рабочей папки (sudo нет). Длинный текст или скрипт пиши в файл (write) и запускай.
 Команда `nova search <запрос>` и `nova read <url>` тоже работают в терминале."""
 NO_LINUX_RULES = """
 
