@@ -545,6 +545,7 @@ def _perform(action, kind, use_tools, state, goal=""):
         return "Инструменты недоступны. Ответь пользователю по имеющимся данным."
 
     if kind == "search":
+        state["searched"] = True
         query = str(action.get("query") or "").strip()
         if not query:
             return 'Пустой поисковый запрос. Повтори с {"action":"search","query":"..."}.'
