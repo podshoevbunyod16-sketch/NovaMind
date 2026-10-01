@@ -167,7 +167,13 @@ def _ask(messages, **kwargs):
                 error_text = str(chunk or "")
         text = strip_think("".join(chunks))
         if text:
-            return text, ""
+            offline_fallback = (
+                "встроенная **офлайн-модель" in text.lower()
+                or "ассистент novamind. спросите что-нибудь" in text.lower()
+                or "проверьте модель и настройки" in text.lower()
+            )
+            if not offline_fallback:
+                return text, ""
     except Exception:
         pass
     text, meta = chat_completion(messages, **kwargs)
@@ -311,6 +317,13 @@ def agent_stream():
                 _note(state, f"поиск «{goal}»", pre_text)
                 yield _ndjson({"type": "tool", "name": "search", "command": f"nova search {goal}",
                                "code": 0, "output": pre_text, "results": pre_results})
+                try:
+                    body = f"# {goal}\n\n" + pre_text + "\n"
+                    saved_path = _save_research(goal, body, "search")
+                    yield _ndjson({"type": "step", "icon": "💾",
+                                   "text": f"Сохранил результаты поиска: {saved_path}"})
+                except Exception:
+                    pass
                 for item in pre_results:
                     opened = call_tool("web_open", url=item.get("url"), max_chars=3000)
                     page = opened.get("content") or ""
@@ -610,6 +623,8 @@ def _perform(action, kind, use_tools, state, goal=""):
             database.append_task_step(state["task_id"], f"Записал {relative_to_workspace(path)}",
                                       status="doing", log=clip(content, 800))
         yield _ndjson({"type": "step", "icon": "✍️", "text": f"Записал {relative_to_workspace(path)}"})
+        yield _ndjson({"type": "tool", "name": "write", "command": relative_to_workspace(path),
+                       "code": 0, "output": f"Файл {relative_to_workspace(path)} записан."})
         return f"Файл {relative_to_workspace(path)} записан. Открой его командой cat {relative_to_workspace(path)}."
 
     elif kind == "run":
@@ -619,7 +634,7 @@ def _perform(action, kind, use_tools, state, goal=""):
         return f"Неизвестное действие: {kind}. Ответь пользователю."
 
     result = call_tool("shell", command=command, timeout=STEP_TIMEOUT)
-    result["code"] = int(result.get("exit_code", result.get("code", -1)))
+    result["code"] = int(result.get("exit_code", result.get("code", -1)) or -1)
     stdout = str(result.get("stdout") or "")
     stderr = str(result.get("stderr") or "")
     output = stdout + (("\n" + stderr) if stderr else "")
