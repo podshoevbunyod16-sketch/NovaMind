@@ -96,6 +96,12 @@
         </div>
         <button onclick="event.stopPropagation(); logout()" class="logout-btn">Выйти</button>
       </div>
+
+      <div class="lang-switch" style="display:flex;gap:6px;padding:8px 2px 2px;">
+        <button type="button" data-lang="tg" style="flex:1;padding:6px 4px;border-radius:9px;border:1px solid var(--glass-border);background:transparent;color:inherit;font-size:11px;cursor:pointer;">Тоҷикӣ</button>
+        <button type="button" data-lang="ru" style="flex:1;padding:6px 4px;border-radius:9px;border:1px solid var(--glass-border);background:transparent;color:inherit;font-size:11px;cursor:pointer;">Русский</button>
+        <button type="button" data-lang="en" style="flex:1;padding:6px 4px;border-radius:9px;border:1px solid var(--glass-border);background:transparent;color:inherit;font-size:11px;cursor:pointer;">English</button>
+      </div>
     </div>
 
   </aside>
@@ -221,6 +227,7 @@
 
 
 
+  <script src="/static/i18n.js"></script>
   <script src="/static/app.js"></script>
   <script src="/static/linux.js"></script>
 </body>

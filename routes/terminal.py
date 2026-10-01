@@ -41,21 +41,37 @@ ALLOWED_COMMANDS = {
     "find", "fd", "tree", "stat", "file", "du", "df", "diff", "sort", "uniq", "cut", "awk",
     "sed", "tr", "nl", "basename", "dirname", "realpath", "which", "type", "echo", "printf",
     "date", "whoami", "id", "uname", "hostname", "uptime", "ps", "env", "printenv", "seq",
-    "true", "false", "sleep", "man", "help", "history", "clear", "which",
+    "true", "false", "sleep", "man", "help", "history", "clear",
     # файлы
-    "mkdir", "touch", "cp", "mv", "rm", "chmod",
+    "mkdir", "touch", "cp", "mv", "rm", "chmod", "ln", "mktemp",
+    "md5sum", "sha1sum", "sha256sum", "base64", "iconv",
+    "rev", "tac", "paste", "column", "fmt", "fold", "expand", "unexpand",
+    "split", "csplit", "dos2unix", "xargs", "tee",
     # разработка
     "git", "python", "python3", "pip", "pip3", "node", "npm", "npx", "deno", "bun",
     "pytest", "go", "rustc", "cargo", "java", "javac", "make", "jq", "curl", "wget",
-    "sqlite3", "tar", "zip", "unzip", "gzip", "grep",
+    "sqlite3", "tar", "zip", "unzip", "gzip", "bzip2", "xz",
+    "gcc", "g++", "perl", "ruby", "php", "lua", "tsc",
+    "ffmpeg", "ffprobe", "yt-dlp", "openssl", "bc",
+    # сеть
+    "ping", "ssh", "scp", "sftp", "ssh-keygen", "dig", "nslookup", "host",
+    "nc", "netcat", "ip", "ifconfig", "ss",
+    # система
+    "free", "lsblk", "groups", "w", "last", "kill", "pkill", "timeout",
+    # Termux-менеджеры пакетов
+    "pkg", "apt", "apt-get", "dpkg",
     "nova",                 # встроенная команда окружения: поиск и чтение страниц
 }
 # Подстроки, которые запрещены даже внутри разрешённой команды:
-# pipe в другую программу, выход вверх, sudo, подстановка в оболочку.
+# выход вверх, sudo, подстановка в оболочку, фоновый запуск.
+# Пайпы «|» и перенаправления «>» «>>» разрешены и разбираются отдельно.
 FORBIDDEN = (
     "sudo", "su ", "doas", "chown", "chmod 777", "rm -rf /", ":(){", ">/dev/",
-    "&", "|", ">", ">>", "`", "$(", "${", "\n",
+    "&", "`", "$(", "${", "\n",
 )
+
+# Знаки перенаправления, которые понимает песочница.
+REDIRECT_OPS = (">", ">>", "2>", "2>>", "&>")
 
 _run_lock = threading.Semaphore(MAX_CONCURRENT)
 
@@ -72,16 +88,23 @@ NOVA_HELP = """Встроенная команда nova (работает чер
 
 HELP_TEXT = """Доступные команды внутри workspace:
   ls / cat / head / tail / grep / find / tree / wc / stat / file
-  mkdir / touch / cp / mv / rm / chmod
-  git status / git log / git diff / git add / git commit
+  mkdir / touch / cp / mv / rm / chmod / ln / md5sum / base64 / iconv
+  git status / git log / git diff / git add / git commit / git clone
+  curl -s <url> · wget <url> · ping <host> · dig <host> · ssh <host>
   python3 script.py · node script.js · pip install · pytest -q
-  date · whoami · uname · env · ps · du · df · awk · sed · sort
+  ffmpeg · yt-dlp · sqlite3 · tar / zip / unzip · openssl
+  date · whoami · uname · env · ps · du / df · awk · sed · sort
+
+  Пайпы и перенаправления работают:
+    ls -la | grep -v txt | wc -l
+    curl -s https://api.example.com > data.json
+    git log --oneline | head -5
 
   nova search <запрос> — поиск в интернете
   nova read <url>      — прочитать страницу
 
 Папка: {workspace}
-Подсказка: составные команды (| , > , &&) отключены — выполняйте по одной."""
+Подсказка: файлы «>» создаются только внутри workspace; sudo и $() отключены."""
 
 
 # ───────────────────────── служебное ─────────────────────────
@@ -194,7 +217,13 @@ def ensure_workspace():
 
 
 def check_command(command):
-    """Проверяет команду: пустая, запрещённая конструкция или не из списка."""
+    """Проверяет команду: пустая, запрещённая конструкция или не из списка.
+
+    Поддерживает пайпы и перенаправления: «ls -la | grep -v txt | wc -l»,
+    «curl -s https://api.example.com > data.json». Каждая команда цепочки
+    обязана быть в ALLOWED_COMMANDS; файлы «>»/«>>» создаются только
+    внутри workspace. Возвращает ([ (argv, program), … ], [ (fd, mode, path), … ]).
+    """
     command = (command or "").strip()
     if not command:
         raise ValueError("Пустая команда")
@@ -204,15 +233,61 @@ def check_command(command):
         if bad in command:
             raise ValueError(f"Конструкция «{bad.strip()}» отключена — выполняйте команды по одной")
     try:
-        parts = shlex.split(command)
+        tokens = shlex.split(command)
     except ValueError as exc:
         raise ValueError(f"Не удалось разобрать команду: {exc}")
-    if not parts:
+    if not tokens:
         raise ValueError("Пустая команда")
-    program = os.path.basename(parts[0])
-    if program not in ALLOWED_COMMANDS:
-        raise ValueError(f"Команда «{program}» не в списке разрешённых")
-    return parts, program
+
+    segments = []           # цепочка команд: [[argv], [argv], …]
+    redirects = []          # перенаправления последней команды: (fd, mode, путь)
+    current = []
+
+    def flush():
+        if current:
+            segments.append(current)
+
+    idx = 0
+    while idx < len(tokens):
+        token = tokens[idx]
+        if token == "|":
+            if not current:
+                raise ValueError("Пайп «|» не может стоять в начале команды")
+            flush()
+            current = []
+        elif token in REDIRECT_OPS:
+            if not current:
+                raise ValueError(f"Перенаправление «{token}» без команды")
+            if idx + 1 >= len(tokens):
+                raise ValueError(f"После «{token}» не указано имя файла")
+            target = tokens[idx + 1]
+            mode = "a" if token.endswith(">>") else "w"
+            fd = "stderr" if token.startswith("2") else ("both" if token.startswith("&") else "stdout")
+            redirects.append((fd, mode, target))
+            idx += 1
+            flush()
+            current = []
+        else:
+            current.append(token)
+        idx += 1
+    flush()
+
+    if not segments:
+        raise ValueError("Пустая команда")
+    prepared = []
+    for segment in segments:
+        program = os.path.basename(segment[0])
+        if program not in ALLOWED_COMMANDS:
+            raise ValueError(f"Команда «{program}» не в списке разрешённых")
+        prepared.append((segment, program))
+    return prepared, redirects
+
+
+def _open_redirect(target, mode):
+    """Открывает файл перенаправления строго внутри workspace."""
+    path = safe_path(target)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    return open(path, mode, encoding="utf-8")
 
 
 def _result(code, stdout, stderr="", elapsed=0, timed_out=False):
@@ -310,67 +385,121 @@ def _run_nova(parts, timeout):
     return _result(2, "", f"nova: неизвестная команда «{verb}». Список: nova help")
 
 
+def _sandbox_env():
+    """Окружение песочницы: HOME указывает в workspace, git настроен."""
+    return {
+        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+        "HOME": WORKSPACE,
+        "LANG": os.environ.get("LANG", "C.UTF-8"),
+        "TERM": "dumb",
+        "PYTHONDONTWRITEBYTECODE": "1",
+        # В песочнице нет ~/.gitconfig — без этого git commit
+        # ругается «Author identity unknown» и не проходит.
+        "GIT_AUTHOR_NAME": "NovaMind",
+        "GIT_AUTHOR_EMAIL": "novamind@localhost",
+        "GIT_COMMITTER_NAME": "NovaMind",
+        "GIT_COMMITTER_EMAIL": "novamind@localhost",
+    }
+
+
 def run_command(command, timeout=None):
-    """Выполняет команду в песочнице. Возвращает код, вывод и время."""
-    parts, program = check_command(command)
+    """Выполняет команду в песочнице. Поддерживаются пайпы и «>»/«>>».
+
+    Каждый сегмент цепочки проверяется отдельно; пользователь получает
+    вывод последней команды, файлы перенаправления создаются только
+    внутри workspace.
+    """
+    prepared, redirects = check_command(command)
     ensure_workspace()
-    if program == "nova":                      # встроенная команда — без subprocess
-        return _run_nova(parts, timeout)
+    if len(prepared) == 1 and prepared[0][1] == "nova":    # встроенная команда — без subprocess
+        return _run_nova(prepared[0][0], timeout)
     timeout = float(timeout or COMMAND_TIMEOUT)
     if not _run_lock.acquire(blocking=False):
         raise RuntimeError("Занято: предыдущая команда ещё выполняется")
     started = time.time()
-    try:
-        process = subprocess.Popen(
-            parts,
-            cwd=WORKSPACE,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            env={
-                "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
-                "HOME": WORKSPACE,
-                "LANG": os.environ.get("LANG", "C.UTF-8"),
-                "TERM": "dumb",
-                "PYTHONDONTWRITEBYTECODE": "1",
-                # В песочнице нет ~/.gitconfig — без этого git commit
-                # ругается «Author identity unknown» и не проходит.
-                "GIT_AUTHOR_NAME": "NovaMind",
-                "GIT_AUTHOR_EMAIL": "novamind@localhost",
-                "GIT_COMMITTER_NAME": "NovaMind",
-                "GIT_COMMITTER_EMAIL": "novamind@localhost",
-            },
-            start_new_session=True,          # свой pgid — процесс целиком снимаем
-        )
-    except FileNotFoundError:
-        _run_lock.release()
-        return {"code": 127, "stdout": "", "stderr": f"{program}: команда не установлена",
-                "duration_ms": 0, "timed_out": False}
-    except Exception as exc:                      # noqa: BLE001 — возвращаем текст ошибки
-        _run_lock.release()
-        return {"code": 126, "stdout": "", "stderr": str(exc),
-                "duration_ms": 0, "timed_out": False}
-
+    processes = []
+    handles = []
     killed = {"value": False}
 
-    def kill_group():
+    def kill_all():
         killed["value"] = True
-        try:
-            os.killpg(os.getpgid(process.pid), signal.SIGKILL)
-        except (ProcessLookupError, PermissionError, OSError):
-            process.kill()
+        for proc in processes:
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except (ProcessLookupError, PermissionError, OSError):
+                proc.kill()
 
-    # Таймер сам снимает процессную группу: communicate() после kill
-    # возвращается штатно, поэтому флаг «срезали по времени» ставим здесь.
-    timer = threading.Timer(timeout, kill_group)
-    timer.start()
     try:
-        stdout, stderr = process.communicate(timeout=timeout + 2)
-    except subprocess.TimeoutExpired:
-        kill_group()
-        stdout, stderr = process.communicate()
+        # Сначала открываем файлы перенаправления — если путь неверный,
+        # ни один процесс ещё не запущен и убивать нечего.
+        stdout_handle = None
+        stderr_handle = None
+        stdout_target = None
+        for fd, mode, target in redirects:
+            handle = _open_redirect(target, mode)
+            handles.append(handle)
+            if fd in ("stdout", "both"):
+                stdout_handle, stdout_target = handle, target
+            if fd in ("stderr", "both"):
+                stderr_handle = handle
+
+        env = _sandbox_env()
+        last = len(prepared) - 1
+        for index, (segment, program) in enumerate(prepared):
+            stdin = processes[-1].stdout if processes else subprocess.DEVNULL
+            stdout = stdout_handle if (index == last and stdout_handle) else subprocess.PIPE
+            stderr = stderr_handle if (index == last and stderr_handle) else subprocess.PIPE
+            try:
+                proc = subprocess.Popen(
+                    segment,
+                    cwd=WORKSPACE,
+                    stdin=stdin,
+                    stdout=stdout,
+                    stderr=stderr,
+                    env=env,
+                    start_new_session=True,      # свой pgid — цепочку целиком снимаем
+                )
+            except FileNotFoundError:
+                kill_all()
+                return {"code": 127, "stdout": "",
+                        "stderr": f"{program}: команда не установлена",
+                        "duration_ms": int((time.time() - started) * 1000),
+                        "timed_out": False}
+            except Exception as exc:                  # noqa: BLE001 — текст ошибки пользователю
+                kill_all()
+                return {"code": 126, "stdout": "", "stderr": str(exc),
+                        "duration_ms": int((time.time() - started) * 1000),
+                        "timed_out": False}
+            if index > 0:
+                # Родитель обязан закрыть свою копию pipe, иначе следующая
+                # команда не увидит EOF и зависнет.
+                try:
+                    processes[-1].stdout.close()
+                except Exception:                       # noqa: BLE001
+                    pass
+            processes.append(proc)
+
+        # Таймер снимает всю цепочку: communicate() после kill возвращается штатно.
+        timer = threading.Timer(timeout, kill_all)
+        timer.start()
+        try:
+            stdout, stderr = processes[-1].communicate(timeout=timeout + 2)
+            for proc in processes[:-1]:
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+        except subprocess.TimeoutExpired:
+            kill_all()
+            stdout, stderr = processes[-1].communicate()
+        finally:
+            timer.cancel()
     finally:
-        timer.cancel()
+        for handle in handles:
+            try:
+                handle.close()
+            except OSError:
+                pass
         _run_lock.release()
     timed_out = killed["value"]
 
@@ -378,14 +507,16 @@ def run_command(command, timeout=None):
         text = (blob or b"").decode("utf-8", "replace")
         return text[:MAX_OUTPUT] + ("\n… вывод обрезан" if len(text) > MAX_OUTPUT else "")
 
+    out = decode(stdout)
+    if stdout_target and not out:
+        out = f"(вывод записан в файл: {stdout_target})"
     return {
-        "code": process.returncode if process.returncode is not None else -1,
-        "stdout": decode(stdout),
+        "code": processes[-1].returncode if processes[-1].returncode is not None else -1,
+        "stdout": out,
         "stderr": decode(stderr),
         "duration_ms": int((time.time() - started) * 1000),
         "timed_out": timed_out,
     }
-
 
 def run_agent(command, timeout=12):
     """Запуск команды агентом: короче таймаут, всегда с префиксом ошибки."""

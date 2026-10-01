@@ -129,6 +129,9 @@ system_prompt    = os.getenv("SYSTEM_PROMPT", "Ты — NovaMind, умный AI-
 # Заполняется только явным выбором пользователя в панели «Медиа».
 media_selection: dict = {}
 
+# ---------- Язык интерфейса (i18n: tg | ru | en) ----------
+ui_language: str = "tg"
+
 # ---------- Кеш моделей ----------
 MODEL_CACHE: dict = {}
 MODEL_CACHE_TTL = 3600  # 1 час
@@ -148,6 +151,9 @@ def load_runtime_settings():
             system_prompt    = s.get("system_prompt", system_prompt)
             saved_media = s.get("media_selection")
             media_selection = saved_media if isinstance(saved_media, dict) else {}
+            saved_lang = s.get("ui_language")
+            if saved_lang in ("tg", "ru", "en"):
+                ui_language = saved_lang
         except Exception as e:
             print(f"[config] Ошибка чтения runtime_settings: {e}")
 
@@ -158,6 +164,7 @@ def _write_runtime_settings():
             "model": current_model,
             "system_prompt": system_prompt,
             "media_selection": media_selection,
+            "ui_language": ui_language,
         }, f, ensure_ascii=False, indent=2)
 
 def save_selected_model(provider, model):
@@ -179,6 +186,18 @@ def save_selected_media_model(selection):
     except Exception as e:
         print(f"[config] Ошибка сохранения медиа-модели: {e}")
     return media_selection
+
+
+def save_ui_language(language: str):
+    """Сохраняет выбранный язык интерфейса (tg | ru | en)."""
+    global ui_language
+    if language in ("tg", "ru", "en"):
+        ui_language = language
+    try:
+        _write_runtime_settings()
+    except Exception as e:
+        print(f"[config] Ошибка сохранения языка: {e}")
+    return ui_language
 
 
 load_runtime_settings()

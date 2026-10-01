@@ -133,7 +133,8 @@ body::before {
     radial-gradient(30vmax 30vmax at 24% 88%, var(--aurora-4), transparent 60%),
     linear-gradient(160deg, var(--bg-1), var(--bg-0) 70%);
   filter: saturate(140%);
-  animation: aurora-drift 42s var(--ease) infinite alternate;
+  /* Фон статичен: фоновые анимации убраны. Градиенты остаются. */
+  animation: none;
   will-change: transform, background-position;
 }
 @keyframes aurora-drift {
@@ -153,7 +154,8 @@ body::after {
       rgba(255,255,255,.035) 180deg, transparent 240deg,
       rgba(255,255,255,.05) 320deg, transparent 360deg);
   mix-blend-mode: soft-light;
-  animation: sheen-spin 68s linear infinite;
+  /* Блик больше не вращается — фоновые анимации отключены. */
+  animation: none;
   will-change: transform;
 }
 @keyframes sheen-spin { to { transform: rotate(360deg); } }
