@@ -245,11 +245,12 @@ def agent_status():
     return jsonify({
         "enabled": enabled,
         "tools": tools_enabled(),
+        "available": bool(is_enabled() and tools_enabled()),
         "max_steps": MAX_STEPS,
         "user": signed_in(),
         "admin": bool(session.get("admin_logged_in")),
         "hint": ("" if enabled
-                 else "Включите AGENT_ENABLED=1 в .env и перезапустите сервер"),
+                 else "Включите AGENT_ENABLED=1 и TERMINAL_ENABLED=1 в .env и перезапустите сервер"),
     })
 
 
@@ -279,22 +280,9 @@ def agent_stream():
         yield _ndjson({"type": "stage", "scene": "agent", "title": "Планирую",
                        "text": "Разбираю задачу по шагам…"})
 
-        # 1. План одним запросом — чтобы пользователь сразу видел ход мыслей
-        plan_text = ""
-        if use_tools:
-            plan_answer, plan_error = _ask(
-                [{"role": "user", "content":
-                    f"Задача: {goal}\n\nСоставь короткий план из 2-4 пунктов, что нужно сделать "
-                    f"в рабочей папке. Без JSON, только текст."}],
-                provider=provider, model=model, temperature=0.2, max_tokens=300, timeout=30,
-            )
-            if plan_answer and not plan_error:
-                plan_text = clip(plan_answer, 900)
-                yield _ndjson({"type": "plan", "text": plan_text})
-
+        # 1. Один первый запрос: простой вопрос получает обычный ответ без лишнего plan/stage.
+        # Если модель вернула action=plan, показываем его как план и продолжаем цикл.
         history = [{"role": "system", "content": AGENT_SYSTEM_PROMPT + "\n\nAVAILABLE TOOL REGISTRY:\n" + json.dumps(tool_schemas(), ensure_ascii=False) if use_tools else AGENT_SYSTEM_PROMPT}]
-        if plan_text:
-            history.append({"role": "assistant", "content": f"План:\n{plan_text}"})
         history.append({"role": "user", "content": f"Задача: {goal}"})
 
         # 2. Цикл действий
@@ -314,6 +302,10 @@ def agent_stream():
                 break                                   # ответ соберём из найденного
 
             action = parse_action(raw)
+            if not action and raw and '"action"' in raw and _extract_json_object(raw):
+                action = parse_action(_extract_json_object(raw))
+                if action:
+                    yield _ndjson({"type": "retract", "count": len(raw)})
             if not action:
                 if looks_like_action(raw):
                     # JSON обрезался или сломан: один раз просим повторить, потом сдаёмся
@@ -328,6 +320,18 @@ def agent_stream():
                 break
 
             kind = str(action.get("action"))
+            if kind == "plan":
+                steps = action.get("steps") or action.get("plan") or action.get("text") or []
+                if isinstance(steps, list):
+                    plan_text = "\n".join(f"{i}. {str(item)}" for i, item in enumerate(steps, 1))
+                else:
+                    plan_text = str(steps)
+                yield _ndjson({"type": "stage", "scene": "agent", "title": "Планирую",
+                               "text": "Разбираю задачу по шагам…"})
+                yield _ndjson({"type": "plan", "text": clip(plan_text, 900)})
+                history.append({"role": "assistant", "content": json.dumps(action, ensure_ascii=False)[:2000]})
+                history.append({"role": "user", "content": "План принят. Выполни первый пункт и продолжай работу."})
+                continue
             key = _action_key(action, kind)
             if key in seen and kind not in ("answer", "task", "task_done"):
                 duplicates += 1
