@@ -440,6 +440,10 @@ def agent_stream():
             verification = _verify_action(kind, observation)
             yield _ndjson({"type": "verify", "ok": verification["ok"], "tool": kind,
                            "text": verification["message"]})
+            if state["tool_steps"] >= MAX_STEPS and not state.get("limit_notified"):
+                state["limit_notified"] = True
+                yield _ndjson({"type": "step", "icon": "⏹",
+                               "text": "Шаги закончились — готовлю итог"})
             if not verification["ok"]:
                 history.append({"role": "user", "content":
                                 "VERIFY: действие не подтверждено. Не повторяй вслепую; "
@@ -448,7 +452,7 @@ def agent_stream():
             history.append({"role": "user", "content":
                             f"Результат действия:\n{observation}" + (f"\n\n{nudge}" if nudge else "")})
 
-        if state["tool_steps"] >= MAX_STEPS and not state["answer"]:
+        if state["tool_steps"] >= MAX_STEPS and not state["answer"] and not state.get("limit_notified"):
             yield _ndjson({"type": "step", "icon": "⏹", "text": "Шаги закончились — готовлю итог"})
 
         # 3. Нет ответа (лимит шагов, таймаут, повторы, сбой) — собираем его по найденному
