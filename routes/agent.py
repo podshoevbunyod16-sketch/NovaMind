@@ -154,18 +154,29 @@ def clip(text, limit=MAX_OBSERVATION):
 
 
 def _ask(messages, **kwargs):
-    """Запрос к модели. Возвращает (текст, ошибка) — ровно одно из двух пустое.
-
-    chat_completion при успехе отдаёт (текст, meta-словарь), при ошибке — (None, строка).
-    Раньше второе значение принималось за «ошибку» всегда — и любой ответ модели
-    выбрасывался, так что итоговый ответ терялся.
-    """
+    """Запрашивает модель через поток; fallback на обычный completion."""
+    try:
+        chunks = []
+        error_text = ""
+        saw = False
+        for kind, chunk in chat_stream(messages, **kwargs):
+            saw = True
+            if kind == "token":
+                chunks.append(str(chunk or ""))
+            elif kind == "error":
+                error_text = str(chunk or "")
+        text = strip_think("".join(chunks))
+        if text:
+            return text, ""
+        if saw and error_text:
+            return "", error_text
+    except Exception:
+        pass
     text, meta = chat_completion(messages, **kwargs)
     text = strip_think(text)
     if text:
         return text, ""
     return "", str(meta) if isinstance(meta, str) and meta else "модель не ответила"
-
 
 # ───────────────────────── источники и заметки ─────────────────────────
 
