@@ -1640,3 +1640,761 @@ function formatContent(text) {
         const align = sep.startsWith(':') && sep.endsWith(':') ? 'center' : sep.endsWith(':') ? 'right' : 'left';
         tabl
 
+      tableHtml += '</tr>';
+    });
+    tableHtml += '</table>';
+    const hint = needsScroll ? '<div class="tbl-scroll-hint show">← прокрути вправо →</div>' : '';
+    return `<div class="tbl-wrap">${tableHtml}</div>${hint}`;
+  });
+
+  html = html.replace(/\n\n/g, '<br><br>');
+  html = html.replace(/\n/g, '<br>');
+  // Возвращаем блоки кода на место — нетронутыми
+  html = html.replace(/\u0000(\d+)\u0000/g, (_, index) => codeBlocks[Number(index)] || '');
+  return html;
+}
+
+function escapeHtml(text) {
+  return String(text ?? '')
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+// ========== ГОЛОС ==========
+function toggleVoice() {
+  if (!('webkitSpeechRecognition' in window) && !('SpeechRecognition' in window)) {
+    showNotification('Браузер не поддерживает голосовой ввод', 'warn');
+    return;
+  }
+  isRecording ? stopRecording() : startRecording();
+}
+
+function startRecording() {
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  recognition = new SR();
+  recognition.lang = 'ru-RU';
+  recognition.continuous = true;
+  recognition.interimResults = true;
+  let finalTranscript = '';
+  recognition.onstart = () => {
+    isRecording = true;
+    voiceBtn.classList.add('recording');
+    voiceTooltip.textContent = '● Слушаю... Нажмите для остановки';
+  };
+  recognition.onresult = (e) => {
+    let interimTranscript = '';
+    for (let i = e.resultIndex; i < e.results.length; i++) {
+      const transcript = e.results[i][0].transcript;
+      if (e.results[i].isFinal) finalTranscript += transcript + ' ';
+      else interimTranscript += transcript;
+    }
+    input.value = (finalTranscript + interimTranscript).trim();
+    autoResize(input);
+    sendBtn.disabled = !input.value.trim();
+  };
+  recognition.onend = () => {
+    if (isRecording) {
+      isRecording = false;
+      voiceBtn.classList.remove('recording');
+      voiceTooltip.textContent = 'Готово — проверьте текст';
+      recognition = null;
+    }
+  };
+  recognition.onerror = (event) => {
+    if (event.error !== 'no-speech' && event.error !== 'aborted') {
+      showNotification('Ошибка голосового ввода: ' + event.error, 'warn');
+    }
+    stopRecording();
+  };
+  try {
+    recognition.start();
+  } catch (error) {
+    stopRecording();
+    showNotification('Не удалось запустить голосовой ввод', 'warn');
+  }
+}
+
+function stopRecording() {
+  const activeRecognition = recognition;
+  isRecording = false;
+  voiceBtn.classList.remove('recording');
+  voiceTooltip.textContent = input.value.trim() ? 'Готово — проверьте текст' : 'Нажмите для записи';
+  recognition = null;
+  if (activeRecognition) {
+    try { activeRecognition.stop(); } catch (_) {}
+  }
+}
+
+// ========== САЙДБАР ==========
+function openSettings() { window.location.href = '/settings'; }
+
+const DRAWER_BREAKPOINT = 860;
+// Чуть у́же, чем раньше, чтобы сайдбар не перекрывал чат на телефоне.
+const drawerWidth = () => Math.min(300, Math.max(240, window.innerWidth * 0.84));
+
+/** matchMedia может отсутствовать (старые webview, тестовые окружения) — не падаем. */
+function isDrawerViewport() {
+  try {
+    return window.matchMedia(`(max-width: ${DRAWER_BREAKPOINT}px)`).matches;
+  } catch (_) {
+    return window.innerWidth <= DRAWER_BREAKPOINT;
+  }
+}
+
+// ══════════════════════════════════════════════════════════════
+// СОСТОЯНИЕ БОКОВОЙ ПАНЕЛИ НА КОМПЬЮТЕРЕ
+// Панель по умолчанию скрыта: переписка занимает всю ширину,
+// а кнопка-бургер в шапке открывает её в один клик. Выбор запоминается.
+// ══════════════════════════════════════════════════════════════
+const NAV_KEY = 'nova_nav_open';
+
+function navIsOpen() {
+  const app = document.querySelector('.app');
+  return !!app && !app.classList.contains('nav-off');
+}
+
+function setNavOpen(open, save = true) {
+  const app = document.querySelector('.app');
+  if (!app) return;
+  app.classList.toggle('nav-off', !open);
+  const btn = document.getElementById('btnNav');
+  if (btn) {
+    btn.classList.toggle('is-open', open);
+    btn.setAttribute('aria-expanded', String(open));
+    btn.title = open ? 'Скрыть боковую панель' : 'Открыть боковую панель';
+    btn.setAttribute('aria-label', btn.title);
+  }
+  if (save) {
+    try { localStorage.setItem(NAV_KEY, open ? '1' : '0'); } catch (_) {}
+  }
+}
+
+function initNav() {
+  let saved = null;
+  try { saved = localStorage.getItem(NAV_KEY); } catch (_) {}
+  setNavOpen(saved === '1', false);
+}
+
+function setSidebarOffset(offset, animate = false) {
+  const app = document.querySelector('.app');
+  const sidebar = document.getElementById('sidebar');
+  const overlay = document.getElementById('overlay');
+  if (!app || !sidebar) return;
+
+  const width = drawerWidth();
+  const x = Math.max(0, Math.min(width, Number(offset) || 0));
+
+  app.style.setProperty('--drawer-x', x + 'px');
+  app.style.setProperty('--drawer-width', width + 'px');
+  app.classList.toggle('drawer-animate', animate);
+
+  const isOpen = x > width * 0.5;
+  sidebar.classList.toggle('open', isOpen);
+  // Когда сайдбар открыт, чат блокируется — один скролл на экран.
+  document.body.classList.toggle('drawer-open', isOpen);
+
+  if (overlay) {
+    overlay.classList.toggle('visible', isOpen);
+    overlay.style.opacity = String(Math.min(0.7, (x / width) * 0.7));
+    overlay.style.pointerEvents = isOpen ? 'auto' : 'none';
+  }
+}
+
+function getSidebarOffset() {
+  const app = document.querySelector('.app');
+  if (!app) return 0;
+  const value = parseFloat(getComputedStyle(app).getPropertyValue('--drawer-x'));
+  return Number.isFinite(value) ? value : 0;
+}
+
+function toggleSidebar() {
+  const sidebar = document.getElementById('sidebar');
+  if (!sidebar) return;
+  if (isDrawerViewport()) {
+    const width = drawerWidth();
+    setSidebarOffset(getSidebarOffset() > width * 0.5 ? 0 : width, true);
+    return;
+  }
+  // На широком экране панель просто убирается, освобождая место под чат.
+  setNavOpen(!navIsOpen());
+}
+
+function closeSidebar() {
+  if (isDrawerViewport()) setSidebarOffset(0, true);
+}
+
+function initSidebarSwipe() {
+  const app = document.querySelector('.app');
+  const sidebar = document.getElementById('sidebar');
+  const overlay = document.getElementById('overlay');
+  if (!app || !sidebar) return;
+
+  let swipeEnabled = false;
+
+  const enableForViewport = () => {
+    swipeEnabled = isDrawerViewport();
+    if (!swipeEnabled) {
+      app.classList.remove('drawer-animate');
+      sidebar.classList.remove('open');
+      document.body.classList.remove('drawer-open');
+      if (overlay) {
+        overlay.classList.remove('visible');
+        overlay.style.pointerEvents = 'none';
+        overlay.style.opacity = '0';
+      }
+      app.style.removeProperty('--drawer-x');
+      app.style.removeProperty('--drawer-width');
+    } else {
+      app.style.setProperty('--drawer-width', drawerWidth() + 'px');
+      if (!app.style.getPropertyValue('--drawer-x')) app.style.setProperty('--drawer-x', '0px');
+    }
+  };
+  enableForViewport();
+
+  let drag = null;
+
+  const begin = (e) => {
+    if (!swipeEnabled) return;
+    if (e.pointerType === 'mouse' && e.button !== 0) return;
+    const open = getSidebarOffset() > 1;
+    const x = e.clientX;
+    if (!open && x > 32) return;
+    if (open && !sidebar.contains(e.target)) return;
+    drag = {
+      id: e.pointerId, startX: x, startY: e.clientY,
+      startOffset: getSidebarOffset(), lastX: x, lastTime: performance.now(),
+      velocityX: 0, horizontal: false,
+    };
+    app.classList.remove('drawer-animate');
+    try { app.setPointerCapture(e.pointerId); } catch (_) {}
+  };
+
+  const move = (e) => {
+    if (!drag || e.pointerId !== drag.id) return;
+    const dx = e.clientX - drag.startX;
+    const dy = e.clientY - drag.startY;
+    const now = performance.now();
+    const dt = Math.max(1, now - drag.lastTime);
+
+    if (!drag.horizontal) {
+      if (Math.abs(dx) < 8) return;
+      if (Math.abs(dy) > Math.abs(dx) * 1.15) { drag = null; return; }
+      drag.horizontal = true;
+    }
+    e.preventDefault();
+
+    const next = Math.max(0, Math.min(drawerWidth(), drag.startOffset + dx));
+    drag.velocityX = (e.clientX - drag.lastX) / dt;
+    drag.lastX = e.clientX;
+    drag.lastTime = now;
+    setSidebarOffset(next, false);
+  };
+
+  const end = (e) => {
+    if (!drag || e.pointerId !== drag.id) return;
+    const currentDrag = drag;
+    drag = null;
+    try { app.releasePointerCapture(e.pointerId); } catch (_) {}
+    if (!currentDrag.horizontal) return;
+    const width = drawerWidth();
+    const dx = e.clientX - currentDrag.startX;
+    const current = getSidebarOffset();
+    const shouldOpen = current > width * 0.5 || dx > 70 || currentDrag.velocityX > 0.45;
+    setSidebarOffset(shouldOpen ? width : 0, true);
+  };
+
+  app.addEventListener('pointerdown', begin, { passive: false });
+  app.addEventListener('pointermove', move, { passive: false });
+  app.addEventListener('pointerup', end, { passive: false });
+  app.addEventListener('pointercancel', end, { passive: false });
+  window.addEventListener('resize', enableForViewport);
+}
+
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', () => { initNav(); initSidebarSwipe(); });
+} else {
+  initNav();
+  initSidebarSwipe();
+}
+
+function setActive(el) {
+  document.querySelectorAll('.nav-item').forEach((n) => n.classList.remove('active'));
+  el.classList.add('active');
+}
+
+// ========== ЧАТ ==========
+function newChat() {
+  const store = historyLoad();
+  store.activeId = null;
+  historySave(store);
+  // Новый чат — чистый лист: никаких активных режимов и медиа-моделей.
+  clearInputMode(true);
+  clearMediaModel(true);
+  historyReplay = true;
+  try {
+    chatContainer.innerHTML = '';
+    chatContainer.appendChild(welcomeScreen);
+    welcomeScreen.style.display = 'flex';
+    msgCount = 0;
+  } finally {
+    historyReplay = false;
+  }
+  renderChatList();
+}
+
+function clearChat() {
+  newChat();
+  fetch('/api/history/clear', { method: 'DELETE' }).catch(() => {});
+  showNotification('Чат очищен', 'info');
+}
+
+function shareChat() {
+  copyText(window.location.href);
+}
+
+function scrollToBottom() {
+  requestAnimationFrame(() => {
+    // Прокручивается всё окно, поэтому целимся в нижний край панели ввода
+    // (она «прилипает» к низу и всегда закрывает собой хвост переписки).
+    const tail = document.querySelector('.input-area');
+    const anchor = tail || chatContainer;
+    const bottom = anchor.getBoundingClientRect().bottom;
+    const max = Math.max(0, document.documentElement.scrollHeight - window.innerHeight);
+    const target = Math.min(max, Math.max(0, window.scrollY + bottom));
+    if (Math.abs(target - window.scrollY) < 2) return;
+    window.scrollTo({ top: target, behavior: 'smooth' });
+  });
+}
+
+// ========== ИСТОРИЯ ЧАТОВ ==========
+const HISTORY_KEY = 'nova_history_v2';
+const MAX_CHATS = 50;
+const MAX_MSGS = 60;
+
+function historyLoad() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(HISTORY_KEY) || '{"chats":[],"activeId":null}');
+    const chats = Array.isArray(parsed.chats) ? parsed.chats
+      .filter((chat) => chat && chat.id)
+      .map((chat) => ({
+        ...chat,
+        title: String(chat.title || 'Новый диалог'),
+        messages: Array.isArray(chat.messages) ? chat.messages : [],
+        createdAt: Number(chat.createdAt) || Number(chat.updatedAt) || Date.now(),
+        updatedAt: Number(chat.updatedAt) || Number(chat.createdAt) || Date.now(),
+      })) : [];
+    const activeId = chats.some((chat) => chat.id === parsed.activeId) ? parsed.activeId : null;
+    return { chats, activeId };
+  } catch (e) {
+    return { chats: [], activeId: null };
+  }
+}
+
+function historySave(store) {
+  try {
+    localStorage.setItem(HISTORY_KEY, JSON.stringify(store));
+  } catch (e) {
+    console.warn('[History] localStorage недоступен или переполнен');
+  }
+}
+
+function historyAddMessage(role, content, meta = null) {
+  if (historyReplay || !content) return;
+
+  const store = historyLoad();
+  let chat = store.chats.find((c) => c.id === store.activeId);
+
+  if (!chat) {
+    const title = content.slice(0, 55) + (content.length > 55 ? '…' : '');
+    chat = {
+      id: Date.now().toString(36) + Math.random().toString(36).slice(2, 7),
+      title, messages: [], createdAt: Date.now(), updatedAt: Date.now(),
+    };
+    store.chats.unshift(chat);
+    store.activeId = chat.id;
+  }
+
+  chat.messages.push(meta ? { role, content, meta } : { role, content });
+  chat.updatedAt = Date.now();
+
+  if (role === 'user' && chat.messages.filter((m) => m.role === 'user').length === 1) {
+    chat.title = content.slice(0, 55) + (content.length > 55 ? '…' : '');
+  }
+  if (chat.messages.length > MAX_MSGS) chat.messages = chat.messages.slice(-MAX_MSGS);
+  if (store.chats.length > MAX_CHATS) store.chats = store.chats.slice(0, MAX_CHATS);
+
+  historySave(store);
+  renderChatList();
+}
+
+function renderChatList() {
+  const container = document.getElementById('historyContainer');
+  if (!container) return;
+
+  const store = historyLoad();
+  const chats = [...(store.chats || [])].sort((a, b) => {
+    const diff = (Number(b.updatedAt) || 0) - (Number(a.updatedAt) || 0);
+    return diff || String(b.id).localeCompare(String(a.id));
+  });
+  const active = store.activeId;
+  container.innerHTML = '';
+
+  if (!chats.length) {
+    container.innerHTML = '<div class="history-empty">💬<br>Начни диалог —<br>он появится здесь</div>';
+    return;
+  }
+
+  const now = new Date();
+  const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  const yesterdayStart = todayStart - 86400000;
+  const weekStart = todayStart - 6 * 86400000;
+  const groups = { 'Сегодня': [], 'Вчера': [], 'Последние 7 дней': [], 'Ранее': [] };
+
+  for (const chat of chats) {
+    const updatedAt = Number(chat.updatedAt) || Date.now();
+    if (updatedAt >= todayStart) groups['Сегодня'].push(chat);
+    else if (updatedAt >= yesterdayStart) groups['Вчера'].push(chat);
+    else if (updatedAt >= weekStart) groups['Последние 7 дней'].push(chat);
+    else groups['Ранее'].push(chat);
+  }
+
+  for (const [label, group] of Object.entries(groups)) {
+    if (!group.length) continue;
+    const heading = document.createElement('div');
+    heading.className = 'history-group-label';
+    heading.textContent = label;
+    container.appendChild(heading);
+
+    for (const chat of group) {
+      const item = document.createElement('div');
+      item.className = 'history-item' + (chat.id === active ? ' active' : '');
+      item.title = chat.title || 'Новый диалог';
+
+      const updated = new Date(Number(chat.updatedAt) || Number(chat.createdAt) || Date.now());
+      const date = updated.toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit', year: 'numeric' });
+      const time = updated.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
+      const count = (chat.messages || []).length;
+
+      item.innerHTML = `
+        <div class="history-item-icon">💬</div>
+        <div class="history-item-body">
+          <div class="history-item-title">${escapeHtml(chat.title || 'Новый диалог')}</div>
+          <div class="history-item-meta">
+            <span class="history-item-datetime">${date} · ${time}</span>
+            <span class="history-item-count">${count} сообщ.</span>
+          </div>
+        </div>
+        <button class="hist-del-btn" type="button" title="Удалить чат">×</button>`;
+
+      item.addEventListener('click', (e) => {
+        if (e.target.closest('.hist-del-btn')) return;
+        loadChat(chat.id);
+      });
+      item.querySelector('.hist-del-btn').addEventListener('click', (e) => {
+        e.stopPropagation();
+        deleteChat(chat.id);
+      });
+      container.appendChild(item);
+    }
+  }
+}
+
+function loadChat(chatId) {
+  const store = historyLoad();
+  const chat = store.chats.find((c) => c.id === chatId);
+  if (!chat) return;
+
+  store.activeId = chatId;
+  historySave(store);
+
+  historyReplay = true;
+  try {
+    chatContainer.innerHTML = '';
+    for (const msg of (chat.messages || [])) {
+      appendMessage(msg.role === 'user' ? 'user' : 'ai', msg.content, msg.meta || null);
+    }
+    if (!chat.messages.length) {
+      chatContainer.appendChild(welcomeScreen);
+      welcomeScreen.style.display = 'flex';
+    }
+  } finally {
+    historyReplay = false;
+  }
+
+  msgCount = (chat.messages || []).length;
+  renderChatList();
+  closeSidebar();
+  scrollToBottom();
+}
+
+function deleteChat(chatId) {
+  const store = historyLoad();
+  store.chats = (store.chats || []).filter((c) => c.id !== chatId);
+  if (store.activeId === chatId) store.activeId = null;
+  historySave(store);
+  renderChatList();
+}
+
+function startNewChat() {
+  newChat();
+  closeSidebar();
+  if (input) input.focus();
+}
+
+function loadChatList() {
+  renderChatList();
+  return Promise.resolve();
+}
+
+// ══════════════════════════════════════════
+// КОМАНДНАЯ ПАНЕЛЬ (Ctrl+K)
+// ══════════════════════════════════════════
+const CMDK_ACTIONS = [
+  { icon: '🔍', label: 'Включить/выключить поиск в интернете', hint: '', run: () => toggleWebSearch() },
+  { icon: '🧠', label: 'Включить/выключить рассуждения', hint: '', run: () => toggleReasoning() },
+  { icon: '🎨', label: 'Открыть панель медиа-моделей', hint: '', run: () => openMediaPicker() },
+  { icon: '✖️', label: 'Выключить активный режим', hint: '', run: () => clearInputMode() },
+  { icon: '✨', label: 'Спокойный режим анимаций', hint: '', run: () => toggleCalmMotion() },
+  { icon: '🧹', label: 'Очистить чат', hint: '', run: () => clearChat() },
+  { icon: '➕', label: 'Новый диалог', hint: '', run: () => newChat() },
+  { icon: '⚙️', label: 'Настройки ИИ и провайдеров', hint: '', run: () => openSettings() },
+  { icon: '🩺', label: 'Проверить поиск и модель', hint: '', run: () => checkHealth(true) },
+  { icon: '🔊', label: 'Озвучить последний ответ', hint: '', run: () => speakText(lastAnswerText()) },
+  { icon: '/help', label: 'Команда: список команд', hint: '/help', run: () => sendMessage('/help') },
+  { icon: '🌤', label: 'Режим: погода', hint: '/services weather', run: () => activateMode({ prefix: '/services weather ', label: '🌤 Погода', placeholder: 'Введите город…' }) },
+  { icon: '💱', label: 'Режим: курс валют', hint: '/services currency', run: () => activateMode({ prefix: '/services currency ', label: '💱 Курс валют', placeholder: 'USD RUB…' }) },
+  { icon: '📚', label: 'Режим: Википедия', hint: '/services wiki', run: () => activateMode({ prefix: '/services wiki ', label: '📚 Википедия', placeholder: 'Запрос…' }) },
+  { icon: '💻', label: 'Режим: код', hint: '/code', run: () => activateMode({ prefix: '/code ', label: '💻 Помощник кода', placeholder: 'Какой код создать…' }) },
+  { icon: '🖼', label: 'Режим: изображение', hint: '/image', run: () => activateMode({ prefix: '/image ', label: '🎨 Генерация изображений', placeholder: 'Опишите изображение…' }) },
+];
+
+let cmdkIndex = 0;
+let cmdkFiltered = CMDK_ACTIONS;
+
+function openCmdk() {
+  const box = document.getElementById('cmdk');
+  if (!box) return;
+  box.classList.add('open');
+  box.setAttribute('aria-hidden', 'false');
+  const field = document.getElementById('cmdkInput');
+  if (field) { field.value = ''; field.focus(); }
+  filterCmdk();
+}
+
+function closeCmdk() {
+  const box = document.getElementById('cmdk');
+  if (!box) return;
+  box.classList.remove('open');
+  box.setAttribute('aria-hidden', 'true');
+}
+
+function filterCmdk() {
+  const query = (document.getElementById('cmdkInput')?.value || '').trim().toLowerCase();
+  cmdkFiltered = CMDK_ACTIONS.filter((action) =>
+    !query || action.label.toLowerCase().includes(query) || (action.hint || '').toLowerCase().includes(query));
+  cmdkIndex = 0;
+  renderCmdk();
+}
+
+function renderCmdk() {
+  const list = document.getElementById('cmdkList');
+  if (!list) return;
+  if (!cmdkFiltered.length) {
+    list.innerHTML = '<div class="cmdk-empty">Ничего не найдено</div>';
+    return;
+  }
+  list.innerHTML = cmdkFiltered.map((action, index) => `
+    <div class="cmdk-item ${index === cmdkIndex ? 'sel' : ''}" data-index="${index}">
+      <span class="k">${action.icon}</span>
+      <span>${escapeHtml(action.label)}</span>
+      ${action.hint ? `<span class="hint">${escapeHtml(action.hint)}</span>` : ''}
+    </div>`).join('');
+  list.querySelectorAll('.cmdk-item').forEach((item) => {
+    item.addEventListener('click', () => runCmdk(Number(item.dataset.index)));
+  });
+}
+
+function runCmdk(index) {
+  const action = cmdkFiltered[index];
+  closeCmdk();
+  if (action) action.run();
+}
+
+function cmdkKey(event) {
+  if (event.key === 'ArrowDown') {
+    event.preventDefault();
+    cmdkIndex = (cmdkIndex + 1) % Math.max(1, cmdkFiltered.length);
+    renderCmdk();
+  } else if (event.key === 'ArrowUp') {
+    event.preventDefault();
+    cmdkIndex = (cmdkIndex - 1 + cmdkFiltered.length) % Math.max(1, cmdkFiltered.length);
+    renderCmdk();
+  } else if (event.key === 'Enter') {
+    event.preventDefault();
+    runCmdk(cmdkIndex);
+  } else if (event.key === 'Escape') {
+    closeCmdk();
+  }
+}
+
+function lastAnswerText() {
+  const answers = chatContainer.querySelectorAll('.message.ai .answer, .message.ai .msg-bubble');
+  return answers.length ? answers[answers.length - 1].innerText : '';
+}
+
+// ══════════════════════════════════════════
+// СОСТОЯНИЕ ИИ И ПОИСКА (индикаторы)
+// ══════════════════════════════════════════
+async function refreshAiStatus() {
+  try {
+    const response = await fetch('/api/ai/status');
+    if (!response.ok) throw new Error('HTTP ' + response.status);
+    aiStatus = await response.json();
+  } catch (error) {
+    aiStatus = null;
+  }
+  paintStatus();
+}
+
+function paintStatus() {
+  const dot = document.getElementById('statusDot');
+  const text = document.getElementById('statusText');
+  const providerLabel = document.getElementById('display-provider');
+  if (!aiStatus) {
+    if (dot) dot.className = 'lg-dot warn';
+    setShortText(text, 'AI Ассистент', 26);
+    return;
+  }
+  const model = aiStatus.model || 'модель';
+  if (dot) dot.className = 'lg-dot ' + (aiStatus.offline ? 'warn' : 'ok') + ' pulse';
+  setShortText(text, aiStatus.offline ? `Офлайн-модель · ${model}` : model, 26);
+  setShortText(providerLabel, `${aiStatus.provider_name || aiStatus.provider} · ${model}`, 22);
+}
+
+async function checkHealth(notify = false) {
+  const dot = document.getElementById('searchHealthDot');
+  if (dot) dot.className = 'lg-dot';
+  try {
+    const response = await fetch('/api/search/health?refresh=1');
+    const data = await response.json();
+    if (dot) dot.className = 'lg-dot ' + (data.ok ? 'ok' : 'err');
+    if (notify) {
+      showNotification(data.ok
+        ? `Поиск работает: ${data.alive.join(', ')}`
+        : 'Поисковые бэкенды недоступны — проверьте интернет или SEARCH_BACKENDS в .env',
+        data.ok ? 'ok' : 'warn');
+    }
+    return data;
+  } catch (error) {
+    if (dot) dot.className = 'lg-dot err';
+    if (notify) showNotification('Не удалось проверить поиск: ' + error.message, 'warn');
+    return null;
+  }
+}
+
+// ══════════════════════════════════════════
+// COMPOSIO
+// ══════════════════════════════════════════
+const COMPOSIO_ICONS = {
+  github: '🐙', gmail: '📧', notion: '📝', slack: '💬', googlecalendar: '📅',
+  googledrive: '☁️', trello: '📋', twitter: '🐦', discord: '🎮', jira: '🔵',
+  linear: '⚡', youtube: '▶️', shopify: '🛒', hubspot: '🟠', airtable: '🗃️',
+  dropbox: '📦', figma: '🎨', stripe: '💳', zoom: '📹', asana: '🎯',
+};
+
+function renderComposioCards(cards) {
+  const grid = cards.map((card) => {
+    const icon = COMPOSIO_ICONS[card.slug] || '🔗';
+    const statusColor = card.connected ? 'var(--ok)' : 'var(--text-3)';
+    const statusText = card.connected ? '✅ Подключено' : 'Нажми — подключить';
+    return `
+      <div onclick="composioAuthFromChat('${card.slug}')" class="suggestion-card" style="text-align:center;cursor:pointer">
+        <div class="card-icon">${icon}</div>
+        <div class="card-title">${escapeHtml(card.name || card.slug)}</div>
+        <div class="card-desc" style="color:${statusColor}">${statusText}</div>
+      </div>`;
+  }).join('');
+
+  return `
+    <div style="font-weight:700;margin-bottom:10px">🧩 Интеграции Composio — нажми для подключения:</div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(120px,1fr));gap:8px">${grid}</div>
+    <div style="margin-top:10px;font-size:11px;color:var(--text-4)">
+      💡 После подключения используй <code>/composio accounts</code> для проверки
+    </div>`;
+}
+
+function renderComposioAuth(toolkit, url) {
+  const icon = COMPOSIO_ICONS[toolkit] || '🔗';
+  return `
+    <div style="padding:4px 2px">
+      <div style="font-size:26px;margin-bottom:8px">${icon}</div>
+      <div style="font-size:14px;font-weight:700;margin-bottom:6px">Подключить ${escapeHtml(String(toolkit).toUpperCase())}</div>
+      <div style="font-size:12px;color:var(--text-2);margin-bottom:14px">
+        Нажми кнопку ниже — откроется страница авторизации.<br>
+        После входа вернись и введи <code>/composio accounts</code>
+      </div>
+      <a class="media-download" href="${escapeHtml(url)}" target="_blank" rel="noopener">🔐 Войти →</a>
+      <div style="margin-top:10px;font-size:11px;color:var(--text-4)">
+        После: <code>/composio tools ${escapeHtml(toolkit)}</code>
+      </div>
+    </div>`;
+}
+
+function composioAuthFromChat(toolkit) {
+  sendMessage(`/composio auth ${toolkit}`);
+}
+
+// ══════════════════════════════════════════
+// ГОРЯЧИЕ КЛАВИШИ
+// ══════════════════════════════════════════
+document.addEventListener('keydown', (event) => {
+  const key = event.key;
+  const mod = event.ctrlKey || event.metaKey;
+
+  if (mod && key.toLowerCase() === 'k') {
+    event.preventDefault();
+    openCmdk();
+    return;
+  }
+  if (key === 'Escape') {
+    closeMediaPicker();
+    closeCmdk();
+    document.getElementById('attachDropdown')?.classList.remove('open');
+    return;
+  }
+  if (mod && key === '/') {
+    event.preventDefault();
+    showNotification('Ctrl+K — команды · Enter — отправить · Shift+Enter — новая строка · Esc — закрыть', 'info');
+    return;
+  }
+  if (mod && key.toLowerCase() === 'b') {
+    event.preventDefault();
+    toggleSidebar();
+  }
+});
+
+// Клик вне меню «Прикрепить» закрывает его
+document.addEventListener('click', (event) => {
+  const dropdown = document.getElementById('attachDropdown');
+  if (!dropdown || !dropdown.classList.contains('open')) return;
+  if (!event.target.closest('#attachDropdown') && !event.target.closest('#btn-attach')) {
+    dropdown.classList.remove('open');
+  }
+});
+
+// ========== ИНИЦИАЛИЗАЦИЯ ==========
+(function init() {
+  setWebSearch(webSearchOn, true);
+  document.getElementById('btn-reasoning')?.classList.toggle('active', reasoningOn);
+  input.focus();
+  refreshMediaSelection();
+  refreshAiStatus();
+  checkHealth(false);
+  renderChatList();
+
+  window.addEventListener('online', () => {
+    showNotification('Соединение восстановлено', 'ok');
+    refreshAiStatus();
+    checkHealth(false);
+  });
+  window.addEventListener('offline', () => showNotification('Нет соединения с интернетом', 'warn'));
