@@ -239,6 +239,15 @@ def chat_completion(messages, provider=None, model=None, system=None,
     """
     provider, model, cfg = resolve_target(provider, model)
 
+    # If Groq is selected but its rotating key pool is empty, use the
+    # built-in offline model instead of returning an error string as meta.
+    if provider == "groq" and not get_groq_key():
+        import local_llm
+        payload_messages = ([{"role": "system", "content": system}] if system else []) + list(messages or [])
+        text = local_llm.complete(payload_messages)
+        return text, {"provider": "local_demo", "model": local_llm.MODEL_ID,
+                      "model_name": local_llm.MODEL_NAME, "offline": True}
+
     if provider == "local_demo":
         import local_llm
         payload_messages = ([{"role": "system", "content": system}] if system else []) + list(messages or [])
