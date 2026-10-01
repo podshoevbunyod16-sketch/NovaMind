@@ -2398,3 +2398,4 @@ document.addEventListener('click', (event) => {
     checkHealth(false);
   });
   window.addEventListener('offline', () => showNotification('Нет соединения с интернетом', 'warn'));
+})();
