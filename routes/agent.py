@@ -26,6 +26,7 @@ import re
 import time
 
 from ai_providers import chat_completion, chat_stream, resolve_target  # noqa: F401 (chat_stream — для тестов)
+from tool_registry import bootstrap_default_tools, call_tool, tool_schemas
 from routes.terminal import (run_agent as run_terminal, safe_path, relative_to_workspace,
                              ensure_workspace, nova_search, nova_read, _save_research,  # noqa: F401
                              can_use_workspace, signed_in, _format_results as _format_search_results)
@@ -236,6 +237,7 @@ def agent_stream():
     provider, model, _ = resolve_target()
     use_tools = tools_enabled()
     if use_tools:
+        bootstrap_default_tools()
         ensure_workspace()
 
     @stream_with_context
@@ -427,8 +429,15 @@ def _perform(action, kind, use_tools, state, goal=""):
         if not query:
             return 'Пустой поисковый запрос. Повтори с {"action":"search","query":"..."}.'
         state["research"] += 1
-        results, meta = nova_search(query, limit=6)
-        text = _format_search_results(query, results, meta["backend"], meta["elapsed_ms"])
+        tool_result = call_tool("web_search", query=query, limit=6)
+        results = tool_result.get("results") or []
+        trace = tool_result.get("trace") or []
+        text = "\n".join(
+            f"{i}. {item.get('title','')}\n   {item.get('url','')}\n   {item.get('snippet','')}"
+            for i, item in enumerate(results, 1)
+        ) or str(tool_result.get("error") or "Поиск ничего не вернул.")
+        backend = next((x.get("backend") for x in trace if x.get("ok")), "registry")
+        elapsed = next((x.get("ms") for x in trace if x.get("ok")), 0)
         if not results:
             yield _ndjson({"type": "step", "icon": "⚠️", "text": f"Поиск «{query}» ничего не дал"})
         else:
@@ -449,7 +458,9 @@ def _perform(action, kind, use_tools, state, goal=""):
         if not url.startswith(("http://", "https://")):
             return "Нужен полный адрес страницы, например https://example.com"
         state["research"] += 1
-        text, elapsed = nova_read(url, max_chars=4000)
+        open_result = call_tool("web_open", url=url, max_chars=4000)
+        text = open_result.get("content") or ""
+        elapsed = 0
         if text:
             _add_sources(state, [{"title": urlparse(url).netloc, "url": url}])
             _note(state, f"страница {url}", text)
@@ -500,7 +511,8 @@ def _perform(action, kind, use_tools, state, goal=""):
     else:
         return f"Неизвестное действие: {kind}. Ответь пользователю."
 
-    result = run_terminal(command, timeout=STEP_TIMEOUT)
+    result = call_tool("shell", command=command, timeout=STEP_TIMEOUT)
+    result["code"] = int(result.get("exit_code", result.get("code", -1)))
     output = (result["stdout"] or "") + (("\n" + result["stderr"]) if result["stderr"] else "")
     if _is_research_command(command) and not result["code"]:
         # модель искала не через action=search, а командой `nova search …` — учитываем так же
