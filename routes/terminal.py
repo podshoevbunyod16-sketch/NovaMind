@@ -791,6 +791,37 @@ def tasks_list():
     return jsonify({"tasks": database.list_tasks(status=request.args.get("status"))})
 
 
+@tasks_bp.route("/api/tasks/batch", methods=["POST"])
+def tasks_batch_create():
+    """Создаёт несколько задач одним запросом.
+
+    Это отдельный API для интерфейса и интеграций: принимает либо tasks=[...],
+    либо text с задачами по одной на строку. Порядок сохраняется.
+    """
+    if not _task_owner_ok():
+        return jsonify({"error": "Нужен вход"}), 403
+    data = request.get_json(silent=True) or {}
+    raw = data.get("tasks")
+    items = raw if isinstance(raw, list) else []
+    if not items and isinstance(data.get("text"), str):
+        items = [line.strip() for line in data["text"].splitlines() if line.strip()]
+    normalized = []
+    for item in items[:20]:
+        if isinstance(item, str):
+            title, detail = item.strip(), ""
+        elif isinstance(item, dict):
+            title, detail = str(item.get("title") or "").strip(), str(item.get("detail") or "").strip()
+        else:
+            continue
+        if title:
+            normalized.append((title, detail))
+    if not normalized:
+        return jsonify({"error": "Добавьте хотя бы одну задачу"}), 400
+    import database
+    tasks = [database.create_task(title, detail, source="user") for title, detail in normalized]
+    return jsonify({"tasks": tasks, "count": len(tasks)})
+
+
 @tasks_bp.route("/api/tasks", methods=["POST"])
 def tasks_create():
     if not _task_owner_ok():

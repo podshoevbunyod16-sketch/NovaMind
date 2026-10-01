@@ -43,6 +43,11 @@
         Чат
       </div>
 
+      <div class="nav-item" onclick="openTasksPanel(); closeSidebar();">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m9 11 3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
+        Агентные задачи <span class="nav-badge" id="taskCountBadge">0</span>
+      </div>
+
       <div class="nav-item" onclick="activateMode({prefix: '/search ', label: '🔎 Веб-поиск', placeholder: 'Введите запрос для поиска...'}); closeSidebar();">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
         Веб-поиск
@@ -224,6 +229,19 @@
     </div>
 
   </main>
+</div>
+
+<!-- ═══════════ ПАНЕЛЬ АГЕНТНЫХ ЗАДАЧ ═══════════ -->
+<div class="tasks-modal" id="tasksPanel" aria-hidden="true" onclick="if(event.target===this)closeTasksPanel()">
+  <section class="tasks-dialog" role="dialog" aria-label="Агентные задачи">
+    <button class="media-close" type="button" onclick="closeTasksPanel()" aria-label="Закрыть">×</button>
+    <div class="eyebrow">AGENT WORKSPACE</div>
+    <h2>Агентные задачи</h2>
+    <p class="media-help">Добавьте одну или несколько задач. Агент будет выполнять их в Linux по шагам: команды, файлы, поиск в интернете и чтение страниц.</p>
+    <textarea id="taskBatchInput" rows="3" placeholder="Каждая строка — отдельная задача\nНапример: найди свежие новости и сохрани краткий отчёт"></textarea>
+    <div class="task-actions"><button class="picker-done" type="button" onclick="createAgentTasks(false)">Создать задачи</button><button class="send-btn task-run-btn" type="button" onclick="createAgentTasks(true)">Создать и запустить</button></div>
+    <div class="task-list" id="taskList"><div class="picker-empty">Задач пока нет</div></div>
+  </section>
 </div>
 
 <!-- ═══════════ ЕДИНАЯ ПАНЕЛЬ ВЫБОРА МЕДИА-МОДЕЛЕЙ ═══════════ -->

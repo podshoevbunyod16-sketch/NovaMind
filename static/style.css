@@ -1248,3 +1248,15 @@ button, input, select, textarea, .stage, .sources-head, .msg-actions {
   .agent-term-head { padding: 10px 12px; font-size: 12.5px; }
   .agent-term-out { margin-left: 0; max-height: 160px; }
 }
+
+/* Агентные задачи */
+.tasks-modal { position: fixed; inset: 0; z-index: 90; display: none; align-items: center; justify-content: center; padding: 18px; background: rgba(3,3,12,.72); backdrop-filter: blur(14px); }
+.tasks-modal.open { display: flex; }
+.tasks-dialog { position: relative; width: min(680px, 100%); max-height: min(760px, 92vh); overflow: auto; padding: 28px; border: 1px solid var(--glass-border); border-radius: 24px; background: rgba(18,17,39,.94); box-shadow: 0 28px 90px rgba(0,0,0,.45); color: var(--txt); }
+.tasks-dialog h2 { margin: 4px 0 8px; }
+#taskBatchInput { width: 100%; resize: vertical; min-height: 84px; box-sizing: border-box; padding: 12px; margin: 12px 0; border: 1px solid var(--glass-border); border-radius: 14px; background: rgba(255,255,255,.06); color: inherit; font: inherit; }
+.task-actions { display: flex; gap: 10px; justify-content: flex-end; margin-bottom: 18px; }
+.task-run-btn { width: auto; height: auto; padding: 10px 15px; border-radius: 12px; }
+.task-row { display: flex; align-items: center; gap: 11px; padding: 12px; margin-top: 8px; border: 1px solid rgba(255,255,255,.08); border-radius: 14px; background: rgba(255,255,255,.035); }
+.task-status { font-size: 20px; color: #a99cff; }.task-status.done { color: #5ae6a0; }.task-row-body { flex: 1; min-width: 0; }.task-row-body strong { display: block; overflow-wrap: anywhere; }.task-row-body small { color: var(--txt-dim); }.task-delete { border: 0; background: transparent; color: var(--txt-dim); font-size: 20px; cursor: pointer; }.task-delete:hover { color: #ff8f8f; }
+@media (max-width: 600px) { .tasks-dialog { padding: 21px 16px; }.task-actions { flex-wrap: wrap; }.task-actions button { flex: 1; } }

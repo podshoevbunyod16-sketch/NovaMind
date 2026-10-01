@@ -213,6 +213,7 @@ def agent_status():
     return jsonify({
         "enabled": enabled,
         "tools": tools_enabled(),
+        "available": bool(enabled and tools_enabled()),
         "max_steps": MAX_STEPS,
         "user": signed_in(),
         "admin": bool(session.get("admin_logged_in")),
