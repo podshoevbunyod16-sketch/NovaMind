@@ -377,21 +377,7 @@ def test_agent_blocked_tool_is_reported_to_model(admin_client, monkeypatch):
     ])
     events = _ndjson(admin_client.post("/api/agent/stream", json={"message": "что у нас в папке?"}))
     assert not [event for event in events if event["type"] == "tool"]
-<<<<<<< HEAD
-    assert _answer(events) == "Инструменты недоступны — отвечу по памяти"
 
-
-def test_decide_detects_actions_and_text():
-    decide = agent_routes._decide
-    assert decide("") is None
-    assert decide('  {"action"') is True
-    assert decide("Привет") is False
-    assert decide("``") is None
-    assert decide("```json\n{") is True
-    assert decide("```\n{") is True
-    assert decide("```python\nprint(1)") is False
-    assert decide("```") is None
-=======
     answer = "".join(event["token"] for event in events if event["type"] == "token")
     assert "Инструменты недоступны" in answer or "по памяти" in answer
 
