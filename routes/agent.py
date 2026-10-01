@@ -444,7 +444,7 @@ def _perform(action, kind, use_tools, state, goal=""):
             _add_sources(state, results)
             _note(state, f"поиск «{query}»", text)
             yield _ndjson({"type": "step", "icon": "🔎",
-                           "text": f"Нашёл {len(results)} по запросу «{query}» ({meta['backend']})"})
+                           "text": f"Нашёл {len(results)} по запросу «{query}» ({backend}, {elapsed} мс)"})
             yield _ndjson({"type": "tool", "name": "search", "command": f"nova search {query}",
                            "code": 0, "output": text, "results": results})
         if state["task_id"]:
@@ -476,29 +476,30 @@ def _perform(action, kind, use_tools, state, goal=""):
     if kind == "ls":
         command, label, icon = "ls -la", "Смотрю файлы", "📂"
     elif kind == "read":
+        rel_path = str(action.get("path", ""))
+        read_result = call_tool("file_read", path=rel_path, max_chars=MAX_OBSERVATION)
+        if not read_result.get("ok"):
+            return str((read_result.get("error") or {}).get("message") or "Не удалось прочитать файл")
         try:
-            path = safe_path(action.get("path", ""))
+            path = safe_path(rel_path)
         except ValueError as exc:
             return str(exc)
-        try:
-            with open(path, "r", encoding="utf-8", errors="replace") as handle:
-                content = handle.read(MAX_OBSERVATION)
-        except OSError as exc:                       # нет файла / это папка — сообщаем модели, а не падаем
-            return f"Не удалось прочитать {relative_to_workspace(path)}: {exc.strerror or exc}"
+        content = str(read_result.get("content") or "")
         yield _ndjson({"type": "step", "icon": "📖", "text": f"Читаю {relative_to_workspace(path)}"})
         yield _ndjson({"type": "tool", "name": "read", "command": relative_to_workspace(path),
                        "code": 0, "output": clip(content, 600)})
         return content
 
     elif kind == "write":
+        rel_path = str(action.get("path", "notes/out.md"))
+        content = str(action.get("content") or "")
+        write_result = call_tool("file_write", path=rel_path, content=content)
+        if not write_result.get("ok"):
+            return str((write_result.get("error") or {}).get("message") or "Не удалось записать файл")
         try:
-            path = safe_path(action.get("path", "notes/out.md"))
+            path = safe_path(rel_path)
         except ValueError as exc:
             return str(exc)
-        content = str(action.get("content") or "")
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w", encoding="utf-8") as handle:
-            handle.write(content)
         if state["task_id"]:
             database.append_task_step(state["task_id"], f"Записал {relative_to_workspace(path)}",
                                       status="doing", log=clip(content, 800))
