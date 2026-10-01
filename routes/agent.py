@@ -32,6 +32,7 @@ from routes.terminal import (run_agent as run_terminal, safe_path, relative_to_w
                              can_use_workspace, signed_in, _format_results as _format_search_results)
 
 agent_bp = Blueprint("agent", __name__)
+_AGENT_HISTORY_CACHE = {}
 
 MAX_STEPS = int(os.getenv("AGENT_MAX_STEPS", "8"))
 AGENT_TIMEOUT = float(os.getenv("AGENT_TIMEOUT", "180"))
@@ -283,7 +284,12 @@ def agent_stream():
 
     provider, model, _ = resolve_target()
     use_tools = tools_enabled()
-    prior = session.get("agent_history", [])
+    history_key = (
+        str(session.get("user_email") or session.get("email") or session.get("username") or "")
+        or request.cookies.get("session")
+        or "anonymous"
+    )
+    prior = _AGENT_HISTORY_CACHE.get(history_key, session.get("agent_history", []))
     if not isinstance(prior, list):
         prior = []
     if use_tools:
@@ -334,7 +340,16 @@ def agent_stream():
                                        "code": 0, "output": clip(page, 1500)})
             else:
                 yield _ndjson({"type": "step", "icon": "⚠️", "text": "Поиск ничего не дал"})
-            history.append({"role": "user", "content": "ПОИСК ВКЛЮЧЁН. Используй найденные данные. Если их достаточно — ответь; если нет — можешь выполнить ещё один search."})
+            observation_parts = [pre_text] if pre_text else ["Поиск ничего не нашёл."]
+            for item in pre_results:
+                opened = call_tool("web_open", url=item.get("url"), max_chars=3000)
+                page = opened.get("content") or ""
+                if page:
+                    page = "Текст страницы:\n" + page if not page.startswith("Текст страницы") else page
+                    observation_parts.append(page[:1800])
+            history.append({"role": "user", "content":
+                            "ПОИСК ВКЛЮЧЁН. Используй найденные данные. Если их достаточно — ответь; "
+                            "если нет — можешь выполнить ещё один search.\n\n" + "\n\n".join(observation_parts)})
 
         # 2. Цикл действий
         seen, duplicates, parse_fails = set(), 0, 0
@@ -356,6 +371,9 @@ def agent_stream():
                 break                                   # ответ соберём из найденного
 
             action = parse_action(raw)
+            extracted = _extract_json_object(strip_think(raw)) if raw else None
+            if action and extracted and strip_think(raw).strip() != extracted.strip():
+                yield _ndjson({"type": "retract", "count": len(strip_think(raw))})
             if not action and raw and '"action"' in raw and _extract_json_object(raw):
                 action = parse_action(_extract_json_object(raw))
                 if action:
@@ -456,8 +474,10 @@ def agent_stream():
                                           log=clip(state["answer"], 1500))
                 yield _ndjson({"type": "task", "task": database.get_task(state["task_id"])})
 
-        session["agent_history"] = (prior + [{"role": "user", "content": goal},
-                                             {"role": "assistant", "content": state["answer"]}])[-10:]
+        updated_history = (prior + [{"role": "user", "content": goal},
+                                       {"role": "assistant", "content": state["answer"]}])[-10:]
+        _AGENT_HISTORY_CACHE[history_key] = updated_history
+        session["agent_history"] = updated_history
         yield _ndjson({"type": "result", "reply": state["answer"], "steps": state["steps"],
                        "task_id": state["task_id"], "model": model,
                        "sources": state["sources"], "searched": state["searched"],
@@ -657,7 +677,7 @@ def _perform(action, kind, use_tools, state, goal=""):
     yield _ndjson({"type": "tool", "name": "run", "command": command, "code": result["code"],
                    "output": clip(output, 1500)})
     if result["code"]:
-        return (f"Код выхода {result['code']}.\\n" + output) if output else (
+        return (f"код выхода {result['code']}.\n" + output) if output else (
             f"Команда завершилась с кодом выхода {result['code']} и пустым выводом."
         )
     return output or "Команда завершилась успешно, но ничего не вывела."
