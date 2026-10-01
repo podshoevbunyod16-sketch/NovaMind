@@ -89,7 +89,7 @@ NOVA_HELP = """Встроенная команда nova (работает чер
 HELP_TEXT = """Доступные команды внутри workspace:
   ls / cat / head / tail / grep / find / tree / wc / stat / file
   mkdir / touch / cp / mv / rm / chmod / ln / md5sum / base64 / iconv
-  git status / git log / git diff / git add / git commit / git clone
+  git status / git log / git diff / git add / git commit / git clone / git push
   curl -s <url> · wget <url> · ping <host> · dig <host> · ssh <host>
   python3 script.py · node script.js · pip install · pytest -q
   ffmpeg · yt-dlp · sqlite3 · tar / zip / unzip · openssl
