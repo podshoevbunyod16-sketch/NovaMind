@@ -410,6 +410,8 @@ def agent_stream():
                 history.append({"role": "assistant", "content": json.dumps(action, ensure_ascii=False)[:2000]})
                 history.append({"role": "user", "content": "План принят. Выполни первый пункт и продолжай работу."})
                 continue
+            if action.get("thought"):
+                yield _ndjson({"type": "step", "icon": "🧠", "text": str(action.get("thought"))[:900]})
             key = _action_key(action, kind)
             if key in seen and kind not in ("answer", "task", "task_done"):
                 duplicates += 1
