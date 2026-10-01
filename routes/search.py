@@ -461,27 +461,38 @@ BACKENDS = {
 
 
 def search_web(query, num=8, backends=None, on_progress=None):
-    """Run configured search backends concurrently, merge, deduplicate and rank."""
-    names = [name for name in (backends or search_backends()) if name in BACKENDS]
-    if not names:
-        return [], []
+    """
+    Перебирает бэкенды до первой успешной выдачи.
+    Возвращает (results, trace) — trace нужен для UI и диагностики.
+    """
     trace = []
-    collected = []
-    with ThreadPoolExecutor(max_workers=min(8, len(names))) as executor:
-        futures = {executor.submit(_run_backend, name, query, num): name for name in names}
-        for future in concurrent.futures.as_completed(futures):
-            found, entry = future.result()
-            trace.append(entry)
-            if on_progress:
-                try:
-                    on_progress(entry)
-                except Exception:
-                    pass
-            if found:
-                collected.extend(found)
-    results = _normalize_and_rank(collected, query=query, limit=num)
-    return results, sorted(trace, key=lambda x: (not x["ok"], x["ms"], x["backend"]))
-
+    for name in (backends or search_backends()):
+        handler = BACKENDS.get(name)
+        if handler is None:
+            continue
+        started = time.time()
+        try:
+            results, error = handler(query, num)
+        except requests.RequestException as exc:
+            results, error = [], f"{exc.__class__.__name__}: {exc}"
+        except Exception as exc:
+            results, error = [], f"{exc.__class__.__name__}: {exc}"
+        entry = {
+            "backend": name,
+            "ok": bool(results),
+            "count": len(results),
+            "ms": int((time.time() - started) * 1000),
+            "error": None if results else (error or "пусто"),
+        }
+        trace.append(entry)
+        if on_progress:
+            try:
+                on_progress(entry)
+            except Exception:
+                pass
+        if results:
+            return results, trace
+    return [], trace
 
 # ══════════════════════════════════════════════════════════════════
 # ЧТЕНИЕ СТРАНИЦ
