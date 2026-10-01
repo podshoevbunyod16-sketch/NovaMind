@@ -216,6 +216,22 @@ def ensure_workspace():
     return created
 
 
+def _validate_command_paths(segments):
+    """Reject filesystem arguments that could escape the workspace."""
+    network_tools={"curl","wget","ping","dig","nslookup","host","ssh","scp","sftp","git"}
+    for argv, program in segments:
+        for index, arg in enumerate(argv[1:], 1):
+            if arg in ("-C","--directory") and index + 1 < len(argv):
+                candidate=argv[index+1]
+                if os.path.isabs(candidate) or candidate == ".." or candidate.startswith("../") or candidate.startswith("..\\"):
+                    raise ValueError("Путь выходит за пределы рабочей папки")
+                continue
+            if program in network_tools and (arg.startswith(("http://","https://","ssh://","git@")) or "://" in arg):
+                continue
+            if arg.startswith("-"):
+                continue
+            if os.path.isabs(arg) or arg == ".." or arg.startswith("../") or arg.startswith("..\\") or "/../" in arg:
+                raise ValueError("Path traversal запрещён")
 def check_command(command):
     """Проверяет команду: пустая, запрещённая конструкция или не из списка.
 
@@ -280,6 +296,7 @@ def check_command(command):
         if program not in ALLOWED_COMMANDS:
             raise ValueError(f"Команда «{program}» не в списке разрешённых")
         prepared.append((segment, program))
+    _validate_command_paths(prepared)
     return prepared, redirects
 
 
@@ -291,7 +308,7 @@ def _open_redirect(target, mode):
 
 
 def _result(code, stdout, stderr="", elapsed=0, timed_out=False):
-    return {"code": code, "stdout": stdout, "stderr": stderr,
+    return {"code": code, "exit_code": code, "stdout": stdout, "stderr": stderr,
             "duration_ms": elapsed, "timed_out": timed_out}
 
 
