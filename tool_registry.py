@@ -57,16 +57,15 @@ def call_tool(name: str, **kwargs) -> dict:
 
 def bootstrap_default_tools():
     if get_tool("web_search") is None:
-        from routes.search import search_web, fetch_page_text
         register_tool(ToolSpec(
             "web_search", "Search the public web and return normalized ranked sources.",
             {"type":"object","properties":{"query":{"type":"string"},"limit":{"type":"integer"}},"required":["query"]},
-            lambda query, limit=8: _search_result(search_web(query, num=min(int(limit),12))),
+            lambda query, limit=8: _search_result(__import__("routes.search", fromlist=["search_web"]).search_web(query, num=min(int(limit),12))),
             permissions=("network",), timeout=20))
         register_tool(ToolSpec(
             "web_open", "Open a public HTTP(S) page and extract readable text.",
             {"type":"object","properties":{"url":{"type":"string"},"max_chars":{"type":"integer"}},"required":["url"]},
-            lambda url, max_chars=6000: _open_result(fetch_page_text(url, max_chars=min(int(max_chars),8000))),
+            lambda url, max_chars=6000: _open_result(__import__("routes.search", fromlist=["fetch_page_text"]).fetch_page_text(url, max_chars=min(int(max_chars),8000))),
             permissions=("network",), timeout=15))
     if get_tool("shell") is None:
         from routes.terminal import run_agent
