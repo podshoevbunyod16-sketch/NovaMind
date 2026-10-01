@@ -653,5 +653,7 @@ def _perform(action, kind, use_tools, state, goal=""):
     yield _ndjson({"type": "tool", "name": "run", "command": command, "code": result["code"],
                    "output": clip(output, 1500)})
     if result["code"]:
-        return output or f"Команда завершилась с кодом выхода {result['code']} и пустым выводом."
+        return (f"Код выхода {result['code']}.\\n" + output) if output else (
+            f"Команда завершилась с кодом выхода {result['code']} и пустым выводом."
+        )
     return output or "Команда завершилась успешно, но ничего не вывела."
