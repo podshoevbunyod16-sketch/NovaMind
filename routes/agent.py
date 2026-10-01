@@ -294,7 +294,7 @@ def agent_stream():
     def generate():
         started = time.time()
         state = {"task_id": None, "steps": 0, "answer": "", "sources": [], "notes": [],
-                 "research": 0}
+                 "research": 0, "searched": bool(data.get("search"))}
 
         # 1. Один первый запрос: простой вопрос получает обычный ответ без лишнего plan/stage.
         # Если модель вернула action=plan, показываем его как план и продолжаем цикл.
@@ -346,8 +346,11 @@ def agent_stream():
                 break
 
             state["steps"] += 1
-            raw, error = _ask(history, provider=provider, model=model,
-                              temperature=0.1, max_tokens=1200, timeout=60)
+            ask_kwargs = {"provider": provider, "model": model,
+                          "temperature": 0.1, "max_tokens": 1200, "timeout": 60}
+            if data.get("search"):
+                ask_kwargs["system"] = "ПОИСК ВКЛЮЧЁН. Используй найденные данные и указывай источники [1], [2], [3]."
+            raw, error = _ask(history, **ask_kwargs)
             if error:
                 yield _ndjson({"type": "error", "text": error})
                 break                                   # ответ соберём из найденного
@@ -457,7 +460,7 @@ def agent_stream():
                                              {"role": "assistant", "content": state["answer"]}])[-10:]
         yield _ndjson({"type": "result", "reply": state["answer"], "steps": state["steps"],
                        "task_id": state["task_id"], "model": model,
-                       "sources": state["sources"],
+                       "sources": state["sources"], "searched": state["searched"],
                        "offline": provider == "local_demo"})
         yield _ndjson({"type": "done"})
 
