@@ -56,8 +56,8 @@ AGENT_SYSTEM_PROMPT = """Ты — агент NovaMind внутри «мален�
 
 Правила:
 1. Ты ДОЛЖЕН отвечать ровно одним JSON-объектом и ничего больше — без слов вокруг.
-2. Сначала разберись в задаче (run/read/ls), потом действуй, потом answer.
-3. Один инструмент за один шаг. Не выдумывай результат команды — сначала выполни её.
+2. Ты — мозг агента, а Linux/Web/MCP — его инструменты. Для задач про проект, код, файлы, ошибки или систему сначала используй Linux (run/read/ls), чтобы получить фактическое состояние, затем анализируй результат и выбирай следующий инструмент.
+3. Один инструмент за один шаг. После каждого инструмента используй его фактическое наблюдение; не выдумывай результат.
 4. Команды выполняются ТОЛЬКО по одной, без | и >.
 5. Нужны свежие данные или факты — сделай search (обычно хватает 1–3 поисков), потом опирайся на найденное.
 6. НЕ повторяй одно и то же действие: результат уже перед тобой. Как только данных хватает —
@@ -69,6 +69,21 @@ AGENT_SYSTEM_PROMPT = """Ты — агент NovaMind внутри «мален�
 
 def is_enabled():
     return os.getenv("AGENT_ENABLED", os.getenv("TERMINAL_ENABLED", "0")) == "1"
+
+
+def _looks_like_local_task(goal):
+    """Определяет запросы, где агенту полезно сначала посмотреть Linux/workspace."""
+    text = str(goal or "").lower()
+    markers = (
+        "проект", "код", "файл", "папк", "директор", "репозитор", "git",
+        "терминал", "linux", "bash", "shell", "команд", "скрипт", "python",
+        "flask", "ошиб", "не работает", "исправ", "тест", "pytest", "найди в",
+        "посмотр", "покажи файлы", "что находится", "source", "code", "file",
+        "folder", "directory", "repo", "repository", "bug", "fix", "test",
+    )
+    return any(item in text for item in markers) or bool(
+        re.search(r"(?:^|\s)(?:ls|pwd|find|grep|sed|awk|git|pytest|python3?|npm|curl)(?:\s|$)", text)
+    )
 
 
 def tools_enabled():
@@ -311,6 +326,33 @@ def agent_stream():
             if isinstance(item, dict) and item.get("role") in ("user", "assistant"):
                 history.append({"role": item["role"], "content": str(item.get("content") or "")[:4000]})
         history.append({"role": "user", "content": goal})
+
+        # Linux-first bootstrap: для локальных/кодовых задач сначала получаем
+        # фактическое состояние workspace. Это контекстный снимок и не расходует
+        # AGENT_MAX_STEPS — модель сама решает, какой инструмент нужен дальше.
+        if use_tools and _looks_like_local_task(goal) and not data.get("search"):
+            yield _ndjson({"type": "stage", "scene": "linux", "title": "Проверяю Linux-окружение",
+                           "text": "Сначала смотрю состояние рабочей папки, затем анализирую результат."})
+            try:
+                bootstrap = call_tool(
+                    "shell",
+                    command="find . -maxdepth 2 -type f | head -80",
+                    timeout=min(STEP_TIMEOUT, 10),
+                )
+                bootstrap_text = str(bootstrap.get("stdout") or bootstrap.get("output") or
+                                     bootstrap.get("stderr") or "").strip()
+                if not bootstrap_text:
+                    bootstrap_text = "Рабочая папка пуста или файлов не найдено."
+                history.append({"role": "user", "content":
+                                "LINUX BOOTSTRAP — фактическое состояние workspace перед действиями агента:\n" +
+                                clip(bootstrap_text, 2200)})
+                yield _ndjson({"type": "step", "icon": "🐧",
+                               "text": "Linux-окружение проверено: состояние workspace передано модели."})
+            except Exception as exc:
+                history.append({"role": "user", "content":
+                                f"LINUX BOOTSTRAP завершился ошибкой: {str(exc)[:500]}. Продолжай через доступные инструменты."})
+                yield _ndjson({"type": "step", "icon": "⚠️",
+                               "text": "Не удалось получить начальный снимок Linux, продолжаю через инструменты."})
 
         if data.get("search") and use_tools:
             yield _ndjson({"type": "stage", "scene": "search", "title": "Поиск в интернете",
