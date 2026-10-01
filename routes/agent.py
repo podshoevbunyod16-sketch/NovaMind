@@ -234,11 +234,13 @@ def _synthesize(goal, state, provider, model):
         "противоречивые — скажи об этом честно. Не пиши JSON, не пересказывай свои шаги, "
         "не показывай команды и не вставляй ссылки."
     )
-    text, _error = _ask(
+    text, meta = chat_completion(
         [{"role": "system", "content": "Ты — NovaMind, ассистент. Отвечай точно и по делу."},
          {"role": "user", "content": prompt}],
         provider=provider, model=model, temperature=0.3, max_tokens=1200, timeout=60,
     )
+    if text is None:
+        text = ""
     action = parse_action(text)
     if action:                                   # модель всё равно ответила JSON-ом
         text = str(action.get("text") or "").strip() if action.get("action") == "answer" else ""
@@ -308,7 +310,7 @@ def agent_stream():
         for item in prior[-8:]:
             if isinstance(item, dict) and item.get("role") in ("user", "assistant"):
                 history.append({"role": item["role"], "content": str(item.get("content") or "")[:4000]})
-        history.append({"role": "user", "content": f"Задача: {goal}"})
+        history.append({"role": "user", "content": goal})
 
         if data.get("search") and use_tools:
             yield _ndjson({"type": "stage", "scene": "search", "title": "Поиск в интернете",
@@ -587,7 +589,10 @@ def _perform(action, kind, use_tools, state, goal=""):
             yield _ndjson({"type": "step", "icon": "🔎",
                            "text": f"Нашёл {len(results)} по запросу «{query}» ({backend}, {elapsed} мс)"})
             yield _ndjson({"type": "tool", "name": "search", "command": f"nova search {query}",
-                           "code": 0, "output": text, "results": results})
+                           "code": 0, "output": "\n".join(
+                               f"[{i}] {item.get('title','')}\n   {item.get('url','')}\n   {item.get('snippet','')}"
+                               for i, item in enumerate(results, 1)
+                           ), "results": results})
         if state["task_id"]:
             import database as _db
             _db.append_task_step(state["task_id"], f"Поиск: {query}", status="done",
