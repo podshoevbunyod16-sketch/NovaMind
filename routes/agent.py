@@ -584,6 +584,11 @@ def _perform(action, kind, use_tools, state, goal=""):
         tool_result = call_tool("web_search", query=query, limit=3)
         results = tool_result.get("results") or []
         trace = tool_result.get("trace") or []
+        if isinstance(trace, dict):
+            trace = [trace]
+        elif not isinstance(trace, (list, tuple)):
+            trace = []
+        trace = [x for x in trace if isinstance(x, dict)]
         text = "\n".join(
             f"{i}. {item.get('title','')}\n   {item.get('url','')}\n   {item.get('snippet','')}"
             for i, item in enumerate(results, 1)
