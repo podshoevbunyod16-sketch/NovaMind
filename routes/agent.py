@@ -302,7 +302,7 @@ def agent_stream():
     def generate():
         started = time.time()
         state = {"task_id": None, "steps": 0, "answer": "", "sources": [], "notes": [],
-                 "research": 0, "searched": bool(data.get("search"))}
+                 "research": 0, "searched": bool(data.get("search")), "tool_steps": 0}
 
         # 1. Один первый запрос: простой вопрос получает обычный ответ без лишнего plan/stage.
         # Если модель вернула action=plan, показываем его как план и продолжаем цикл.
@@ -353,7 +353,7 @@ def agent_stream():
 
         # 2. Цикл действий
         seen, duplicates, parse_fails = set(), 0, 0
-        for step in range(1, MAX_STEPS + 1):
+        for step in range(1, MAX_STEPS + 4):
             if time.time() - started > AGENT_TIMEOUT:
                 yield _ndjson({"type": "step", "icon": "⏱", "text": "Время вышло — собираю ответ"})
                 break
@@ -414,6 +414,10 @@ def agent_stream():
                 continue
             if action.get("thought"):
                 yield _ndjson({"type": "step", "icon": "🧠", "text": str(action.get("thought"))[:900]})
+            if kind not in ("answer", "plan"):
+                if state["tool_steps"] >= MAX_STEPS:
+                    break
+                state["tool_steps"] += 1
             key = _action_key(action, kind)
             if key in seen and kind not in ("answer", "task", "task_done"):
                 duplicates += 1
@@ -439,11 +443,11 @@ def agent_stream():
                 history.append({"role": "user", "content":
                                 "VERIFY: действие не подтверждено. Не повторяй вслепую; "
                                 "исправь параметры или выбери другой инструмент."})
-            nudge = _nudge(state, MAX_STEPS - step)
+            nudge = _nudge(state, MAX_STEPS - state["tool_steps"])
             history.append({"role": "user", "content":
                             f"Результат действия:\n{observation}" + (f"\n\n{nudge}" if nudge else "")})
 
-        if state["steps"] >= MAX_STEPS and not state["answer"]:
+        if state["tool_steps"] >= MAX_STEPS and not state["answer"]:
             yield _ndjson({"type": "step", "icon": "⏹", "text": "Шаги закончились — готовлю итог"})
 
         # 3. Нет ответа (лимит шагов, таймаут, повторы, сбой) — собираем его по найденному
@@ -663,7 +667,8 @@ def _perform(action, kind, use_tools, state, goal=""):
         return f"Неизвестное действие: {kind}. Ответь пользователю."
 
     result = call_tool("shell", command=command, timeout=STEP_TIMEOUT)
-    result["code"] = int(result.get("exit_code", result.get("code", -1)) or -1)
+    raw_code = result.get("exit_code", result.get("code"))
+    result["code"] = int(-1 if raw_code is None else raw_code)
     stdout = str(result.get("stdout") or "")
     stderr = str(result.get("stderr") or "")
     output = stdout + (("\n" + stderr) if stderr else "")
