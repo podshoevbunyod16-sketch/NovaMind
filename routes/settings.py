@@ -99,6 +99,28 @@ def settings_select():
                     "provider_name": PROVIDER_LABELS.get(provider, provider),
                     "message": f"Выбрано: {model}"})
 
+SUPPORTED_LANGUAGES = ("tg", "ru", "en")
+
+
+@settings_bp.route('/api/settings/lang')
+def get_ui_language():
+    import config
+    return jsonify({"language": config.ui_language,
+                    "default": "tg",
+                    "supported": list(SUPPORTED_LANGUAGES)})
+
+
+@settings_bp.route('/api/settings/lang', methods=['POST'])
+def set_ui_language():
+    import config
+    data = request.get_json() or {}
+    lang = (data.get("language") or "").strip().lower()
+    if lang not in SUPPORTED_LANGUAGES:
+        return jsonify({"error": "Язык не поддерживается. Доступны: tg, ru, en"}), 400
+    config.save_ui_language(lang)
+    return jsonify({"success": True, "language": config.ui_language})
+
+
 @settings_bp.route('/admin/login')
 def admin_login_page():
     return render_template('admin.html')

@@ -87,6 +87,21 @@
         <div class="health-grid" id="healthGrid"><div class="empty-card loading-card">Проверка бэкендов…</div></div>
       </section>
 
+      <section class="health-card">
+        <div class="catalog-heading">
+          <div>
+            <div class="eyebrow">INTERFACE LANGUAGE</div>
+            <h2>Язык интерфейса</h2>
+            <p>Выберите язык: интерфейс, подсказки и сообщения переключаются сразу.</p>
+          </div>
+        </div>
+        <div style="display:flex;gap:10px;flex-wrap:wrap;" id="langGrid">
+          <button class="outline-btn" type="button" data-lang="tg">Тоҷикӣ</button>
+          <button class="outline-btn" type="button" data-lang="ru">Русский</button>
+          <button class="outline-btn" type="button" data-lang="en">English</button>
+        </div>
+      </section>
+
       <section class="tips-grid">
         <article><strong>Бесплатные модели</strong><p>OpenRouter помечает бесплатные модели суффиксом <code>:free</code>. Такие модели могут иметь ограничения по скорости.</p></article>
         <article><strong>Офлайн-модель</strong><p>Провайдер <code>local_demo</code> работает без интернета и ключей. Он не ищет в сети, но чат никогда не остаётся без ответа.</p></article>
@@ -95,6 +110,7 @@
     </main>
   </div>
   <div class="toast" id="toast" role="status"></div>
+  <script src="/static/i18n.js"></script>
   <script src="/static/settings.js"></script>
 </body>
 </html>
