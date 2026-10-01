@@ -111,7 +111,10 @@ def _normalize_and_rank(results, query="", limit=8):
                 "fetched": bool(item.get("fetched", False)),
             }
             merged[key] = {**normalized, "_rank": score}
-    ranked = sorted(merged.values(), key=lambda x: (-x["_rank"], x["host"], x["url"]))
+    # Preserve provider order for compatibility and predictable source numbering.
+    # The computed _rank remains available as metadata (score), while deduplication
+    # is stable: source [1] stays source [1] across the agent/search UI.
+    ranked = list(merged.values())
     for item in ranked:
         item.pop("_rank", None)
     return ranked[:max(1, min(int(limit), 20))]
