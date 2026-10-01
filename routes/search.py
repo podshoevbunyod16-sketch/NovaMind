@@ -83,6 +83,39 @@ def _norm_result(title, url, snippet=""):
     }
 
 
+def _normalize_and_rank(results, query="", limit=8):
+    """Normalize, deduplicate and deterministically rank mixed backend results."""
+    query_terms = {x.lower() for x in re.findall(r"[a-zA-Zа-яА-Я0-9]{3,}", query or "")}
+    merged = {}
+    for item in results or []:
+        url = str(item.get("url") or "").strip()
+        if not url.startswith(("http://", "https://")):
+            continue
+        canonical = url.split("#", 1)[0].rstrip("/")
+        title = str(item.get("title") or "").strip()
+        snippet = str(item.get("snippet") or "").strip()
+        host = urlparse(canonical).netloc.lower()
+        key = canonical.lower()
+        score = float(item.get("score") or 0)
+        text = f"{title} {snippet} {host}".lower()
+        score += min(1.0, sum(1 for term in query_terms if term in text) / max(1, len(query_terms)))
+        if host.endswith(".gov") or ".gov." in host or host.endswith(".edu"):
+            score += 1.0
+        if "docs." in host or "/docs/" in canonical.lower():
+            score += 0.4
+        if key not in merged or score > merged[key].get("_rank", -1):
+            normalized = {
+                "title": title[:220], "url": canonical, "snippet": snippet[:600],
+                "host": host, "score": round(score, 4),
+                "source_type": "search", "published_at": item.get("published_at"),
+                "fetched": bool(item.get("fetched", False)),
+            }
+            merged[key] = {**normalized, "_rank": score}
+    ranked = sorted(merged.values(), key=lambda x: (-x["_rank"], x["host"], x["url"]))
+    for item in ranked:
+        item.pop("_rank", None)
+    return ranked[:max(1, min(int(limit), 20))]
+
 def search_web_apilayer(query, num=8):
     if not APILAYER_KEY:
         return [], "нет ключа APILAYER_KEY"
@@ -428,38 +461,26 @@ BACKENDS = {
 
 
 def search_web(query, num=8, backends=None, on_progress=None):
-    """
-    Перебирает бэкенды до первой успешной выдачи.
-    Возвращает (results, trace) — trace нужен для UI и диагностики.
-    """
+    """Run configured search backends concurrently, merge, deduplicate and rank."""
+    names = [name for name in (backends or search_backends()) if name in BACKENDS]
+    if not names:
+        return [], []
     trace = []
-    for name in (backends or search_backends()):
-        handler = BACKENDS.get(name)
-        if handler is None:
-            continue
-        started = time.time()
-        try:
-            results, error = handler(query, num)
-        except requests.RequestException as exc:
-            results, error = [], f"{exc.__class__.__name__}: {exc}"
-        except Exception as exc:  # бэкенд не должен ронять весь поиск
-            results, error = [], f"{exc.__class__.__name__}: {exc}"
-        entry = {
-            "backend": name,
-            "ok": bool(results),
-            "count": len(results),
-            "ms": int((time.time() - started) * 1000),
-            "error": None if results else (error or "пусто"),
-        }
-        trace.append(entry)
-        if on_progress:
-            try:
-                on_progress(entry)
-            except Exception:
-                pass
-        if results:
-            return results, trace
-    return [], trace
+    collected = []
+    with ThreadPoolExecutor(max_workers=min(8, len(names))) as executor:
+        futures = {executor.submit(_run_backend, name, query, num): name for name in names}
+        for future in concurrent.futures.as_completed(futures):
+            found, entry = future.result()
+            trace.append(entry)
+            if on_progress:
+                try:
+                    on_progress(entry)
+                except Exception:
+                    pass
+            if found:
+                collected.extend(found)
+    results = _normalize_and_rank(collected, query=query, limit=num)
+    return results, sorted(trace, key=lambda x: (not x["ok"], x["ms"], x["backend"]))
 
 
 # ══════════════════════════════════════════════════════════════════
