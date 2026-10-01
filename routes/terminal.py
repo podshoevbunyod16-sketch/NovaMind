@@ -146,7 +146,7 @@ def can_use_workspace():
 
 def denied(reason):
     return jsonify({"error": reason, "enabled": is_enabled(), "user": signed_in(),
-                    "admin": is_admin()}), 403
+                    "admin": is_admin(), "code": 2, "stdout": "", "stderr": reason}), 403
 
 
 def guard():
