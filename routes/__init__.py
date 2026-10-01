@@ -9,7 +9,8 @@ from .media import media_bp
 from .search import search_bp
 from .composio import composio_bp
 from .terminal import terminal_bp, tasks_bp
-from .agent import agent_bp\nfrom .diagnostics import diagnostics_bp
+from .agent import agent_bp
+from .diagnostics import diagnostics_bp
 
 ALL_BLUEPRINTS = [
     chat_bp,
@@ -21,5 +22,6 @@ ALL_BLUEPRINTS = [
     composio_bp,
     terminal_bp,
     tasks_bp,
-    agent_bp,\n    diagnostics_bp,
+    agent_bp,
+    diagnostics_bp,
 ]
