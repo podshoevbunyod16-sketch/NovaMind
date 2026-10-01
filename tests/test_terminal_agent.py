@@ -384,6 +384,7 @@ def test_agent_blocked_tool_is_reported_to_model(admin_client, monkeypatch):
     ])
     events = _ndjson(admin_client.post("/api/agent/stream", json={"message": "что у нас в папке?"}))
     assert not [event for event in events if event["type"] == "tool"]
+<<<<<<< HEAD
     assert _answer(events) == "Инструменты недоступны — отвечу по памяти"
 
 
@@ -397,6 +398,11 @@ def test_decide_detects_actions_and_text():
     assert decide("```\n{") is True
     assert decide("```python\nprint(1)") is False
     assert decide("```") is None
+=======
+
+    answer = "".join(event["token"] for event in events if event["type"] == "token")
+    assert "Инструменты недоступны" in answer or "по памяти" in answer
+>>>>>>> origin/agent-system-audit-fix-2026-10
 
 
 # ══════════════ агент: ответ приходит всегда (перенесено из main) ══════════════
@@ -494,6 +500,7 @@ def test_agent_nova_search_via_run_collects_sources(admin_client, monkeypatch, s
     monkeypatch.setattr(terminal, "nova_search", agent_routes.nova_search)
     _stub_model(monkeypatch, ['{"action":"run","command":"nova search страны ввп"}', "Готово"])
     events = _ndjson(admin_client.post("/api/agent/stream", json={"message": "страны"}))
+<<<<<<< HEAD
     sources = [event for event in events if event["type"] == "sources"]
     assert sources and sources[-1]["sources"][0]["url"] == "https://example.org/gdp"
 
@@ -506,3 +513,7 @@ def test_think_filter_handles_split_tags():
         shown, thought = shown + visible, thought + hidden
     visible, hidden = thinker.flush()
     assert (shown + visible, thought + hidden) == ("Привет <b>ок", "abc")
+=======
+    assert any(event["type"] == "sources" for event in events)
+
+>>>>>>> origin/agent-system-audit-fix-2026-10

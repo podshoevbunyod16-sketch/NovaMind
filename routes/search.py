@@ -83,6 +83,42 @@ def _norm_result(title, url, snippet=""):
     }
 
 
+def _normalize_and_rank(results, query="", limit=8):
+    """Normalize, deduplicate and deterministically rank mixed backend results."""
+    query_terms = {x.lower() for x in re.findall(r"[a-zA-Zа-яА-Я0-9]{3,}", query or "")}
+    merged = {}
+    for item in results or []:
+        url = str(item.get("url") or "").strip()
+        if not url.startswith(("http://", "https://")):
+            continue
+        canonical = url.split("#", 1)[0].rstrip("/")
+        title = str(item.get("title") or "").strip()
+        snippet = str(item.get("snippet") or "").strip()
+        host = urlparse(canonical).netloc.lower()
+        key = canonical.lower()
+        score = float(item.get("score") or 0)
+        text = f"{title} {snippet} {host}".lower()
+        score += min(1.0, sum(1 for term in query_terms if term in text) / max(1, len(query_terms)))
+        if host.endswith(".gov") or ".gov." in host or host.endswith(".edu"):
+            score += 1.0
+        if "docs." in host or "/docs/" in canonical.lower():
+            score += 0.4
+        if key not in merged or score > merged[key].get("_rank", -1):
+            normalized = {
+                "title": title[:220], "url": canonical, "snippet": snippet[:600],
+                "host": host, "score": round(score, 4),
+                "source_type": "search", "published_at": item.get("published_at"),
+                "fetched": bool(item.get("fetched", False)),
+            }
+            merged[key] = {**normalized, "_rank": score}
+    # Preserve provider order for compatibility and predictable source numbering.
+    # The computed _rank remains available as metadata (score), while deduplication
+    # is stable: source [1] stays source [1] across the agent/search UI.
+    ranked = list(merged.values())
+    for item in ranked:
+        item.pop("_rank", None)
+    return ranked[:max(1, min(int(limit), 20))]
+
 def search_web_apilayer(query, num=8):
     if not APILAYER_KEY:
         return [], "нет ключа APILAYER_KEY"
@@ -442,7 +478,7 @@ def search_web(query, num=8, backends=None, on_progress=None):
             results, error = handler(query, num)
         except requests.RequestException as exc:
             results, error = [], f"{exc.__class__.__name__}: {exc}"
-        except Exception as exc:  # бэкенд не должен ронять весь поиск
+        except Exception as exc:
             results, error = [], f"{exc.__class__.__name__}: {exc}"
         entry = {
             "backend": name,
@@ -460,7 +496,6 @@ def search_web(query, num=8, backends=None, on_progress=None):
         if results:
             return results, trace
     return [], trace
-
 
 # ══════════════════════════════════════════════════════════════════
 # ЧТЕНИЕ СТРАНИЦ

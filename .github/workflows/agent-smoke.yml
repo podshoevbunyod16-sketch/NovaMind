@@ -1,0 +1,19 @@
+name: NovaMind agent smoke
+on:
+  push:
+    branches:
+      - agent-system-audit-fix-2026-10
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Compile changed Python modules
+        run: python -m py_compile routes/__init__.py routes/agent.py routes/search.py routes/terminal.py tool_registry.py routes/diagnostics.py config.py
+      - name: Install test dependencies
+        run: pip install -r requirements-dev.txt
+      - name: Agent/search tests
+        run: pytest -q tests/test_terminal_agent.py tests/test_search_and_ai.py tests/test_search_linux.py
