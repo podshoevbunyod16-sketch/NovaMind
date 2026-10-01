@@ -644,6 +644,8 @@ def terminal_run():
         return blocked
     data = request.get_json(silent=True) or {}
     command = data.get("command", "")
+    if any(token in str(command) for token in ("|", ">", ">>", "&&", "||", "`", "$(")):
+        return jsonify({"error": "Составные shell-конструкции отключены — выполняйте команды по одной", "command": command}), 400
     try:
         result = run_command(command, timeout=data.get("timeout"))
     except ValueError as exc:
