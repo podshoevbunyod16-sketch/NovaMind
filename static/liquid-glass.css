@@ -121,7 +121,7 @@ body {
   overflow-x: hidden;
 }
 
-/* Слой 1 — дрейфующие aurora-пятна */
+/* Слой 1 — aurora-пятна (статичный фон, без анимации) */
 body::before {
   content: "";
   position: fixed; inset: -25vmax;
@@ -133,17 +133,9 @@ body::before {
     radial-gradient(30vmax 30vmax at 24% 88%, var(--aurora-4), transparent 60%),
     linear-gradient(160deg, var(--bg-1), var(--bg-0) 70%);
   filter: saturate(140%);
-  animation: aurora-drift 42s var(--ease) infinite alternate;
-  will-change: transform, background-position;
-}
-@keyframes aurora-drift {
-  0%   { transform: translate3d(0,0,0) scale(1.02) rotate(0deg);   background-position: 0% 0%, 100% 0%, 100% 100%, 0% 100%, 0 0; }
-  33%  { transform: translate3d(-3%, 2%, 0) scale(1.08) rotate(3deg);  background-position: 12% 8%, 88% 12%, 92% 88%, 8% 92%, 0 0; }
-  66%  { transform: translate3d(3%, -2%, 0) scale(1.05) rotate(-2deg); background-position: 8% 14%, 94% 4%, 86% 94%, 14% 86%, 0 0; }
-  100% { transform: translate3d(-1%, 3%, 0) scale(1.1) rotate(2deg);    background-position: 4% 6%, 96% 8%, 90% 96%, 4% 96%, 0 0; }
 }
 
-/* Слой 2 — спекулярный блик, медленно вращается */
+/* Слой 2 — спекулярный блик (статичный) */
 body::after {
   content: "";
   position: fixed; inset: -50%;
@@ -153,10 +145,7 @@ body::after {
       rgba(255,255,255,.035) 180deg, transparent 240deg,
       rgba(255,255,255,.05) 320deg, transparent 360deg);
   mix-blend-mode: soft-light;
-  animation: sheen-spin 68s linear infinite;
-  will-change: transform;
 }
-@keyframes sheen-spin { to { transform: rotate(360deg); } }
 
 /* Слой 3 — зерно + виньетка (поверх фона, под контентом) */
 .lg-grain {
@@ -422,15 +411,67 @@ html[data-glass-theme="light"] .glass-btn.is-on { color: var(--accent); }
   .lg-dot.pulse, .glass-btn.is-live::after, .glass-sheen::after { animation: none !important; }
   * { transition-duration: .01ms !important; }
 }
-/* Пользовательский переключатель «меньше анимаций» в интерфейсе */
-html[data-motion="calm"] body::before,
-html[data-motion="calm"] body::after,
-html[data-motion="calm"] .stage-scene *,
-html[data-motion="calm"] .lg-bar > span,
-html[data-motion="calm"] .lg-skeleton { animation: none !important; }
 
 /* ── 14. FALLBACK: НЕТ backdrop-filter ─────────────────────────── */
 @supports not ((backdrop-filter: blur(2px)) or (-webkit-backdrop-filter: blur(2px))) {
   .glass, .glass-panel, .glass-card, .glass-sheet, .glass-btn, .glass-input,
   .glass-textarea, .glass-select { background-color: color-mix(in srgb, var(--bg-1) 88%, white 6%); }
+}
+
+/* ═══════════ Язык интерфейса (static/i18n.js) ═══════════ */
+/* Пока i18n.js переводит статичный текст, страница не мигает русским */
+html.i18n-pending body { visibility: hidden; }
+
+.lang-picker {
+  display: inline-flex;
+  gap: 4px;
+  padding: 4px;
+  border-radius: var(--r-pill);
+  background: var(--glass-fill);
+  border: 1px solid var(--glass-border-soft);
+  flex-wrap: wrap;
+}
+.lang-option {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: var(--text-2);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  min-height: 36px;              /* удобно попадать пальцем на телефоне */
+  padding: 6px 14px;
+  border-radius: var(--r-pill);
+  cursor: pointer;
+  transition: background var(--t-fast) var(--ease), color var(--t-fast) var(--ease);
+}
+.lang-option:hover { background: var(--glass-fill-strong); color: var(--text-1); }
+.lang-option.active {
+  background: var(--accent);
+  color: var(--on-accent);
+  box-shadow: 0 4px 14px -6px var(--accent-glow);
+}
+.lang-option:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.lang-picker-compact .lang-option { min-height: 30px; padding: 4px 10px; font-size: 12px; letter-spacing: .04em; }
+
+/* боковая панель чата */
+.sidebar-lang {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 4px 4px 10px;
+}
+.sidebar-lang-label { font-size: 12px; color: var(--text-3); }
+
+/* карточка входа */
+.auth-lang { display: flex; justify-content: center; margin: 0 auto 18px; }
+.auth-lang .lang-picker { justify-content: center; }
+
+/* настройки */
+.lang-card [data-lang-picker] { flex-shrink: 0; }
+@media (max-width: 640px) {
+  .lang-card { flex-direction: column; align-items: stretch; }
+  .lang-card .lang-picker { display: flex; }
+  .lang-card .lang-option { flex: 1; }
 }

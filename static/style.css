@@ -75,9 +75,7 @@ html { overflow-x: hidden; }
   height: 46px; width: auto; display: block; object-fit: contain;
   border-radius: 12px;
   filter: drop-shadow(0 6px 16px var(--accent-glow));
-  animation: logo-float 6s var(--ease) infinite alternate;
 }
-@keyframes logo-float { from { transform: translateY(0) rotate(-1deg);} to { transform: translateY(-4px) rotate(1.5deg);} }
 .logo-text { font-size: 17px; font-weight: 800; letter-spacing: -.02em; }
 .logo-sub  {
   font-size: 9.5px; color: var(--text-4); letter-spacing: .18em; text-transform: uppercase;
@@ -304,20 +302,6 @@ html[data-glass-theme="light"] .menu-btn.is-open { color: var(--accent); }
 .icon-btn:active { transform: scale(.94); }
 .icon-btn svg { width: 15px; height: 15px; }
 
-.media-model-btn {
-  display: flex; align-items: center; gap: 7px;
-  padding: 8px 12px; font: 700 11.5px/1 inherit;
-  color: var(--text-2);
-  background: var(--glass-fill); border: 1px solid var(--glass-border-soft);
-  border-radius: var(--r-pill); cursor: pointer;
-  box-shadow: var(--glass-inset);
-  transition: all var(--t) var(--ease);
-}
-.media-model-btn:hover { color: var(--text-1); border-color: var(--glass-border); transform: translateY(-1px); }
-.media-model-btn svg { width: 14px; height: 14px; flex-shrink: 0; }
-.media-model-btn { max-width: min(230px, 40vw); }
-.media-model-label { min-width: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-
 /* ═══ ЧАТ ══════════════════════════════════════════════════════ */
 .chat-container {
   /* flex-basis auto + запрет сжатия: панель растёт под содержимое,
@@ -339,13 +323,12 @@ html[data-glass-theme="light"] .menu-btn.is-open { color: var(--accent); }
   width: 118px; height: auto; display: block; margin: 0 auto 18px;
   border-radius: 24px;
   filter: drop-shadow(0 18px 34px var(--accent-glow));
-  animation: logo-float 7s var(--ease) infinite alternate;
 }
 .welcome h1 { font-size: 25px; font-weight: 800; letter-spacing: -.03em; margin-bottom: 8px; }
 .welcome h1 span {
   background: linear-gradient(120deg, var(--accent), var(--accent-2), var(--accent-3));
   -webkit-background-clip: text; background-clip: text; color: transparent;
-  background-size: 200% 100%; animation: hue-slide 6s linear infinite;
+  background-size: 200% 100%; animation: hue-slide 6s linear infinite;   /* переливание имени Khirad — оставляем */
 }
 @keyframes hue-slide { to { background-position: 200% 0; } }
 .welcome p {
@@ -356,11 +339,6 @@ html[data-glass-theme="light"] .menu-btn.is-open { color: var(--accent); }
   background: radial-gradient(circle at 32% 28%, rgba(255,255,255,.85), transparent 42%),
               linear-gradient(140deg, var(--accent), var(--accent-2));
   box-shadow: 0 0 50px var(--accent-glow), inset 0 2px 6px rgba(255,255,255,.5);
-  animation: orb-breathe 4.5s var(--ease) infinite;
-}
-@keyframes orb-breathe {
-  0%,100% { transform: scale(1); box-shadow: 0 0 42px var(--accent-glow), inset 0 2px 6px rgba(255,255,255,.5); }
-  50%     { transform: scale(1.06); box-shadow: 0 0 72px var(--accent-glow), inset 0 2px 6px rgba(255,255,255,.55); }
 }
 
 .suggestions { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 10px; width: 100%; max-width: 520px; }
@@ -818,28 +796,7 @@ html[data-glass-theme="light"] .toolbar-btn.active { color: var(--accent); }
 
 /* [hidden] должен побеждать display:flex, иначе "скрытые" плашки висят на экране
    (так на телефоне поверх чата раньше открывались панели). */
-[hidden], .mode-active[hidden], .media-active[hidden] { display: none !important; }
-
-.media-active {
-  display: flex; align-items: center; gap: 8px;
-  margin-bottom: 8px; padding: 7px 11px;
-  border-radius: var(--r-pill);
-  background: var(--accent-soft);
-  border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
-  font-size: 11.5px; color: color-mix(in srgb, var(--accent) 55%, white);
-}
-html[data-glass-theme="light"] .media-active { color: var(--accent); }
-.media-active-dot {
-  width: 7px; height: 7px; border-radius: 50%; background: var(--accent-2);
-  box-shadow: 0 0 9px var(--accent-2); animation: dot-pulse 1.7s var(--ease) infinite;
-}
-.media-active-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.media-active-clear {
-  width: 20px; height: 20px; border-radius: 50%; cursor: pointer;
-  background: transparent; border: 1px solid var(--glass-border-soft);
-  color: inherit; font-size: 13px; line-height: 1;
-}
-.media-active-clear:hover { background: rgba(255,255,255,.12); }
+[hidden], .mode-active[hidden] { display: none !important; }
 
 .input-wrapper {
   display: flex; align-items: flex-end; gap: 9px;
@@ -930,133 +887,12 @@ html[data-glass-theme="light"] .media-active { color: var(--accent); }
 }
 .overlay.visible { display: block; }
 
-/* ═══ ПАНЕЛЬ МЕДИА-МОДЕЛЕЙ ═════════════════════════════════════ */
-.media-modal {
-  position: fixed; inset: 0; z-index: 1200;
-  display: grid; place-items: center; padding: 18px;
-  background: rgba(4, 6, 16, .55);
-  -webkit-backdrop-filter: blur(12px) saturate(120%); backdrop-filter: blur(12px) saturate(120%);
-  opacity: 0; pointer-events: none;
-  transition: opacity var(--t) var(--ease);
-}
-.media-modal.open { opacity: 1; pointer-events: auto; }
-.media-dialog {
-  position: relative; width: min(860px, 100%); max-height: 88vh; overflow: auto;
-  padding: 26px;
-  background: linear-gradient(160deg, var(--glass-fill-strong), var(--glass-fill));
-  -webkit-backdrop-filter: blur(var(--glass-blur-lg)) saturate(190%);
-  backdrop-filter: blur(var(--glass-blur-lg)) saturate(190%);
-  border: 1px solid var(--glass-border); border-radius: var(--r-lg);
-  box-shadow: var(--glass-shadow-lg), var(--glass-inset);
-  transform: translateY(20px) scale(.97);
-  transition: transform var(--t) var(--ease-spring);
-}
-.media-modal.open .media-dialog { transform: none; }
-.media-dialog h2 { font-size: 22px; letter-spacing: -.03em; margin-bottom: 8px; }
-.media-help { color: var(--text-2); font-size: 12.5px; line-height: 1.6; max-width: 640px; }
-.media-close {
-  position: absolute; top: 14px; right: 14px;
-  width: 32px; height: 32px; border-radius: 50%;
-  background: var(--glass-fill); border: 1px solid var(--glass-border-soft);
-  color: var(--text-2); font-size: 18px; line-height: 1; cursor: pointer;
-  transition: all var(--t-fast) var(--ease);
-}
-.media-close:hover { background: var(--glass-fill-2); color: var(--text-1); transform: rotate(90deg); }
-
 .eyebrow {
   font-size: 9.5px; font-weight: 800; letter-spacing: .18em; text-transform: uppercase;
   color: color-mix(in srgb, var(--accent) 55%, white); margin-bottom: 6px;
 }
 html[data-glass-theme="light"] .eyebrow { color: var(--accent); }
 
-.media-tabs { display: flex; gap: 6px; flex-wrap: wrap; margin: 16px 0 12px; }
-.media-tab {
-  padding: 7px 13px; font: 700 11.5px/1 inherit;
-  color: var(--text-3); background: var(--glass-fill);
-  border: 1px solid var(--glass-border-soft); border-radius: var(--r-pill); cursor: pointer;
-  transition: all var(--t) var(--ease);
-}
-.media-tab:hover { color: var(--text-1); border-color: var(--glass-border); }
-.media-tab.active {
-  color: var(--on-accent);
-  background: linear-gradient(150deg, var(--accent), var(--accent-2));
-  border-color: transparent;
-  box-shadow: 0 8px 20px -10px var(--accent-glow);
-}
-
-.picker-filters {
-  display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
-  padding: 10px; margin-bottom: 12px;
-  border-radius: var(--r-sm);
-  background: rgba(255,255,255,.03); border: 1px solid var(--glass-border-soft);
-}
-.picker-filters input[type="search"] {
-  flex: 1; min-width: 180px;
-  padding: 8px 12px; font: 500 12px/1 inherit; color: var(--text-1);
-  background: var(--glass-fill); border: 1px solid var(--glass-border-soft);
-  border-radius: var(--r-xs); outline: none;
-}
-.picker-filters input[type="search"]:focus { border-color: color-mix(in srgb, var(--accent) 55%, transparent); }
-.picker-check { display: inline-flex; align-items: center; gap: 6px; font-size: 11.5px; color: var(--text-2); cursor: pointer; }
-.picker-refresh {
-  width: 32px; height: 32px; border-radius: 50%; cursor: pointer;
-  background: var(--glass-fill); border: 1px solid var(--glass-border-soft);
-  color: var(--text-2); font-size: 15px; transition: all var(--t-fast) var(--ease);
-}
-.picker-refresh:hover { color: var(--text-1); transform: rotate(180deg); }
-.picker-meta { font-size: 11px; color: var(--text-4); margin-bottom: 10px; }
-.picker-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 10px; }
-.picker-empty {
-  grid-column: 1/-1; padding: 26px; text-align: center;
-  color: var(--text-4); font-size: 12.5px; line-height: 1.7;
-  border: 1px dashed var(--glass-border-soft); border-radius: var(--r-sm);
-}
-.picker-empty.error { color: var(--err); border-color: color-mix(in srgb, var(--err) 35%, transparent); }
-.picker-card {
-  padding: 14px; border-radius: var(--r-sm);
-  background: rgba(255,255,255,.035); border: 1px solid var(--glass-border-soft);
-  transition: all var(--t) var(--ease);
-}
-.picker-card:hover { border-color: var(--glass-border); transform: translateY(-2px); }
-.picker-card.selected { border-color: var(--ok); box-shadow: 0 0 0 1px color-mix(in srgb, var(--ok) 30%, transparent); }
-.picker-card.disconnected { opacity: .6; }
-.picker-card-top { display: flex; align-items: center; gap: 6px; margin-bottom: 9px; flex-wrap: wrap; }
-.picker-kind { font-size: 15px; }
-.picker-badge {
-  font-size: 8.5px; font-weight: 800; letter-spacing: .07em;
-  padding: 3px 6px; border-radius: 5px;
-  background: var(--glass-fill-2); color: var(--text-2);
-}
-.picker-badge.free { background: color-mix(in srgb, var(--ok) 16%, transparent); color: var(--ok); }
-.picker-badge.trial { background: color-mix(in srgb, var(--info) 16%, transparent); color: var(--info); }
-.picker-badge.paid { background: color-mix(in srgb, var(--warn) 16%, transparent); color: var(--warn); }
-.picker-badge.unknown { background: color-mix(in srgb, var(--err) 14%, transparent); color: var(--err); }
-.picker-provider { font-size: 10px; color: var(--text-4); }
-.picker-card h3 { font-size: 14px; letter-spacing: -.02em; margin-bottom: 4px; }
-.picker-id code { font-size: 10px; color: var(--text-4); }
-.picker-card p { font-size: 11px; color: var(--text-3); line-height: 1.5; margin: 8px 0; min-height: 30px; }
-.picker-note { font-size: 10px; color: var(--text-4); line-height: 1.5; margin-bottom: 10px; }
-.picker-src { font-size: 9.5px; color: var(--text-4); }
-.picker-select {
-  width: 100%; margin-top: 10px; padding: 8px;
-  font: 700 11px/1 inherit; color: var(--on-accent);
-  background: linear-gradient(150deg, var(--accent), var(--accent-2));
-  border: none; border-radius: var(--r-xs); cursor: pointer;
-  transition: filter var(--t) var(--ease);
-}
-.picker-select:hover { filter: brightness(1.1); }
-.picker-card.selected .picker-select { background: color-mix(in srgb, var(--ok) 22%, transparent); color: var(--ok); }
-.picker-footer {
-  display: flex; align-items: center; justify-content: space-between; gap: 12px;
-  margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--glass-border-soft);
-}
-#pickerHint { font-size: 11px; color: var(--text-4); }
-.picker-done {
-  padding: 10px 20px; font: 700 12px/1 inherit; color: var(--on-accent);
-  background: linear-gradient(150deg, var(--accent), var(--accent-2));
-  border: none; border-radius: var(--r-pill); cursor: pointer;
-  box-shadow: 0 10px 24px -12px var(--accent-glow);
-}
 
 /* ═══ КОМАНДНАЯ ПАНЕЛЬ (Ctrl+K) ════════════════════════════════ */
 .cmdk {
@@ -1141,7 +977,6 @@ html[data-glass-theme="light"] .eyebrow { color: var(--accent); }
   .input-toolbar { flex-wrap: nowrap; gap: 5px; }
   .msg-body { max-width: calc(100% - 42px); }
   #statusText { max-width: 14ch; }
-  .media-model-btn { max-width: 40vw; }
 }
 
 /* ═══ ЗАЩИТА ОТ КОПИРОВАНИЯ ИНТЕРФЕЙСА ═════════════════════════ */
@@ -1161,6 +996,38 @@ button, input, select, textarea, .stage, .sources-head, .msg-actions {
    Отдельной панели нет: ИИ сам работает в Linux, а шаги видны
    в ответе блоком «Работа в Linux», который сворачивается.
    ══════════════════════════════════════════════════════════════ */
+/* ── медиа от ИИ прямо в ответе: картинка, аудио, видео ── */
+.turn-media { display: grid; gap: 10px; margin: 2px 0 10px; }
+.turn-media-item {
+  margin: 0; overflow: hidden; border-radius: 14px;
+  background: rgba(255, 255, 255, .04); border: 1px solid rgba(255, 255, 255, .08);
+}
+.turn-media-item img, .turn-media-item video {
+  display: block; width: 100%; max-height: 70vh; object-fit: contain;
+  background: rgba(0, 0, 0, .25);
+}
+.turn-media-open { display: block; }
+.turn-media-item audio { display: block; width: calc(100% - 20px); margin: 12px 10px 4px; }
+.turn-media-item figcaption {
+  display: flex; align-items: center; gap: 8px; padding: 7px 10px;
+  font-size: 11px; color: var(--txt-dim, var(--text-3));
+}
+.turn-media-meta { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.turn-media-dl {
+  flex-shrink: 0; padding: 6px 11px; border-radius: 999px; text-decoration: none;
+  color: var(--text-1, #fff); background: rgba(120, 190, 255, .16);
+  border: 1px solid rgba(120, 190, 255, .28); font-weight: 600;
+}
+.turn-media-wait { display: flex; align-items: center; gap: 10px; padding: 18px 12px; font-size: 12px; }
+.turn-media-spin {
+  width: 18px; height: 18px; flex-shrink: 0; border-radius: 50%;
+  border: 2px solid rgba(255, 255, 255, .15); border-top-color: var(--accent, #8ab4ff);
+  animation: turn-media-spin 1s linear infinite;
+}
+@keyframes turn-media-spin { to { transform: rotate(360deg); } }
+.turn-media-item.is-error .turn-media-spin { display: none; }
+.turn-media-item.is-error .turn-media-status { color: var(--err, #ff7b7b); }
+
 /* ── бонус: кнопки у блоков кода ── */
 .code-block { margin: 10px 0; border: 1px solid rgba(255, 255, 255, .08); border-radius: 12px; overflow: hidden; }
 .code-block pre { margin: 0; border-radius: 0; }

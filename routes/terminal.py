@@ -11,16 +11,19 @@ routes/terminal.py — маленькое Linux-окружение для чат
 Безопасность (это сервер, а не песочница ОС):
   1. выключено по умолчанию — включается TERMINAL_ENABLED=1 в .env;
   2. только для администратора: session['admin_logged_in'];
-  3. команда запускается без shell, только из белого списка;
+  3. команда запускается без /bin/sh: строку разбирает sandbox_shell.py —
+     конвейеры |, цепочки && || ;, перенаправления > >> 2>&1 работают,
+     но каждая программа проверяется по белому списку, а запись (>, rm, mv,
+     curl -o, git -C …) возможна только внутри workspace;
   4. cwd всегда внутри workspace, пути не выходят за его пределы;
   5. таймаут на команду, обрезанный вывод, лимит параллельных запусков.
 """
 from flask import Blueprint, request, jsonify, session
+
+from sandbox_shell import Shell, ShellError
 import os
 import re
 import shlex
-import signal
-import subprocess
 import threading
 import time
 import uuid
@@ -35,27 +38,34 @@ MAX_OUTPUT = int(os.getenv("TERMINAL_MAX_OUTPUT", "12000"))
 MAX_CONCURRENT = 2
 
 # Команды, которые можно выполнять. Всё остальное — отказ с подсказкой.
+# Проверяется КАЖДАЯ программа строки: и в конвейере, и за env/timeout/xargs/find -exec.
 ALLOWED_COMMANDS = {
-    # просмотр
-    "ls", "pwd", "cat", "head", "tail", "less", "more", "wc", "grep", "egrep", "fgrep",
-    "find", "fd", "tree", "stat", "file", "du", "df", "diff", "sort", "uniq", "cut", "awk",
-    "sed", "tr", "nl", "basename", "dirname", "realpath", "which", "type", "echo", "printf",
-    "date", "whoami", "id", "uname", "hostname", "uptime", "ps", "env", "printenv", "seq",
-    "true", "false", "sleep", "man", "help", "history", "clear", "which",
+    # просмотр и текст
+    "ls", "pwd", "cat", "head", "tail", "less", "more", "wc", "grep", "egrep", "fgrep", "rg",
+    "find", "fd", "tree", "stat", "file", "du", "df", "diff", "cmp", "sort", "uniq", "cut",
+    "awk", "sed", "tr", "nl", "basename", "dirname", "realpath", "readlink", "which", "type",
+    "echo", "printf", "tee", "xargs", "column", "paste", "join", "comm", "fold", "rev", "tac",
+    "split", "expr", "bc", "seq", "yes", "strings", "iconv", "patch",
+    "base64", "md5sum", "sha1sum", "sha256sum", "sha512sum", "xxd", "od", "hexdump",
+    # система (только чтение)
+    "date", "cal", "whoami", "id", "uname", "hostname", "uptime", "ps", "env", "printenv",
+    "free", "nproc", "lscpu", "lsb_release", "true", "false", "sleep", "timeout", "nice",
+    "man", "help", "history", "clear",
     # файлы
-    "mkdir", "touch", "cp", "mv", "rm", "chmod",
-    # разработка
-    "git", "python", "python3", "pip", "pip3", "node", "npm", "npx", "deno", "bun",
-    "pytest", "go", "rustc", "cargo", "java", "javac", "make", "jq", "curl", "wget",
-    "sqlite3", "tar", "zip", "unzip", "gzip", "grep",
+    "mkdir", "rmdir", "touch", "cp", "mv", "rm", "ln", "chmod", "truncate", "unlink",
+    "tar", "zip", "unzip", "gzip", "gunzip", "zcat", "bzip2", "bunzip2", "xz", "unxz", "7z",
+    # сеть
+    "curl", "wget", "http", "aria2c", "ping", "dig", "nslookup", "host", "whois", "openssl",
+    "ssh-keygen", "yt-dlp",
+    # git и разработка
+    "git", "python", "python3", "pip", "pip3", "pipx", "uv", "poetry", "virtualenv",
+    "pytest", "black", "ruff", "flake8", "mypy",
+    "node", "npm", "npx", "pnpm", "yarn", "tsc", "ts-node", "deno", "bun", "eslint", "prettier",
+    "go", "rustc", "cargo", "java", "javac", "gcc", "g++", "cc", "clang", "make", "cmake",
+    "php", "ruby", "gem", "perl", "lua",
+    "jq", "sqlite3", "ffmpeg", "ffprobe", "convert", "identify", "magick", "pandoc",
     "nova",                 # встроенная команда окружения: поиск и чтение страниц
 }
-# Подстроки, которые запрещены даже внутри разрешённой команды:
-# pipe в другую программу, выход вверх, sudo, подстановка в оболочку.
-FORBIDDEN = (
-    "sudo", "su ", "doas", "chown", "chmod 777", "rm -rf /", ":(){", ">/dev/",
-    "&", "|", ">", ">>", "`", "$(", "${", "\n",
-)
 
 _run_lock = threading.Semaphore(MAX_CONCURRENT)
 
@@ -71,17 +81,22 @@ NOVA_HELP = """Встроенная команда nova (работает чер
 """
 
 HELP_TEXT = """Доступные команды внутри workspace:
-  ls / cat / head / tail / grep / find / tree / wc / stat / file
-  mkdir / touch / cp / mv / rm / chmod
-  git status / git log / git diff / git add / git commit
-  python3 script.py · node script.js · pip install · pytest -q
-  date · whoami · uname · env · ps · du · df · awk · sed · sort
+  ls / cat / head / tail / grep / find / tree / wc / sort / awk / sed / jq
+  mkdir / touch / cp / mv / rm / ln / chmod / tar / zip / unzip
+  curl / wget / ping / dig — сеть;  git clone / status / add / commit / log / diff
+  python3 · pip · pytest · node · npm · npx · go · cargo · gcc · make · sqlite3 · ffmpeg
 
   nova search <запрос> — поиск в интернете
   nova read <url>      — прочитать страницу
 
-Папка: {workspace}
-Подсказка: составные команды (| , > , &&) отключены — выполняйте по одной."""
+Работают как в обычном терминале:
+  curl -s "https://api.github.com/repos/python/cpython" | jq .stargazers_count
+  git add . && git commit -m "готово" || echo "нечего коммитить"
+  python3 app.py > out.txt 2>&1 ; tail out.txt
+  cd src && ls *.py
+
+Нельзя: $(…), `…`, фоновый «&», here-doc «<<» и запись за пределы папки.
+Папка: {workspace}"""
 
 
 # ───────────────────────── служебное ─────────────────────────
@@ -193,26 +208,51 @@ def ensure_workspace():
     return created
 
 
+def _sandbox_env():
+    """Окружение команд: ни ключей API, ни переменных сервера — только нужное."""
+    return {
+        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+        "HOME": WORKSPACE,
+        "PWD": WORKSPACE,
+        "USER": "nova",
+        "LANG": os.environ.get("LANG", "C.UTF-8"),
+        "TERM": "dumb",
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "PYTHONIOENCODING": "utf-8",
+        "PIP_DISABLE_PIP_VERSION_CHECK": "1",
+        "GIT_TERMINAL_PROMPT": "0",            # git не ждёт пароль — сразу ошибка
+        # В песочнице нет ~/.gitconfig — без этого git commit
+        # ругается «Author identity unknown» и не проходит.
+        "GIT_AUTHOR_NAME": "NovaMind",
+        "GIT_AUTHOR_EMAIL": "novamind@localhost",
+        "GIT_COMMITTER_NAME": "NovaMind",
+        "GIT_COMMITTER_EMAIL": "novamind@localhost",
+    }
+
+
+def _nova_builtin(argv):
+    result = _run_nova(argv, COMMAND_TIMEOUT)
+    return result["code"], result["stdout"], result["stderr"]
+
+
+def _shell():
+    return Shell(WORKSPACE, ALLOWED_COMMANDS, _sandbox_env(), {"nova": _nova_builtin}, MAX_OUTPUT)
+
+
 def check_command(command):
-    """Проверяет команду: пустая, запрещённая конструкция или не из списка."""
+    """Проверяет строку команд до запуска: синтаксис, белый список, абсолютные пути.
+
+    Возвращает разобранные цепочки. Ошибка → ValueError с понятным текстом.
+    """
     command = (command or "").strip()
     if not command:
         raise ValueError("Пустая команда")
-    if len(command) > 2000:
-        raise ValueError("Команда слишком длинная")
-    for bad in FORBIDDEN:
-        if bad in command:
-            raise ValueError(f"Конструкция «{bad.strip()}» отключена — выполняйте команды по одной")
+    if len(command) > 8000:
+        raise ValueError("Команда слишком длинная — запишите скрипт в файл и запустите его")
     try:
-        parts = shlex.split(command)
-    except ValueError as exc:
-        raise ValueError(f"Не удалось разобрать команду: {exc}")
-    if not parts:
-        raise ValueError("Пустая команда")
-    program = os.path.basename(parts[0])
-    if program not in ALLOWED_COMMANDS:
-        raise ValueError(f"Команда «{program}» не в списке разрешённых")
-    return parts, program
+        return _shell().validate(command)
+    except ShellError as exc:
+        raise ValueError(str(exc))
 
 
 def _result(code, stdout, stderr="", elapsed=0, timed_out=False):
@@ -311,80 +351,18 @@ def _run_nova(parts, timeout):
 
 
 def run_command(command, timeout=None):
-    """Выполняет команду в песочнице. Возвращает код, вывод и время."""
-    parts, program = check_command(command)
+    """Выполняет строку команд в песочнице. Возвращает код, вывод и время."""
+    check_command(command)
     ensure_workspace()
-    if program == "nova":                      # встроенная команда — без subprocess
-        return _run_nova(parts, timeout)
     timeout = float(timeout or COMMAND_TIMEOUT)
     if not _run_lock.acquire(blocking=False):
         raise RuntimeError("Занято: предыдущая команда ещё выполняется")
-    started = time.time()
     try:
-        process = subprocess.Popen(
-            parts,
-            cwd=WORKSPACE,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            env={
-                "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
-                "HOME": WORKSPACE,
-                "LANG": os.environ.get("LANG", "C.UTF-8"),
-                "TERM": "dumb",
-                "PYTHONDONTWRITEBYTECODE": "1",
-                # В песочнице нет ~/.gitconfig — без этого git commit
-                # ругается «Author identity unknown» и не проходит.
-                "GIT_AUTHOR_NAME": "NovaMind",
-                "GIT_AUTHOR_EMAIL": "novamind@localhost",
-                "GIT_COMMITTER_NAME": "NovaMind",
-                "GIT_COMMITTER_EMAIL": "novamind@localhost",
-            },
-            start_new_session=True,          # свой pgid — процесс целиком снимаем
-        )
-    except FileNotFoundError:
-        _run_lock.release()
-        return {"code": 127, "stdout": "", "stderr": f"{program}: команда не установлена",
-                "duration_ms": 0, "timed_out": False}
-    except Exception as exc:                      # noqa: BLE001 — возвращаем текст ошибки
-        _run_lock.release()
-        return {"code": 126, "stdout": "", "stderr": str(exc),
-                "duration_ms": 0, "timed_out": False}
-
-    killed = {"value": False}
-
-    def kill_group():
-        killed["value"] = True
-        try:
-            os.killpg(os.getpgid(process.pid), signal.SIGKILL)
-        except (ProcessLookupError, PermissionError, OSError):
-            process.kill()
-
-    # Таймер сам снимает процессную группу: communicate() после kill
-    # возвращается штатно, поэтому флаг «срезали по времени» ставим здесь.
-    timer = threading.Timer(timeout, kill_group)
-    timer.start()
-    try:
-        stdout, stderr = process.communicate(timeout=timeout + 2)
-    except subprocess.TimeoutExpired:
-        kill_group()
-        stdout, stderr = process.communicate()
+        return _shell().run(command.strip(), timeout=timeout)
+    except ShellError as exc:
+        raise ValueError(str(exc))
     finally:
-        timer.cancel()
         _run_lock.release()
-    timed_out = killed["value"]
-
-    def decode(blob):
-        text = (blob or b"").decode("utf-8", "replace")
-        return text[:MAX_OUTPUT] + ("\n… вывод обрезан" if len(text) > MAX_OUTPUT else "")
-
-    return {
-        "code": process.returncode if process.returncode is not None else -1,
-        "stdout": decode(stdout),
-        "stderr": decode(stderr),
-        "duration_ms": int((time.time() - started) * 1000),
-        "timed_out": timed_out,
-    }
 
 
 def run_agent(command, timeout=12):

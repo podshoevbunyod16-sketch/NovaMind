@@ -24,7 +24,12 @@
  *  11. главный чат сам работает в Linux: план, шаги, свёрнутый блок
  *      «Работа в Linux», простые вопросы — сразу текстом;
  *  12. кнопка «Поиск» (автопоиск) идёт через Linux-окружение,
- *      кнопки у блоков кода, откат на обычный чат, «стоп».
+ *      кнопки у блоков кода, откат на обычный чат, «стоп»;
+ *  13. ИИ сам генерирует картинки, аудио и видео: кнопок «Медиа» нет,
+ *      файл появляется прямо в ответе и остаётся после перезагрузки.
+ *  14. язык интерфейса: по умолчанию таджикский, переключатель TJ/RU/EN
+ *      в боковой панели, настройках и на окне входа, английский работает.
+ *      (Остальные проверки идут на русском — nova_lang=ru.)
  */
 import { createRequire } from 'node:module';
 
@@ -132,6 +137,35 @@ const LINUX_SEARCH_STREAM = [
   { type: 'done' },
 ];
 
+// ИИ сам решил нарисовать картинку — модель выбрал сервер
+const IMAGE_STREAM = [
+  { type: 'stage', scene: 'media', title: 'Рисую изображение', text: 'a red fox in a snowy forest, watercolor' },
+  { type: 'step', icon: '🎨', text: 'Пробую Pollinations Flux (Pollinations)' },
+  { type: 'media', media: { kind: 'image', url: '/media/fox.png', filename: 'fox.png', mime: 'image/png',
+    model: 'flux', model_name: 'Pollinations Flux', provider_name: 'Pollinations', elapsed_ms: 2300,
+    prompt: 'a red fox in a snowy forest, watercolor' } },
+  { type: 'token', token: 'Готово! Нарисовал лисичку в зимнем лесу.' },
+  { type: 'result', reply: 'Готово! Нарисовал лисичку в зимнем лесу.', steps: 1, linux: false, model: 'mock-model',
+    media: [{ kind: 'image', url: '/media/fox.png' }] },
+  { type: 'done' },
+];
+const AUDIO_STREAM = [
+  { type: 'stage', scene: 'media', title: 'Озвучиваю', text: 'Добро пожаловать!' },
+  { type: 'media', media: { kind: 'audio', url: '/media/hello.mp3', filename: 'hello.mp3',
+    model_name: 'Gemini 3.8 Flash TTS', provider_name: 'Google AI Studio', prompt: 'Добро пожаловать!' } },
+  { type: 'token', token: 'Озвучил приветствие.' },
+  { type: 'result', reply: 'Озвучил приветствие.', steps: 1, linux: false, model: 'mock-model' },
+  { type: 'done' },
+];
+const VIDEO_STREAM = [
+  { type: 'stage', scene: 'media', title: 'Делаю видео', text: 'a cat surfing' },
+  { type: 'media', media: { kind: 'video', job_id: 'job-1', state: 'queued', model_name: 'Veo 3.1',
+    provider_name: 'Google AI Studio', prompt: 'a cat surfing' } },
+  { type: 'token', token: 'Видео готовится — появится здесь само.' },
+  { type: 'result', reply: 'Видео готовится — появится здесь само.', steps: 1, linux: false, model: 'mock-model' },
+  { type: 'done' },
+];
+
 // Управление моками: доступно ли окружение и что отвечает агент
 const mock = {
   linux: false,            // сначала окружения нет — проверяем старый путь
@@ -199,7 +233,13 @@ const pageHtml = await (await fetch(BASE + '/chat')).text();
 // ровно тем содержимым, которое отдаёт сервер.
 const appJs = await (await fetch(BASE + '/static/app.js')).text();
 const linuxJs = await (await fetch(BASE + '/static/linux.js')).text();
-const html = pageHtml
+const i18nJs = await (await fetch(BASE + '/static/i18n.js')).text();
+const I18N_TAG = '<script src="/static/i18n.js"></script>';
+const inlineI18n = (page) => {
+  if (!page.includes(I18N_TAG)) throw new Error('на странице нет /static/i18n.js');
+  return page.replace(I18N_TAG, '<script>' + i18nJs + '</script>');
+};
+const html = inlineI18n(pageHtml)
   .replace('<script src="/static/app.js"></script>', '<script>' + appJs + '</script>')
   .replace('<script src="/static/linux.js"></script>', '<script>' + linuxJs + '</script>');
 if (!html.includes('window.Linux')) throw new Error('не удалось встроить /static/linux.js в страницу');
@@ -209,13 +249,14 @@ const consoleErrors = [];
 virtualConsole.on('jsdomError', (error) => consoleErrors.push('jsdomError: ' + error.message));
 virtualConsole.on('error', (...args) => consoleErrors.push('console.error: ' + args.join(' ')));
 
-const dom = new JSDOM(html, {
+const chatDomOptions = (lang) => ({
   url: BASE + '/chat',
   runScripts: 'dangerously',
   pretendToBeVisual: true,
   virtualConsole,
   resources: undefined, // внешние ресурсы не грузим
   beforeParse(window) {
+    if (lang) window.localStorage.setItem('nova_lang', lang);
     window.localStorage.setItem('nova_user_nick', 'Smoke');
     window.TextDecoder = TextDecoder;
     window.TextEncoder = TextEncoder;
@@ -242,6 +283,13 @@ const dom = new JSDOM(html, {
       }
       if (path.startsWith('/api/search/health')) {
         return { ok: true, status: 200, async json() { return { ok: true, alive: ['searxng'], backends: [{ backend: 'searxng', ok: true, count: 2, ms: 12, error: null }] }; } };
+      }
+      if (path.startsWith('/api/media/jobs/')) {
+        mock.jobPolls = (mock.jobPolls || 0) + 1;
+        return json(mock.jobPolls < 2
+          ? { job_id: 'job-1', state: 'running', polls: mock.jobPolls, events: [] }
+          : { job_id: 'job-1', state: 'succeeded', polls: mock.jobPolls, events: [],
+              media: { kind: 'video', url: '/media/cat.mp4', filename: 'cat.mp4', mime: 'video/mp4' } });
       }
       if (path.startsWith('/api/media/')) {
         return { ok: true, status: 200, async json() { return { selection: null }; } };
@@ -304,6 +352,10 @@ const dom = new JSDOM(html, {
                       text: 'Текст страницы asyncio', elapsed_ms: 120, bytes: 22 });
       }
       if (path.startsWith('/api/agent/status')) {
+        if (mock.linux === 'media') {
+          return json({ enabled: true, tools: false, available: true, max_steps: 8,
+            hint: 'ИИ ищет в интернете и генерирует медиа. Для Linux-окружения добавьте TERMINAL_ENABLED=1' });
+        }
         return json(mock.linux
           ? { enabled: true, tools: true, available: true, max_steps: 8, hint: '' }
           : { enabled: false, tools: false, available: false, max_steps: 8,
@@ -325,6 +377,7 @@ const dom = new JSDOM(html, {
     };
   },
 });
+const dom = new JSDOM(html, chatDomOptions('ru'));
 
 const { window } = dom;
 const { document } = window;
@@ -400,9 +453,8 @@ check('кнопки темы нет, тема всегда Aurora',
   !document.getElementById('btnTheme') && typeof window.cycleTheme === 'undefined'
   && document.documentElement.getAttribute('data-glass-theme') === 'aurora');
 
-window.toggleCalmMotion();
-check('спокойный режим включается',
-  document.documentElement.getAttribute('data-motion') === 'calm');
+check('кнопки «Анимации» нет — фоновые анимации убраны',
+  !document.getElementById('btn-calm') && typeof window.toggleCalmMotion === 'undefined');
 
 window.toggleReasoning();
 check('рассуждения переключаются',
@@ -495,8 +547,9 @@ check('повторный клик по режиму выключает его',
 window.activateMode({ prefix: '/services wiki ', label: '📚 Википедия', placeholder: 'Запрос…' });
 window.newChat();
 check('новый чат снимает активный режим', modeBar.hidden === true);
-check('плашка медиа не висит без выбранной модели',
-  document.getElementById('mediaActiveBar').hidden === true);
+check('кнопок и панели выбора медиа-модели нет',
+  !document.getElementById('btnMediaModel') && !document.getElementById('btn-media')
+  && !document.getElementById('mediaActiveBar') && !document.getElementById('mediaPicker'));
 
 console.log('\n7) Ошибок за весь прогон не появилось');
 check('консоль чистая', consoleErrors.length === 0, consoleErrors.join(' | '));
@@ -514,13 +567,14 @@ settingsConsole.on('jsdomError', (error) => settingsErrors.push('jsdomError: ' +
 settingsConsole.on('error', (...args) => settingsErrors.push('console.error: ' + args.join(' ')));
 
 const settingsDom = new JSDOM(
-  settingsHtml.replace('<script src="/static/settings.js"></script>', '<script>' + settingsJs + '</script>'),
+  inlineI18n(settingsHtml).replace('<script src="/static/settings.js"></script>', '<script>' + settingsJs + '</script>'),
   {
     url: BASE + '/settings',
     runScripts: 'dangerously',
     pretendToBeVisual: true,
     virtualConsole: settingsConsole,
     beforeParse(win) {
+      win.localStorage.setItem('nova_lang', 'ru');
       win.TextDecoder = TextDecoder;
       win.requestAnimationFrame = (cb) => setTimeout(cb, 0);
       win.addEventListener('error', (event) => settingsErrors.push('window.onerror: ' + event.message));
@@ -563,6 +617,10 @@ const sdoc = settingsDom.window.document;
 
 check('настройки: нет JS-ошибок', settingsErrors.length === 0, settingsErrors.join(' | '));
 check('настройки: liquid-glass подключён', settingsHtml.includes('liquid-glass.css'));
+check('настройки: есть выбор языка интерфейса', (() => {
+  const options = sdoc.querySelectorAll('#langCard .lang-option');
+  return options.length === 3 && sdoc.querySelector('#langCard .lang-option.active')?.dataset.lang === 'ru';
+})());
 check('провайдеры отрисованы', sdoc.querySelectorAll('.provider-card').length === 2);
 check('активный провайдер подсвечен',
   Boolean(sdoc.querySelector('.provider-card.active'))
@@ -593,12 +651,13 @@ const authConsole = new VirtualConsole();
 authConsole.on('jsdomError', (error) => authErrors.push('jsdomError: ' + error.message));
 authConsole.on('error', (...args) => authErrors.push('console.error: ' + args.join(' ')));
 
-const authDom = new JSDOM(authHtml.replace(/<script src="https:[^"]*"[^>]*><\/script>/g, ''), {
+const authDom = new JSDOM(inlineI18n(authHtml).replace(/<script src="https:[^"]*"[^>]*><\/script>/g, ''), {
   url: BASE + '/',
   runScripts: 'dangerously',
   pretendToBeVisual: true,
   virtualConsole: authConsole,
   beforeParse(win) {
+    win.localStorage.setItem('nova_lang', 'ru');
     win.addEventListener('error', (event) => authErrors.push('window.onerror: ' + event.message));
     win.fetch = async () => ({ ok: true, status: 200, async json() { return { success: true }; } });
   },
@@ -615,6 +674,8 @@ check('вход: переключение на регистрацию', (() => {
     && !adoc.getElementById('loginForm').classList.contains('active');
 })());
 check('вход: выбора темы нет', !adoc.querySelector('.auth-theme-row'));
+check('вход: можно выбрать язык (Тоҷикӣ · Русский · English)',
+  [...adoc.querySelectorAll('.auth-lang .lang-option')].map((b) => b.textContent).join(' · ') === 'Тоҷикӣ · Русский · English');
 check('вход: тема всегда Aurora', (() => {
   authDom.window.setAuthTheme('sunset');
   return adoc.documentElement.getAttribute('data-glass-theme') === 'aurora'
@@ -670,7 +731,6 @@ mock.agentStream = SIMPLE_STREAM;
 const sendCallsBefore = mock.sendStreamCalls;
 document.getElementById('chat-input').value = 'привет';
 await window.sendMessage();
-<<<<<<< HEAD
 await settle();
 check('обычное сообщение ушло в главный чат с Linux, без переключателя',
   mock.agentRequests.length === 1 && mock.agentRequests[0].message === 'привет'
@@ -692,29 +752,6 @@ check('шаги видны в блоке «Работа в Linux»',
   && agentBubble.querySelectorAll('.agent-term-row').length === 2
   && agentBubble.querySelector('.agent-term').textContent.includes('python3 hello.py'));
 check('блок шагов стоит над ответом', (() => {
-=======
-await new Promise((resolve) => setTimeout(resolve, 350));
-const aiTurns = document.querySelectorAll('.message.ai');
-const agentBubble = aiTurns[aiTurns.length - 1];
-check('агент показывает план', !!agentBubble && agentBubble.querySelector('.stage-plan') !== null);
-check('блок «Работа в Linux» есть, но сам не раскрывается, вывод спрятан',
-  !!agentBubble && agentBubble.querySelector('.agent-term') !== null
-  && agentBubble.querySelector('.agent-term-out') !== null);
-check('агент показывает выполненные команды в сворачиваемом блоке',
-  !!agentBubble && agentBubble.querySelectorAll('.agent-term-row').length === 2
-  && agentBubble.querySelector('.agent-term').textContent.includes('python3 hello.py')
-  && agentBubble.querySelector('.agent-term-meta').textContent.includes('шага'));
-check('агент показывает заведённую задачу',
-  !!agentBubble && agentBubble.querySelector('.agent-task') !== null
-  && agentBubble.querySelector('.agent-task').textContent.includes('Проверить песочницу'));
-check('агент печатает ответ и закрывает сцену',
-  !!agentBubble && agentBubble.querySelector('.answer').textContent.includes('привет из папки')
-  && agentBubble.querySelector('.stage').classList.contains('collapsed'));
-check('после ответа блок команд сворачивается',
-  !!agentBubble && agentBubble.querySelector('.agent-term').classList.contains('is-done')
-  && !agentBubble.querySelector('.agent-term').classList.contains('is-open'));
-check('свёрнутый блок команд можно раскрыть кликом', (() => {
->>>>>>> d42dfa25f0f2c0d68742da19cdd015831aee836a
   const box = agentBubble.querySelector('.agent-term');
   const answer = agentBubble.querySelector('.answer');
   return !!box && !!(box.compareDocumentPosition(answer) & window.Node.DOCUMENT_POSITION_FOLLOWING);
@@ -827,6 +864,131 @@ check('«стоп» останавливает работу в Linux',
 window.fetch = fetchBeforeStop;
 
 check('за весь прогон ошибок в консоли нет', consoleErrors.length === 0, consoleErrors.join(' | '));
+
+
+// ══════════════════════════════════════════════════════════════
+// 13) ИИ сам генерирует картинки, аудио и видео
+// ══════════════════════════════════════════════════════════════
+console.log('\n13) ИИ сам решает, что сгенерировать, и сам выбирает модель');
+check('в командной панели нет выбора медиа-модели и режима «изображение»',
+  (() => { window.openCmdk(); const text = document.getElementById('cmdk').textContent; window.closeCmdk();
+    return !text.includes('медиа-моделей') && !text.includes('Режим: изображение'); })());
+check('приветствие говорит, что ИИ сам рисует, озвучивает и делает видео', (() => {
+  const text = document.getElementById('welcomeScreen').textContent;
+  return text.includes('нарисую') && text.includes('видео');
+})());
+
+mock.agentStream = IMAGE_STREAM;
+document.getElementById('chat-input').value = 'нарисуй лису в зимнем лесу';
+await window.sendMessage();
+await settle();
+const imageTurn = lastAi();
+check('просьба нарисовать ушла агенту как обычное сообщение',
+  mock.agentRequests[mock.agentRequests.length - 1].message === 'нарисуй лису в зимнем лесу');
+check('картинка прямо в ответе ИИ', imageTurn.querySelector('.turn-media img')?.getAttribute('src') === '/media/fox.png');
+check('картинка стоит над текстом ответа', (() => {
+  const box = imageTurn.querySelector('.turn-media');
+  return !!box && !!(box.compareDocumentPosition(imageTurn.querySelector('.answer')) & window.Node.DOCUMENT_POSITION_FOLLOWING);
+})());
+check('подпись: какой моделью ИИ нарисовал и сколько ждали',
+  imageTurn.querySelector('.turn-media-meta').textContent.includes('Pollinations Flux')
+  && imageTurn.querySelector('.turn-media-meta').textContent.includes('2.3 c'));
+check('кнопка «Скачать»', imageTurn.querySelector('.turn-media-dl')?.getAttribute('download') === 'fox.png');
+check('генерация — не Linux: блока шагов и метки Linux нет',
+  !imageTurn.querySelector('.agent-term') && !imageTurn.querySelector('.msg-meta').textContent.includes('Linux'));
+check('текст ответа напечатан', imageTurn.querySelector('.answer').textContent.includes('лисичку'));
+const savedChat = JSON.parse(window.localStorage.getItem('nova_history_v2'));
+const savedAi = savedChat.chats.find((c) => c.id === savedChat.activeId).messages.filter((m) => m.role === 'ai').pop();
+check('картинка сохранена в истории вместе с ответом', savedAi.meta?.media?.[0]?.url === '/media/fox.png');
+
+mock.agentStream = AUDIO_STREAM;
+document.getElementById('chat-input').value = 'озвучь приветствие';
+await window.sendMessage();
+await settle();
+check('озвучка — плеер прямо в ответе', lastAi().querySelector('.turn-media audio')?.getAttribute('src') === '/media/hello.mp3');
+
+window.NOVA_MEDIA_POLL_MS = 30;
+mock.agentStream = VIDEO_STREAM;
+document.getElementById('chat-input').value = 'сделай видео с котом на сёрфе';
+await window.sendMessage();
+const videoTurn = lastAi();
+check('видео: пока готовится — карточка ожидания', !!videoTurn.querySelector('.turn-media-item.is-pending'));
+await settle(250);
+check('видео готово — плеер подменил карточку',
+  videoTurn.querySelector('.turn-media video')?.getAttribute('src') === '/media/cat.mp4'
+  && !videoTurn.querySelector('.is-pending'));
+
+// Перезагрузка чата из истории: картинка на месте
+const activeId = JSON.parse(window.localStorage.getItem('nova_history_v2')).activeId;
+window.loadChat(activeId);
+await settle(60);
+check('после перезагрузки чата картинка на месте',
+  [...document.querySelectorAll('.turn-media img')].some((img) => img.getAttribute('src') === '/media/fox.png'));
+check('после перезагрузки видео на месте',
+  [...document.querySelectorAll('video')].some((video) => video.getAttribute('src') === '/media/cat.mp4'));
+
+// Без Linux агент всё равно работает: ищет и генерирует
+mock.linux = 'media';
+await window.Linux.loadStatus();
+check('без Linux ИИ-агент доступен', window.Linux.isAvailable() === true && window.Linux.hasLinux() === false);
+check('индикатор: ИИ рисует и ищет, но без Linux', (() => {
+  const title = document.getElementById('statusDot').title;
+  return title.includes('рисует') && !title.includes('Linux');
+})());
+mock.agentStream = LINUX_SEARCH_STREAM;
+window.setWebSearch(true, true);
+document.getElementById('chat-input').value = 'сколько стоит ноутбук?';
+await window.sendMessage();
+await settle();
+window.setWebSearch(false, true);
+check('без Linux блок шагов называется честно — «Шаги ИИ»',
+  lastAi().querySelector('.agent-term-title')?.textContent === 'Шаги ИИ');
+
+check('после медиа-сценариев консоль чистая', consoleErrors.length === 0, consoleErrors.join(' | '));
+
+// ══════════════════════════════════════════════════════════════
+console.log('\n14) Язык интерфейса');
+{
+  const errorsBefore = consoleErrors.length;
+  const tgDom = new JSDOM(html, chatDomOptions(null));      // язык не выбран → таджикский
+  await settle(300);
+  const tdoc = tgDom.window.document;
+  check('по умолчанию интерфейс на таджикском', tdoc.documentElement.lang === 'tg');
+  check('язык передаётся серверу в cookie', tdoc.cookie.includes('nova_lang=tg'), tdoc.cookie);
+  check('поле ввода по-таджикски', tdoc.getElementById('chat-input').placeholder === 'Паём нависед...',
+    tdoc.getElementById('chat-input').placeholder);
+  check('боковая панель по-таджикски', tdoc.querySelector('.sidebar').textContent.includes('Таърихи чатҳо'));
+  check('кнопка «Поиск» переведена', tdoc.getElementById('searchBtnText').textContent.trim() === 'Ҷустуҷӯ',
+    tdoc.getElementById('searchBtnText').textContent);
+  const hero = tdoc.querySelector('.welcome h1');
+  check('приветствие переведено, имя Khirad с анимацией на месте',
+    hero.textContent.includes('Салом! Ман') && hero.querySelector('span')?.textContent.trim() === 'Khirad');
+  check('строки из JS тоже по-таджикски', tgDom.window.t('Новый диалог') === 'Сӯҳбати нав'
+    && tgDom.window.tn(5, 'шаг', 'шага', 'шагов') === 'қадам');
+  const chips = [...tdoc.querySelectorAll('.sidebar-lang .lang-option')];
+  check('в боковой панели переключатель TJ / RU / EN',
+    chips.map((b) => b.textContent).join('/') === 'TJ/RU/EN' && chips[0].classList.contains('active'));
+  chips[2].click();                                         // EN → сохранить и перезагрузить
+  check('выбор языка сохраняется', tgDom.window.localStorage.getItem('nova_lang') === 'en'
+    && tdoc.cookie.includes('nova_lang=en'));
+  // jsdom не умеет перезагрузку страницы — это ожидаемо
+  for (let i = consoleErrors.length - 1; i >= errorsBefore; i -= 1) {
+    if (/navigation/i.test(consoleErrors[i])) consoleErrors.splice(i, 1);
+  }
+  tgDom.window.close();
+
+  const enDom = new JSDOM(html, chatDomOptions('en'));
+  await settle(300);
+  const edoc = enDom.window.document;
+  check('английский: язык страницы', edoc.documentElement.lang === 'en');
+  check('английский: поле ввода', edoc.getElementById('chat-input').placeholder === 'Write a message...');
+  check('английский: подписи панели', edoc.querySelector('.sidebar').textContent.includes('Chat history'));
+  check('английский: склонения', enDom.window.tn(1, 'шаг', 'шага', 'шагов') === 'step'
+    && enDom.window.tn(3, 'шаг', 'шага', 'шагов') === 'steps');
+  enDom.window.close();
+  check('смена языка без JS-ошибок', consoleErrors.length === errorsBefore,
+    consoleErrors.slice(errorsBefore).join(' | '));
+}
 
 if (failures.length) {
   console.error(`\n❌ Провалено проверок: ${failures.length} → ${failures.join(', ')}`);

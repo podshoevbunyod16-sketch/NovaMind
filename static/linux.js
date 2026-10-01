@@ -1,13 +1,15 @@
 /**
- * static/linux.js — Linux-окружение внутри главного чата.
+ * static/linux.js — ИИ-агент внутри главного чата.
  *
- * Отдельных кнопок «Агент» и «Linux» больше нет. Любое сообщение в главном
- * чате уходит в /api/agent/stream: ИИ сам решает — ответить сразу или
- * работать в Linux по шагам (команды, файлы, поиск, чтение страниц),
- * пока цель не достигнута. Кнопка «Поиск» тоже идёт через окружение.
+ * Отдельных кнопок «Агент», «Linux» и «Медиа» нет. Любое сообщение в главном
+ * чате уходит в /api/agent/stream: ИИ сам решает, что делать — ответить сразу,
+ * поискать в интернете, нарисовать картинку, озвучить текст, сделать видео
+ * или поработать в Linux по шагам, пока цель не достигнута. Модель генерации
+ * медиа тоже выбирает он сам.
  *
- * Если окружение выключено (нет TERMINAL_ENABLED=1) или пользователь
- * не вошёл, app.js спокойно отвечает старым путём — через обычный чат.
+ * Linux-команды доступны при TERMINAL_ENABLED=1; без них агент всё равно
+ * ищет и генерирует медиа. Если пользователь не вошёл или агент выключен
+ * (AGENT_ENABLED=0), app.js отвечает старым путём — через обычный чат.
  *
  * Зависит от app.js (createAssistantTurn, consumeNdjson, activeAbort…),
  * поэтому подключается вторым скриптом.
@@ -67,27 +69,37 @@
 
   function isAvailable() {
     const status = state.status;
-    return !!(status && status.enabled && status.tools);
+    if (!status || !status.enabled) return false;
+    // Старый сервер не знал поля available — тогда нужен Linux, как раньше
+    return status.available === undefined ? !!status.tools : !!status.available;
   }
 
-  /** Подсказка у индикатора в шапке: работает ли Linux у ИИ. */
+  function hasLinux() {
+    return !!(state.status && state.status.tools);
+  }
+
+  /** Подсказка у индикатора в шапке: что умеет ИИ прямо сейчас. */
   function paintStatus() {
     const on = isAvailable();
-    document.body.classList.toggle('linux-on', on);
+    document.body.classList.toggle('agent-on', on);
+    document.body.classList.toggle('linux-on', on && hasLinux());
     const dot = document.getElementById('statusDot');
-    if (dot) {
-      dot.title = on
-        ? 'ИИ работает с Linux-окружением: сам запускает команды, пишет файлы и ищет в интернете'
-        : (state.status && state.status.hint) || 'Linux-окружение недоступно';
+    if (!dot) return;
+    if (!on) {
+      dot.title = (state.status && state.status.hint) || t('ИИ-агент недоступен');
+      return;
     }
+    const skills = [t('ищет в интернете'), t('рисует, озвучивает и делает видео')];
+    if (hasLinux()) skills.unshift(t('работает в Linux (код, файлы, терминал)'));
+    dot.title = t("ИИ-агент сам выбирает, что делать: {v0}", { v0: skills.join(', ') });
   }
 
   async function init() {
     state.ready = (async () => {
       await syncSession();
       const status = await loadStatus();
-      // Один раз подскажем, почему ИИ отвечает без Linux
-      if (status && !isAvailable() && status.hint && !sessionStorage.getItem('nova_linux_hint')) {
+      // Один раз подскажем, чего не хватает (вход, Linux-окружение)
+      if (status && status.hint && !sessionStorage.getItem('nova_linux_hint')) {
         sessionStorage.setItem('nova_linux_hint', '1');
         notify(status.hint, 'info');
       }
@@ -110,8 +122,8 @@
 
     const search = !!options.search;
     const turn = createAssistantTurn();
-    if (search) turn.beginSearch('Поищу в интернете');
-    else turn.beginIdle(options.reasoning ? 'Рассуждаю…' : 'Думаю…');
+    if (search) turn.beginSearch(t('Поищу в интернете'));
+    else turn.beginIdle(options.reasoning ? t('Рассуждаю…') : t('Думаю…'));
 
     const controller = new AbortController();
     activeAbort = controller;           // кнопка «Стоп» в app.js останавливает и ИИ
@@ -122,7 +134,7 @@
       const response = await fetch('/api/agent/stream', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message, search, reasoning: !!options.reasoning }),
+        body: JSON.stringify({ message, search, reasoning: !!options.reasoning, lang: I18N.lang }),
         signal: controller.signal,
       });
       if (!response.ok) {
@@ -148,7 +160,8 @@
           case 'plan': turn.plan(event.text); break;
           case 'step': turn.step(event.icon, event.text); break;
           case 'tool': turn.tool(event); break;
-          case 'task': turn.taskChip(event.task); if (state.tab === 'tasks') loadTasks(); break;
+          case 'task': turn.taskChip(event.task); break;
+          case 'media': turn.addMedia(event.media || {}); break;
           case 'sources': turn.setSources(event.sources || []); break;
           case 'reasoning': turn.reasoningToken(event.token); break;
           case 'token': turn.appendToken(event.token); break;
@@ -163,23 +176,23 @@
         }
       });
       activeAbort = null;
-      if (!turn.text) throw new Error(failure || 'ИИ не вернул ответ');
+      if (!turn.text) throw new Error(failure || t('ИИ не вернул ответ'));
       turn.finish({
         model: result.model,
         provider: result.provider,
         offline: result.offline,
         searched: result.searched,
         steps: result.steps,
-        linux: result.steps > 0 || result.searched,
+        linux: result.linux === undefined ? (result.steps > 0 || result.searched) : !!result.linux,
       });
     } catch (error) {
       activeAbort = null;
       if (error.name === 'AbortError') {
         turn.collapseStage();
-        turn.appendText(turn.text || '_Остановлено._');
+        turn.appendText(turn.text || t('_Остановлено._'));
         turn.finish({ model: result.model });
       } else {
-        turn.fail(error.message || 'ИИ недоступен');
+        turn.fail(error.message || t('ИИ недоступен'));
       }
     }
     return true;
@@ -188,9 +201,9 @@
   // ───────────────────────── кнопки у блоков кода ─────────────────────────
 
   const CODE_PROMPTS = {
-    run: 'Запусти этот код в Linux-окружении и покажи, что он выводит. Если есть ошибки — исправь и запусти снова.',
-    explain: 'Объясни этот код по пунктам: что делает, где может сломаться, что улучшить.',
-    tests: 'Напиши тесты к этому коду, запусти их в Linux-окружении и покажи результат.',
+    run: t('Запусти этот код в Linux-окружении и покажи, что он выводит. Если есть ошибки — исправь и запусти снова.'),
+    explain: t('Объясни этот код по пунктам: что делает, где может сломаться, что улучшить.'),
+    tests: t('Напиши тесты к этому коду, запусти их в Linux-окружении и покажи результат.'),
   };
 
   function codeOf(node) {
@@ -213,7 +226,7 @@
     const prompt = CODE_PROMPTS[button.dataset.code];
     if (!prompt) return;
     if (typeof isTyping !== 'undefined' && isTyping) {
-      notify('Дождитесь окончания ответа', 'warn');
+      notify(t('Дождитесь окончания ответа'), 'warn');
       return;
     }
     window.sendMessage(`${prompt}\n\n\`\`\`${lang}\n${text}\n\`\`\``);
@@ -226,6 +239,7 @@
     loadStatus,
     runTurn,
     isAvailable,
+    hasLinux,
   };
 
   function boot() {

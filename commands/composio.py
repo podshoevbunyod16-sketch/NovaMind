@@ -268,9 +268,14 @@ def ai_format_result(task, tool_name, result):
 Результат от API:
 {result_str}
 
-Напиши красивый понятный ответ на русском языке.
+Напиши красивый понятный ответ.
 Покажи реальные данные — имена, ссылки, даты.
 Используй эмодзи и Markdown."""
+    try:
+        from i18n import language_rule      # язык ответа = язык интерфейса
+        prompt += "\n\n" + language_rule()
+    except Exception:
+        pass
 
     formatted = groq_call([{"role": "user", "content": prompt}], max_tokens=600, temperature=0.3)
     return formatted or format_raw(result, tool_name)

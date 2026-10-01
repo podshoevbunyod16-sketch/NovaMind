@@ -25,6 +25,7 @@ import requests
 import config
 import local_llm
 from ai_providers import chat_completion, chat_stream, resolve_target, PROVIDER_LABELS
+from i18n import with_language
 
 search_bp = Blueprint("search", __name__)
 
@@ -517,7 +518,7 @@ def fetch_page_text(url, max_chars=6000):
 # ПРОМПТЫ
 # ══════════════════════════════════════════════════════════════════
 
-SEARCH_SYSTEM_PROMPT = """Ты — умный поисковый ассистент NovaMind. Отвечай ПОДРОБНО и КОНКРЕТНО на русском языке.
+SEARCH_SYSTEM_PROMPT = """Ты — умный поисковый ассистент NovaMind. Отвечай ПОДРОБНО и КОНКРЕТНО.
 
 ПРАВИЛА:
 1. Опирайся на данные из интернета, которые идут ниже вопроса.
@@ -529,7 +530,7 @@ SEARCH_SYSTEM_PROMPT = """Ты — умный поисковый ассисте�
 7. НЕ пиши «на основе предоставленных данных невозможно ответить» — давай максимум информации.
 8. Если поиск не дал результатов — отвечай из своих знаний с пометкой (из базы знаний)."""
 
-DIRECT_SYSTEM_PROMPT = ("Отвечай подробно, структурированно и на русском языке. "
+DIRECT_SYSTEM_PROMPT = ("Отвечай подробно и структурированно. "
                         "Давай конкретные факты, примеры и пошаговые объяснения.")
 
 
@@ -618,7 +619,7 @@ def search_pipeline(user_message, force_search=True, reasoning=False, max_pages=
                        text="Свежие данные не нужны — отвечаю по знаниям модели")
             answer, note = yield from _pump(
                 _answer_with_context(user_message, "", [], provider, model, reasoning,
-                                     system=DIRECT_SYSTEM_PROMPT,
+                                     system=with_language(DIRECT_SYSTEM_PROMPT),
                                      note="Интернет не нужен, отвечаю по базе знаний модели."),
                 emit,
             )
@@ -793,6 +794,7 @@ def _answer_with_context(user_message, context, sources, provider, model,
     Так найденные ссылки всегда доезжают до пользователя, даже когда
     генератор молчит или рвётся на середине.
     """
+    system = with_language(system)          # ответ — на языке интерфейса
     body = f"Вопрос: {user_message}\n\nДанные из интернета:\n{context}"
     if note:
         body += f"\n\n[Примечание: {note}]"
@@ -882,7 +884,7 @@ def auto_search():
     prompt = (f"Вопрос: {user_message}\n\nДанные из интернета:\n{context}" if context
               else f"{user_message}\n[Поиск не дал результатов. Отвечай из своих знаний.]")
     reply, meta = chat_completion([{"role": "user", "content": prompt}],
-                                  system=SEARCH_SYSTEM_PROMPT, temperature=0.3)
+                                  system=with_language(SEARCH_SYSTEM_PROMPT), temperature=0.3)
     if reply is None:
         return jsonify({"error": meta}), 502
     return jsonify({
@@ -912,7 +914,7 @@ def web_search_groq():
     prompt = (f"Вопрос: {user_message}\n\nРезультаты поиска:\n{context}" if context
               else f"{user_message}\n[Поиск не дал результатов. Отвечай из своих знаний с пометкой.]")
     reply, meta = chat_completion([{"role": "user", "content": prompt}],
-                                  system=SEARCH_SYSTEM_PROMPT, temperature=0.3)
+                                  system=with_language(SEARCH_SYSTEM_PROMPT), temperature=0.3)
     if reply is None:
         return jsonify({"error": meta}), 502
     return jsonify({

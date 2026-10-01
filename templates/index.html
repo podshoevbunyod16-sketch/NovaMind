@@ -1,16 +1,17 @@
 <!DOCTYPE html>
-<html lang="ru" data-glass-theme="aurora">
+<html lang="tg" data-glass-theme="aurora">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
   <meta name="theme-color" content="#070713" />
   <title>NovaMind · Liquid Glass</title>
   <link rel="stylesheet" href="/static/liquid-glass.css">
+  <script src="/static/i18n.js"></script>
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
 
-<!-- Живой фон: зерно + виньетка поверх aurora-слоёв -->
+<!-- Фон: зерно + виньетка поверх статичных aurora-слоёв -->
 <div class="lg-grain" aria-hidden="true"></div>
 <div class="lg-vignette" aria-hidden="true"></div>
 
@@ -80,6 +81,10 @@
 
     <!-- ═══════════════ ФУТЕР БОКОВОЙ ПАНЕЛИ ═══════════════ -->
     <div class="sidebar-footer">
+      <div class="sidebar-lang">
+        <span class="sidebar-lang-label">🌐 Язык</span>
+        <div data-lang-picker="compact"></div>
+      </div>
       <a href="/admin/login" class="user-card" id="admin-link" style="display: none; text-decoration: none; color: inherit;">
         <div class="user-avatar">⚙️</div>
         <div>
@@ -116,12 +121,6 @@
 
       <div class="topbar-actions">
 
-        <button class="media-model-btn" id="btnMediaModel" type="button"
-                onclick="openMediaPicker()" title="Поиск и выбор моделей генерации изображений, аудио и видео">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z"/><path d="M19 15l.8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8z"/></svg>
-          <span class="media-model-label" id="mediaModelLabel">Медиа</span>
-        </button>
-
         <button class="icon-btn" title="Настройки AI" onclick="openSettings()">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-1.7 1.7-.06-.06a1.7 1.7 0 0 0-1.88-.34 1.7 1.7 0 0 0-1 1.55V20h-2.4v-.21a1.7 1.7 0 0 0-1-1.55 1.7 1.7 0 0 0-1.88.34l-.06.06-1.7-1.7.06-.06A1.7 1.7 0 0 0 8.6 15a1.7 1.7 0 0 0-1.55-1H6.8v-2.4h.25a1.7 1.7 0 0 0 1.55-1 1.7 1.7 0 0 0-.34-1.88L8.2 8.66l1.7-1.7.06.06a1.7 1.7 0 0 0 1.88.34 1.7 1.7 0 0 0 1-1.55V5.6h2.4v.21a1.7 1.7 0 0 0 1 1.55 1.7 1.7 0 0 0 1.88-.34l.06-.06 1.7 1.7-.06.06a1.7 1.7 0 0 0-.34 1.88 1.7 1.7 0 0 0 1.55 1h.21V14h-.21a1.7 1.7 0 0 0-1.55 1z"/></svg>
         </button>
@@ -137,14 +136,14 @@
       <div class="welcome" id="welcomeScreen">
         <img src="/static/images/image.png" alt="Khirad" class="welcome-logo">
         <h1>Привет! Я <span>Khirad</span></h1>
-        <p>Напишите задачу — я отвечу сразу или сам поработаю в Linux: запущу код, создам файлы, найду свежие данные.</p>
+        <p>Просто напишите, что нужно. Я сам решу, как это сделать: отвечу, найду в интернете, нарисую картинку, озвучу текст, сделаю видео или поработаю в Linux.</p>
       </div>
     </div>
 
     <!-- Input Area -->
     <div class="input-area">
       <div class="input-toolbar">
-        <button class="toolbar-btn" id="btn-web-search" onclick="toggleWebSearch()" title="Автопоиск: ИИ ищет в интернете через Linux-окружение и отвечает с источниками">
+        <button class="toolbar-btn" id="btn-web-search" onclick="toggleWebSearch()" title="Автопоиск: ИИ сначала ищет в интернете и отвечает с источниками">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
           <span id="searchBtnText">Поиск</span>
           <span class="lg-dot" id="searchHealthDot" title="Состояние поисковых бэкендов"></span>
@@ -173,20 +172,12 @@
           <button class="toolbar-btn" onclick="attachVideo()">🎬 Видео</button>
         </div>
 
-        <button class="toolbar-btn" id="btn-media" onclick="openMediaPicker()" title="Модели изображений, аудио и видео">🎨 <span>Медиа</span></button>
-        <button class="toolbar-btn" id="btn-calm" onclick="toggleCalmMotion()" title="Отключить фоновые анимации">✨ <span>Анимации</span></button>
       </div>
 
       <div class="mode-active" id="modeActiveBar" hidden>
         <span class="mode-active-dot"></span>
         <span class="mode-active-text" id="modeActiveText"></span>
         <button class="mode-active-clear" type="button" onclick="clearInputMode()" title="Выключить режим">×</button>
-      </div>
-
-      <div class="media-active" id="mediaActiveBar" hidden>
-        <span class="media-active-dot"></span>
-        <span class="media-active-text" id="mediaActiveText">Медиа-модель не выбрана</span>
-        <button class="media-active-clear" type="button" onclick="clearMediaModel()" title="Вернуться к обычному чату">×</button>
       </div>
 
       <div class="input-wrapper">
@@ -218,45 +209,6 @@
     </div>
 
   </main>
-</div>
-
-<!-- ═══════════ ЕДИНАЯ ПАНЕЛЬ ВЫБОРА МЕДИА-МОДЕЛЕЙ ═══════════ -->
-<div class="media-modal" id="mediaPicker" aria-hidden="true" onclick="if(event.target===this)closeMediaPicker()">
-  <div class="media-dialog media-picker" role="dialog" aria-label="Модели генерации медиа">
-    <button class="media-close" onclick="closeMediaPicker()" aria-label="Закрыть">×</button>
-    <div class="eyebrow">MEDIA MODELS</div>
-    <h2>Изображения, аудио и видео</h2>
-    <p class="media-help">
-      Один интерфейс для всех типов генерации. После выбора модели просто напишите
-      промпт в обычном поле чата — результат появится в переписке.
-    </p>
-
-    <div class="media-tabs">
-      <button class="media-tab active" type="button" data-picker-type="all" onclick="setPickerType('all')">Все</button>
-      <button class="media-tab" type="button" data-picker-type="image" onclick="setPickerType('image')">🖼 Изображения</button>
-      <button class="media-tab" type="button" data-picker-type="audio" onclick="setPickerType('audio')">🔊 Аудио</button>
-      <button class="media-tab" type="button" data-picker-type="video" onclick="setPickerType('video')">🎬 Видео</button>
-    </div>
-
-    <div class="picker-filters">
-      <input id="mediaSearch" type="search" placeholder="Поиск модели или провайдера…" oninput="onMediaSearchInput()">
-      <label class="picker-check" title="Модели, доступные только за счёт пробных кредитов">
-        <input type="checkbox" id="mediaIncludeTrial" checked onchange="loadMediaModels(false)"> Пробные кредиты
-      </label>
-      <label class="picker-check" title="Платные модели не используются автоматически">
-        <input type="checkbox" id="mediaIncludePaid" onchange="loadMediaModels(false)"> Платные
-      </label>
-      <button class="picker-refresh" type="button" onclick="loadMediaModels(true)" title="Обновить каталог провайдеров">↻</button>
-    </div>
-
-    <div class="picker-meta" id="pickerMeta">Загрузка каталога…</div>
-    <div class="picker-list" id="pickerList"><div class="picker-empty">Загружаю модели…</div></div>
-
-    <div class="picker-footer">
-      <div id="pickerHint">Выберите модель — промпт пишется в обычном поле чата.</div>
-      <button class="picker-done" type="button" onclick="closeMediaPicker()">Готово</button>
-    </div>
-  </div>
 </div>
 
 <!-- ═══════════ КОМАНДНАЯ ПАНЕЛЬ (Ctrl+K) ═══════════ -->

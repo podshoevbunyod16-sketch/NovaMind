@@ -1,11 +1,12 @@
 <!DOCTYPE html>
-<html lang="ru" data-glass-theme="aurora">
+<html lang="tg" data-glass-theme="aurora">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta name="theme-color" content="#070713">
   <title>Настройки AI — Khirad</title>
   <link rel="stylesheet" href="/static/liquid-glass.css">
+  <script src="/static/i18n.js"></script>
   <link rel="stylesheet" href="/static/settings.css">
 </head>
 <body>
@@ -22,6 +23,15 @@
     </header>
 
     <main class="settings-content">
+      <section class="hero-card lang-card" id="langCard">
+        <div>
+          <div class="eyebrow">🌐 ЯЗЫК</div>
+          <h2>Язык интерфейса</h2>
+          <p>Весь интерфейс и ответы ИИ переключатся на выбранный язык.</p>
+        </div>
+        <div data-lang-picker></div>
+      </section>
+
       <section class="hero-card">
         <div>
           <div class="eyebrow">ПРОВАЙДЕРЫ И МОДЕЛИ</div>

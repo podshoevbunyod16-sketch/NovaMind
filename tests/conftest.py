@@ -14,6 +14,7 @@ KEY_VARS = (
     "IMAGE_GENERATION_URL", "IMAGE_MODEL", "IMAGE_API_KEY",
     "AUDIO_TTS_URL", "AUDIO_TTS_MODEL", "AUDIO_API_KEY",
     "VIDEO_API_URL", "VIDEO_MODEL", "VIDEO_API_KEY", "POLLINATIONS_TOKEN",
+    "POLLINATIONS_API_KEY", "POLLINATIONS_KEY", "MEDIA_ALLOW_PAID",
 )
 
 
@@ -27,6 +28,8 @@ def isolated_env(tmp_path, monkeypatch):
     media_dir = tmp_path / "generated_media"
     monkeypatch.setattr(mg, "MEDIA_DIR", str(media_dir))
     mg.reset_catalog_cache()
+    import media_agent
+    media_agent.reset_cache()
 
     import config
     monkeypatch.setattr(config, "RUNTIME_SETTINGS_FILE", str(tmp_path / "runtime_settings.json"))
@@ -59,6 +62,9 @@ def client(tmp_path, monkeypatch, isolated_env):
     from app import app as flask_app
     flask_app.config.update(TESTING=True)
     with flask_app.test_client() as test_client:
+        # Тесты сверяют исходные русские тексты. Без cookie сервер отвечает
+        # на языке по умолчанию — таджикском (см. tests/test_i18n.py).
+        test_client.set_cookie("nova_lang", "ru")
         yield test_client
 
 
