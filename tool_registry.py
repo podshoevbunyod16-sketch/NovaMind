@@ -90,6 +90,33 @@ def bootstrap_default_tools():
             {"type":"object","properties":{"path":{"type":"string"},"max_chars":{"type":"integer"}},"required":["path"]},
             read_file, permissions=("workspace",), timeout=5))
 
+    if get_tool("file_write") is None:
+        from routes.terminal import safe_path, relative_to_workspace
+        def write_file(path, content=""):
+            import os
+            p = safe_path(path)
+            os.makedirs(os.path.dirname(p), exist_ok=True)
+            with open(p, "w", encoding="utf-8") as f:
+                f.write(str(content))
+            return {"ok": True, "path": relative_to_workspace(p),
+                    "bytes": len(str(content).encode("utf-8"))}
+        register_tool(ToolSpec(
+            "file_write", "Write a UTF-8 text file inside workspace.",
+            {"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}},"required":["path","content"]},
+            write_file, permissions=("workspace",), timeout=5))
+
+    if get_tool("git") is None:
+        from routes.terminal import run_agent
+        def git(command="status --short", timeout=12):
+            cmd = str(command).strip()
+            if not cmd.startswith("git"):
+                cmd = "git " + cmd
+            return _shell_result(run_agent(cmd, timeout=min(float(timeout), 30)))
+        register_tool(ToolSpec(
+            "git", "Run a Git command inside the workspace.",
+            {"type":"object","properties":{"command":{"type":"string"},"timeout":{"type":"number"}},"required":["command"]},
+            git, permissions=("workspace",), timeout=30))
+
 def _search_result(pair):
     results, trace = pair
     return {"ok": bool(results), "results": results, "trace": trace, "count": len(results)}
