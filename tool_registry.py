@@ -60,7 +60,7 @@ def bootstrap_default_tools():
         register_tool(ToolSpec(
             "web_search", "Search the public web and return normalized ranked sources.",
             {"type":"object","properties":{"query":{"type":"string"},"limit":{"type":"integer"}},"required":["query"]},
-            lambda query, limit=8: _search_result(__import__("routes.search", fromlist=["search_web"]).search_web(query, num=min(int(limit),12))),
+            lambda query, limit=8: _search_result(_agent_search(query, min(int(limit), 12))),
             permissions=("network",), timeout=20))
         register_tool(ToolSpec(
             "web_open", "Open a public HTTP(S) page and extract readable text.",
@@ -115,6 +115,14 @@ def bootstrap_default_tools():
             "git", "Run a Git command inside the workspace.",
             {"type":"object","properties":{"command":{"type":"string"},"timeout":{"type":"number"}},"required":["command"]},
             git, permissions=("workspace",), timeout=30))
+
+def _agent_search(query, limit=8):
+    """Resolve through the agent-facing search adapter so tests and runtime share one path."""
+    try:
+        from routes import agent as agent_routes
+        return agent_routes.nova_search(query, limit=limit)
+    except Exception:
+        return __import__("routes.search", fromlist=["search_web"]).search_web(query, num=limit)
 
 def _search_result(pair):
     results, trace = pair
