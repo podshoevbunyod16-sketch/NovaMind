@@ -649,7 +649,8 @@ def terminal_run():
     try:
         result = run_command(command, timeout=data.get("timeout"))
     except ValueError as exc:
-        return jsonify({"error": str(exc), "command": command}), 400
+        return jsonify({"error": str(exc), "command": command,
+                        "code": 2, "stdout": "", "stderr": str(exc)}), 400
     except RuntimeError as exc:
         return jsonify({"error": str(exc), "command": command}), 429
     result["command"] = command
