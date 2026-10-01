@@ -360,7 +360,6 @@ def agent_stream():
             if not use_tools:
                 break
 
-            state["steps"] += 1
             ask_kwargs = {"provider": provider, "model": model,
                           "temperature": 0.1, "max_tokens": 1200, "timeout": 60}
             if data.get("search"):
@@ -401,6 +400,7 @@ def agent_stream():
 
             kind = str(action.get("action"))
             if kind == "plan":
+                state["steps"] += 1
                 steps = action.get("steps") or action.get("plan") or action.get("text") or []
                 if isinstance(steps, list):
                     plan_text = "\n".join(f"{i}. {str(item)}" for i, item in enumerate(steps, 1))
@@ -418,6 +418,7 @@ def agent_stream():
                 if state["tool_steps"] >= MAX_STEPS:
                     break
                 state["tool_steps"] += 1
+                state["steps"] += 1
             key = _action_key(action, kind)
             if key in seen and kind not in ("answer", "task", "task_done"):
                 duplicates += 1
@@ -673,9 +674,18 @@ def _perform(action, kind, use_tools, state, goal=""):
     stderr = str(result.get("stderr") or "")
     output = stdout + (("\n" + stderr) if stderr else "")
     if _is_research_command(command) and not result["code"]:
-        # модель искала не через action=search, а командой `nova search …` — учитываем так же
+        # Keep source metadata even when terminal output is abbreviated.
         state["research"] += 1
-        _add_sources(state, _sources_from_text(output))
+        parsed_sources = _sources_from_text(output)
+        if parsed_sources:
+            _add_sources(state, parsed_sources)
+        else:
+            try:
+                query = str(command).split(None, 2)[2]
+                fresh_results, _meta = nova_search(query, limit=6)
+                _add_sources(state, fresh_results)
+            except Exception:
+                pass
         _note(state, command, output)
     if state["task_id"]:
         database.append_task_step(
