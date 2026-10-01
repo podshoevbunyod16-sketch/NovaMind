@@ -315,7 +315,7 @@ def agent_stream():
                            "text": "Ищу свежие данные и проверяю страницы…"})
             pre = call_tool("web_search", query=goal, limit=3)
             pre_results = pre.get("results") or []
-            pre_text = "\n".join(f"{i}. {x.get('title','')}\n   {x.get('url','')}\n   {x.get('snippet','')}"
+            pre_text = "\n".join(f"[{i}] {x.get('title','')}\n   {x.get('url','')}\n   {x.get('snippet','')}"
                                   for i, x in enumerate(pre_results, 1))
             if pre_results:
                 state["research"] += 1
@@ -341,12 +341,10 @@ def agent_stream():
             else:
                 yield _ndjson({"type": "step", "icon": "⚠️", "text": "Поиск ничего не дал"})
             observation_parts = [pre_text] if pre_text else ["Поиск ничего не нашёл."]
-            for item in pre_results:
-                opened = call_tool("web_open", url=item.get("url"), max_chars=3000)
-                page = opened.get("content") or ""
-                if page:
-                    page = "Текст страницы:\n" + page if not page.startswith("Текст страницы") else page
-                    observation_parts.append(page[:1800])
+            # The page excerpts were already fetched above; recover them from state notes.
+            for label, note in state["notes"][-len(pre_results):] if pre_results else []:
+                if str(label).startswith("страница "):
+                    observation_parts.append(note[:1800])
             history.append({"role": "user", "content":
                             "ПОИСК ВКЛЮЧЁН. Используй найденные данные. Если их достаточно — ответь; "
                             "если нет — можешь выполнить ещё один search.\n\n" + "\n\n".join(observation_parts)})
