@@ -168,8 +168,6 @@ def _ask(messages, **kwargs):
         text = strip_think("".join(chunks))
         if text:
             return text, ""
-        if saw and error_text:
-            return "", error_text
     except Exception:
         pass
     text, meta = chat_completion(messages, **kwargs)
@@ -288,8 +286,6 @@ def agent_stream():
         started = time.time()
         state = {"task_id": None, "steps": 0, "answer": "", "sources": [], "notes": [],
                  "research": 0}
-        yield _ndjson({"type": "stage", "scene": "agent", "title": "Планирую",
-                       "text": "Разбираю задачу по шагам…"})
 
         # 1. Один первый запрос: простой вопрос получает обычный ответ без лишнего plan/stage.
         # Если модель вернула action=plan, показываем его как план и продолжаем цикл.
@@ -317,6 +313,14 @@ def agent_stream():
                 action = parse_action(_extract_json_object(raw))
                 if action:
                     yield _ndjson({"type": "retract", "count": len(raw)})
+            if not action and re.match(r"^План\s*:", strip_think(raw), re.I):
+                plan_text = strip_think(raw).split(":", 1)[1].strip()
+                yield _ndjson({"type": "stage", "scene": "agent", "title": "Планирую",
+                               "text": "Разбираю задачу по шагам…"})
+                yield _ndjson({"type": "plan", "text": clip(plan_text, 900)})
+                history.append({"role": "assistant", "content": raw[:2000]})
+                history.append({"role": "user", "content": "План принят. Выполни задачу по плану и продолжай до готового ответа."})
+                continue
             if not action:
                 if looks_like_action(raw):
                     # JSON обрезался или сломан: один раз просим повторить, потом сдаёмся
@@ -493,7 +497,7 @@ def _perform(action, kind, use_tools, state, goal=""):
         if not query:
             return 'Пустой поисковый запрос. Повтори с {"action":"search","query":"..."}.'
         state["research"] += 1
-        tool_result = call_tool("web_search", query=query, limit=6)
+        tool_result = call_tool("web_search", query=query, limit=3)
         results = tool_result.get("results") or []
         trace = tool_result.get("trace") or []
         text = "\n".join(
@@ -524,6 +528,8 @@ def _perform(action, kind, use_tools, state, goal=""):
         state["research"] += 1
         open_result = call_tool("web_open", url=url, max_chars=4000)
         text = open_result.get("content") or ""
+        if text and not text.startswith("Текст страницы"):
+            text = "Текст страницы:\n" + text
         elapsed = 0
         if text:
             _add_sources(state, [{"title": urlparse(url).netloc, "url": url}])
@@ -578,7 +584,9 @@ def _perform(action, kind, use_tools, state, goal=""):
 
     result = call_tool("shell", command=command, timeout=STEP_TIMEOUT)
     result["code"] = int(result.get("exit_code", result.get("code", -1)))
-    output = (result["stdout"] or "") + (("\n" + result["stderr"]) if result["stderr"] else "")
+    stdout = str(result.get("stdout") or "")
+    stderr = str(result.get("stderr") or "")
+    output = stdout + (("\n" + stderr) if stderr else "")
     if _is_research_command(command) and not result["code"]:
         # модель искала не через action=search, а командой `nova search …` — учитываем так же
         state["research"] += 1
@@ -593,4 +601,6 @@ def _perform(action, kind, use_tools, state, goal=""):
     yield _ndjson({"type": "step", "icon": status, "text": f"{label} — код {result['code']}"})
     yield _ndjson({"type": "tool", "name": "run", "command": command, "code": result["code"],
                    "output": clip(output, 1500)})
-    return output or f"Команда завершилась с кодом {result['code']} и пустым выводом."
+    if result["code"]:
+        return output or f"Команда завершилась с кодом выхода {result['code']} и пустым выводом."
+    return output or "Команда завершилась успешно, но ничего не вывела."
