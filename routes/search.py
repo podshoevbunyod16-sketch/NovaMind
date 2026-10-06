@@ -58,7 +58,7 @@ READER_TIMEOUT = float(os.getenv("READER_TIMEOUT", "10"))
 # приходит долго, поэтому времени заметно больше, чем у обычного поиска.
 ANSWER_TIMEOUT = float(os.getenv("ANSWER_TIMEOUT", "180"))
 # Сколько страниц успеваем прочитать перед ответом.
-MAX_PAGES = int(os.getenv("SEARCH_MAX_PAGES", "3"))
+MAX_PAGES = int(os.getenv("SEARCH_MAX_PAGES", "30"))
 # Таймаут служебных запросов (короткий поисковый запрос, «нужен ли поиск»).
 QUERY_TIMEOUT = float(os.getenv("SEARCH_QUERY_TIMEOUT", "10"))
 
@@ -118,6 +118,7 @@ def _normalize_and_rank(results, query="", limit=8):
     for item in ranked:
         item.pop("_rank", None)
     return ranked[:max(1, min(int(limit), 20))]
+
 
 def search_web_apilayer(query, num=8):
     if not APILAYER_KEY:

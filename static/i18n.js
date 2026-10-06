@@ -40,6 +40,7 @@
     { ru: 'Базовый план', tg: 'Нақшаи асосӣ', en: 'Basic plan' },
     { ru: 'Выйти', tg: 'Баромадан', en: 'Sign out' },
     // — верхняя панель —
+    { ru: 'Просто напишите, что нужно. Я сам решу, как это сделать: отвечу, найду в интернете, нарисую картинку, озвучу текст, сделаю видео или поработаю в Linux.', tg: 'Чизе нависед ва ман метавонам аз руи он мушкилии шоморо хал кунам ва ё сурат месозам, мусики, видео ва ё ин ки бо Линукс кор мекунам.', en: 'Just write what you need. I myself will decide how to do it: I will answer, I will find on the Internet, I will call the text, I will make a video or work in Linux.' }, 
     { ru: 'AI Ассистент', tg: 'AI Ёрдамчи', en: 'AI Assistant' },
     { ru: 'Медиа', tg: 'Медиа', en: 'Media' },
     { ru: 'Открыть боковую панель', tg: 'Кушодани панели канорӣ', en: 'Open sidebar' },

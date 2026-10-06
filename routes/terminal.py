@@ -63,11 +63,11 @@ ALLOWED_COMMANDS = {
     "nova",                 # встроенная команда окружения: поиск и чтение страниц
 }
 # Подстроки, которые запрещены даже внутри разрешённой команды:
-# выход вверх, sudo, подстановка в оболочку, фоновый запуск.
-# Пайпы «|» и перенаправления «>» «>>» разрешены и разбираются отдельно.
+# склейка команд, sudo, подстановки в оболочку, фоновый запуск.
+# Пайпы «|» и перенаправления «>» «>>» «2>» «&>» разбираются отдельно.
 FORBIDDEN = (
     "sudo", "su ", "doas", "chown", "chmod 777", "rm -rf /", ":(){", ">/dev/",
-    "&", "`", "$(", "${", "\n",
+    "&&", "||", "`", "$(", "${", "\n", ">&",
 )
 
 # Знаки перенаправления, которые понимает песочница.
@@ -218,20 +218,47 @@ def ensure_workspace():
 
 def _validate_command_paths(segments):
     """Reject filesystem arguments that could escape the workspace."""
-    network_tools={"curl","wget","ping","dig","nslookup","host","ssh","scp","sftp","git"}
+    network_tools = {"curl", "wget", "ping", "dig", "nslookup", "host", "ssh", "scp", "sftp", "git"}
     for argv, program in segments:
         for index, arg in enumerate(argv[1:], 1):
-            if arg in ("-C","--directory") and index + 1 < len(argv):
-                candidate=argv[index+1]
-                if os.path.isabs(candidate) or candidate == ".." or candidate.startswith("../") or candidate.startswith("..\\"):
+            if arg in ("-C", "--directory") and index + 1 < len(argv):
+                candidate = argv[index + 1]
+                if (os.path.isabs(candidate) or candidate == ".."
+                        or candidate.startswith("../") or candidate.startswith("..\\")):
                     raise ValueError("Путь выходит за пределы рабочей папки")
                 continue
-            if program in network_tools and (arg.startswith(("http://","https://","ssh://","git@")) or "://" in arg):
+            if program in network_tools and (arg.startswith(("http://", "https://", "ssh://", "git@")) or "://" in arg):
                 continue
             if arg.startswith("-"):
                 continue
-            if os.path.isabs(arg) or arg == ".." or arg.startswith("../") or arg.startswith("..\\") or "/../" in arg:
+            if (os.path.isabs(arg) or arg == ".." or arg.startswith("../")
+                    or arg.startswith("..\\") or "/../" in arg):
                 raise ValueError("Path traversal запрещён")
+
+
+def _tokenize(command):
+    """Разбирает команду на токены, склеивая fd-префикс с оператором.
+
+    `shlex` с punctuation_chars отдаёт `>>`, `&>` одним токеном, но `2>`
+    разбивает на «2» и «>». Здесь такие пары склеиваются обратно, чтобы
+    `cmd 2>err.log` (без пробела) разбиралось как редирект.
+    """
+    lexer = shlex.shlex(command, posix=True)
+    lexer.whitespace_split = True
+    lexer.punctuation_chars = "|><&"
+    raw = list(lexer)
+    merged, i = [], 0
+    while i < len(raw):
+        token = raw[i]
+        if token == "2" and i + 1 < len(raw) and raw[i + 1] in (">", ">>"):
+            merged.append(token + raw[i + 1])
+            i += 2
+            continue
+        merged.append(token)
+        i += 1
+    return merged
+
+
 def check_command(command):
     """Проверяет команду: пустая, запрещённая конструкция или не из списка.
 
@@ -249,11 +276,14 @@ def check_command(command):
         if bad in command:
             raise ValueError(f"Конструкция «{bad.strip()}» отключена — выполняйте команды по одной")
     try:
-        tokens = shlex.split(command)
+        tokens = _tokenize(command)
     except ValueError as exc:
         raise ValueError(f"Не удалось разобрать команду: {exc}")
     if not tokens:
         raise ValueError("Пустая команда")
+    # Одиночный «&» — фоновый запуск; не поддерживаем.
+    if any(token == "&" for token in tokens):
+        raise ValueError("Фоновый запуск «&» отключён")
 
     segments = []           # цепочка команд: [[argv], [argv], …]
     redirects = []          # перенаправления последней команды: (fd, mode, путь)
@@ -535,6 +565,7 @@ def run_command(command, timeout=None):
         "timed_out": timed_out,
     }
 
+
 def run_agent(command, timeout=12):
     """Запуск команды агентом: короче таймаут, всегда с префиксом ошибки."""
     try:
@@ -639,13 +670,18 @@ def terminal_file():
 
 @terminal_bp.route("/api/terminal/run", methods=["POST"])
 def terminal_run():
-    """Выполняет команду в песочнице."""
+    """Выполняет команду в песочнице.
+
+    Пайпы и «>»/«>>» разрешены: check_command разбирает цепочку по сегментам
+    и проверяет путь редиректа. Блокируем только склейку команд (&&, ||),
+    подстановки и фоновый запуск — их песочница не поддерживает.
+    """
     if (blocked := guard()):
         return blocked
     data = request.get_json(silent=True) or {}
     command = data.get("command", "")
-    if any(token in str(command) for token in ("|", ">", ">>", "&&", "||", "`", "$(")):
-        return jsonify({"error": "Составные shell-конструкции отключены — выполняйте команды по одной", "command": command}), 400
+    if any(token in str(command) for token in ("&&", "||", "`", "$(", "${")):
+        return jsonify({"error": "Составные конструкции &&/||/`/$( отключены", "command": command}), 400
     try:
         result = run_command(command, timeout=data.get("timeout"))
     except ValueError as exc:
@@ -771,14 +807,15 @@ def _search_in_workspace(query, limit=40):
     output = (result["stdout"] or "") + (result["stderr"] or "")
     matches = []
     for line in output.splitlines()[:limit]:
-        if ":" not in line or line.startswith("./"):
-            pass
         parts = line.split(":", 2)
         if len(parts) < 3:
             continue
         path, line_no, snippet = parts
+        path = path.strip().lstrip("./")
+        if not path or path.startswith(".."):
+            continue
         matches.append({
-            "path": path.strip().lstrip("./"),
+            "path": path,
             "line": int(line_no) if line_no.strip().isdigit() else 0,
             "snippet": snippet.strip()[:300],
             "url": "",
