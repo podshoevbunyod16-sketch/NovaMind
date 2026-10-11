@@ -1,0 +1,34 @@
+name: Auto Coding Agent checks
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "routes/coding_agent.py"
+      - "routes/__init__.py"
+      - "static/linux.js"
+      - "tests/test_coding_agent.py"
+      - ".github/workflows/coding-agent.yml"
+  push:
+    branches: ["feature/auto-coding-agent"]
+    paths:
+      - "routes/coding_agent.py"
+      - "routes/__init__.py"
+      - "static/linux.js"
+      - "tests/test_coding_agent.py"
+      - ".github/workflows/coding-agent.yml"
+
+jobs:
+  coding-agent:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install test dependencies
+        run: pip install -r requirements-dev.txt
+      - name: Compile changed Python modules
+        run: python -m py_compile routes/coding_agent.py routes/__init__.py
+      - name: Run coding agent safety tests
+        run: pytest -q tests/test_coding_agent.py
