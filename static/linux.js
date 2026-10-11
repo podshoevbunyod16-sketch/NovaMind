@@ -1,26 +1,11 @@
 /**
  * static/linux.js — ИИ-агент внутри главного чата.
- *
- * Отдельных кнопок «Агент», «Linux» и «Медиа» нет. Любое сообщение в главном
- * чате уходит в /api/agent/stream: ИИ сам решает, что делать — ответить сразу,
- * поискать в интернете, нарисовать картинку, озвучить текст, сделать видео
- * или поработать в Linux по шагам, пока цель не достигнута. Модель генерации
- * медиа тоже выбирает он сам.
- *
- * Linux-команды доступны при TERMINAL_ENABLED=1; без них агент всё равно
- * ищет и генерирует медиа. Если пользователь не вошёл или агент выключен
- * (AGENT_ENABLED=0), app.js отвечает старым путём — через обычный чат.
- *
- * Зависит от app.js (createAssistantTurn, consumeNdjson, activeAbort…),
- * поэтому подключается вторым скриптом.
+ * Файловые запросы на анализ/исправление маршрутизируются в Auto Coding Agent.
  */
 (() => {
   'use strict';
 
-  const state = {
-    status: null,        // ответ /api/agent/status
-    ready: null,         // Promise первой проверки
-  };
+  const state = { status: null, ready: null };
 
   function notify(message, kind) {
     if (typeof window.showNotification === 'function') window.showNotification(message, kind);
@@ -40,13 +25,6 @@
     return data;
   }
 
-  // ───────────────────────── сессия и статус ─────────────────────────
-
-  /**
-   * Вход по нику живёт в localStorage, а сервер забывает сессию после
-   * перезапуска (частая история в Termux). Без серверной сессии ИИ не
-   * пустят в окружение — поэтому тихо восстанавливаем её при загрузке.
-   */
   async function syncSession() {
     const nick = localStorage.getItem('nova_user_nick');
     if (!nick) return;
@@ -54,7 +32,7 @@
       const check = await getJson('/api/session/check');
       if (check.signed_in) return;
       await getJson('/api/session/login', { method: 'POST', body: JSON.stringify({ nick }) });
-    } catch (_) { /* без сессии чат всё равно работает — просто без Linux */ }
+    } catch (_) { /* Без сессии чат всё равно работает — просто без Linux. */ }
   }
 
   async function loadStatus() {
@@ -70,7 +48,6 @@
   function isAvailable() {
     const status = state.status;
     if (!status || !status.enabled) return false;
-    // Старый сервер не знал поля available — тогда нужен Linux, как раньше
     return status.available === undefined ? !!status.tools : !!status.available;
   }
 
@@ -78,7 +55,6 @@
     return !!(state.status && state.status.tools);
   }
 
-  /** Подсказка у индикатора в шапке: что умеет ИИ прямо сейчас. */
   function paintStatus() {
     const on = isAvailable();
     document.body.classList.toggle('agent-on', on);
@@ -89,7 +65,8 @@
       dot.title = (state.status && state.status.hint) || 'ИИ-агент недоступен';
       return;
     }
-    const skills = ['ищет в интернете', 'рисует, озвучивает и делает видео'];
+    const skills = ['ищет в интернете', 'рисует, озвучивает и делает видео',
+      'анализирует исходный код и предлагает исправления'];
     if (hasLinux()) skills.unshift('работает в Linux (код, файлы, терминал)');
     dot.title = `ИИ-агент сам выбирает, что делать: ${skills.join(', ')}`;
   }
@@ -98,7 +75,6 @@
     state.ready = (async () => {
       await syncSession();
       const status = await loadStatus();
-      // Один раз подскажем, чего не хватает (вход, Linux-окружение)
       if (status && status.hint && !sessionStorage.getItem('nova_linux_hint')) {
         sessionStorage.setItem('nova_linux_hint', '1');
         notify(status.hint, 'info');
@@ -108,39 +84,38 @@
     return state.ready;
   }
 
-  // ───────────────────────── ход ИИ через окружение ─────────────────────────
+  function isCodingRequest(message) {
+    const text = String(message || '');
+    const mentionsProjectFile = /(?:[\w.-]+\/)*[\w.-]+\.(?:py|js|ts|css|html|json|md|yml|yaml|toml)\b/i.test(text);
+    const asksForCodeWork = /(найди|исправ|ошиб|баг|проверь|анализ|объясни|рефактор|тест|почему|не работает|предложи|fix|debug|review|refactor|test)/i.test(text);
+    return mentionsProjectFile && asksForCodeWork;
+  }
 
-  /**
-   * Отправляет сообщение в главный чат с Linux-окружением.
-   *
-   * Возвращает true, если ответ получен (или остановлен пользователем),
-   * и false, если окружение недоступно — тогда app.js ответит старым путём.
-   */
   async function runTurn(message, options = {}) {
     if (state.ready) await state.ready.catch(() => null);
     if (!isAvailable()) return false;
 
-    const search = !!options.search;
+    const coding = isCodingRequest(message);
+    const search = !!options.search && !coding;
     const turn = createAssistantTurn();
-    if (search) turn.beginSearch('Поищу в интернете');
+    if (coding) turn.beginIdle('Исследую исходный код…');
+    else if (search) turn.beginSearch('Поищу в интернете');
     else turn.beginIdle(options.reasoning ? 'Рассуждаю…' : 'Думаю…');
 
     const controller = new AbortController();
-    activeAbort = controller;           // кнопка «Стоп» в app.js останавливает и ИИ
-
+    activeAbort = controller;
     let result = {};
     let failure = null;
+    const endpoint = coding ? '/api/agent/coding/stream' : '/api/agent/stream';
     try {
-      const response = await fetch('/api/agent/stream', {
+      const response = await fetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ message, search, reasoning: !!options.reasoning }),
         signal: controller.signal,
       });
       if (!response.ok) {
-        // Окружение закрылось (перезапуск сервера, выход из аккаунта) —
-        // убираем пустой пузырь и отдаём сообщение обычному чату.
-        if (response.status === 403 || response.status === 404) {
+        if ((response.status === 403 || response.status === 404) && !coding) {
           turn.remove();
           activeAbort = null;
           state.status = { ...(state.status || {}), available: false, tools: false };
@@ -183,7 +158,7 @@
         offline: result.offline,
         searched: result.searched,
         steps: result.steps,
-        linux: result.linux === undefined ? (result.steps > 0 || result.searched) : !!result.linux,
+        linux: coding ? false : (result.linux === undefined ? (result.steps > 0 || result.searched) : !!result.linux),
       });
     } catch (error) {
       activeAbort = null;
@@ -197,8 +172,6 @@
     }
     return true;
   }
-
-  // ───────────────────────── кнопки у блоков кода ─────────────────────────
 
   const CODE_PROMPTS = {
     run: 'Запусти этот код в Linux-окружении и покажи, что он выводит. Если есть ошибки — исправь и запусти снова.',
@@ -232,15 +205,7 @@
     window.sendMessage(`${prompt}\n\n\`\`\`${lang}\n${text}\n\`\`\``);
   }
 
-  // Публичный интерфейс — им пользуется app.js
-  window.Linux = {
-    state,
-    init,
-    loadStatus,
-    runTurn,
-    isAvailable,
-    hasLinux,
-  };
+  window.Linux = { state, init, loadStatus, runTurn, isAvailable, hasLinux };
 
   function boot() {
     const chat = document.getElementById('chatContainer');
