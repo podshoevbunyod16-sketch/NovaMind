@@ -38,3 +38,13 @@ def test_coding_agent_requires_admin(client, monkeypatch):
     )
     assert response.status_code == 403
     assert "администратору" in response.get_json()["error"]
+
+def test_coding_agent_does_not_follow_symlinks_outside_project(tmp_path, monkeypatch):
+    project = tmp_path / "project"
+    project.mkdir()
+    outside = tmp_path / "outside.py"
+    outside.write_text("SECRET = True", encoding="utf-8")
+    (project / "link.py").symlink_to(outside)
+    monkeypatch.setattr(coding_agent, "PROJECT_ROOT", project)
+    assert list(coding_agent._iter_source_files()) == []
+\n
