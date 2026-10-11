@@ -71,8 +71,13 @@ def _iter_source_files():
             if name.lower() in BLOCKED_NAMES or path.suffix.lower() not in ALLOWED_SUFFIXES:
                 continue
             try:
-                if path.stat().st_size <= MAX_FILE_BYTES:
-                    yield path
+                resolved = path.resolve()
+                if not resolved.is_relative_to(PROJECT_ROOT):
+                    continue
+                if resolved.name.lower() in BLOCKED_NAMES or resolved.suffix.lower() not in ALLOWED_SUFFIXES:
+                    continue
+                if resolved.stat().st_size <= MAX_FILE_BYTES:
+                    yield resolved
             except OSError:
                 continue
 
