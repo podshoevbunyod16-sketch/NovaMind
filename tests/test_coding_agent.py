@@ -47,4 +47,4 @@ def test_coding_agent_does_not_follow_symlinks_outside_project(tmp_path, monkeyp
     (project / "link.py").symlink_to(outside)
     monkeypatch.setattr(coding_agent, "PROJECT_ROOT", project)
     assert list(coding_agent._iter_source_files()) == []
-\n
+
