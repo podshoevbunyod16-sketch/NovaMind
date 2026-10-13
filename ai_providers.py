@@ -698,7 +698,14 @@ def fetch_available_models(provider, force=False):
                         }, provider))
             else:
                 raw = resp.json().get("data", resp.json().get("models", []))
-                models = [normalize_model(m, provider) for m in raw if m.get("id") or m.get("name")]
+                # Groq can include inactive/retired IDs in some catalog responses.
+                # Do not offer them in the model picker.
+                models = [
+                    normalize_model(m, provider)
+                    for m in raw
+                    if (m.get("id") or m.get("name"))
+                    and (provider != "groq" or m.get("active", True) is not False)
+                ]
 
             if models:
                 MODEL_CACHE[provider] = models
