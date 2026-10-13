@@ -5,7 +5,7 @@ import os
 import json
 import time
 import requests
-from groq_rotation import get_groq_key, mark_groq_key_exhausted
+from groq_rotation import get_groq_key, mark_groq_key_exhausted, GROQ_KEY_COOLDOWN
 
 def openai_compatible_request(url, payload, headers, timeout=90, max_retries=2):
     """Запрос к любому OpenAI-compatible серверу: Ollama, LM Studio, vLLM или облачному endpoint."""
@@ -174,7 +174,9 @@ def groq_request_with_rotation(url, payload, headers, timeout=90, max_retries=3)
         if resp.status_code == 429:
             detail = (resp.text or "")[:400]
             last_error = f"Groq HTTP 429: превышен лимит запросов/токенов. {detail}".strip()
-            mark_groq_key_exhausted()
+            lowered = detail.lower()
+            daily_quota = any(term in lowered for term in ("per day", "per-day", "daily", "quota", "tokens per day", "requests per day"))
+            mark_groq_key_exhausted(cooldown_seconds=GROQ_KEY_COOLDOWN if daily_quota else 60)
             if attempt < max_attempts - 1:
                 continue
             return None, last_error
@@ -460,7 +462,9 @@ def _raw_stream(provider, model, payload, cfg, timeout):
                 mark_groq_key_exhausted(permanent=True)
             else:
                 last_error = f"Groq HTTP 429: превышен лимит запросов/токенов. {detail}".strip()
-                mark_groq_key_exhausted()
+                lowered = detail.lower()
+                daily_quota = any(term in lowered for term in ("per day", "per-day", "daily", "quota", "tokens per day", "requests per day"))
+                mark_groq_key_exhausted(cooldown_seconds=GROQ_KEY_COOLDOWN if daily_quota else 60)
             continue
 
         if response.status_code >= 400:
