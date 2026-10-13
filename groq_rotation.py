@@ -5,20 +5,21 @@ import os
 import time
 import threading
 
-# A key hit by quota/rate-limit errors is temporarily skipped for 25 hours.
+# Daily quota is skipped for 25 hours; short rate limits default to 60 seconds.
 GROQ_KEY_COOLDOWN = 25 * 3600
+GROQ_RATE_LIMIT_COOLDOWN = 60
 
 GROQ_KEYS = []
 for i in range(1, 10):
     key = os.getenv(f"GROQ_API_KEY_{i}", "").strip()
     if key:
-        GROQ_KEYS.append({"key": key, "index": i, "exhausted_at": None, "invalid": False})
+        GROQ_KEYS.append({"key": key, "index": i, "exhausted_at": None, "cooldown_seconds": GROQ_RATE_LIMIT_COOLDOWN, "invalid": False})
 
 # Main key is used only when numbered keys are absent, avoiding duplicate attempts.
 if not GROQ_KEYS:
     main_key = os.getenv("GROQ_API_KEY", "").strip()
     if main_key:
-        GROQ_KEYS.append({"key": main_key, "index": 0, "exhausted_at": None, "invalid": False})
+        GROQ_KEYS.append({"key": main_key, "index": 0, "exhausted_at": None, "cooldown_seconds": GROQ_RATE_LIMIT_COOLDOWN, "invalid": False})
 
 groq_key_index = 0
 _groq_lock = threading.Lock()
@@ -27,7 +28,7 @@ _groq_lock = threading.Lock()
 def _refresh_expired_keys(now):
     for item in GROQ_KEYS:
         stamp = item["exhausted_at"]
-        if stamp is not None and not item["invalid"] and now - stamp >= GROQ_KEY_COOLDOWN:
+        if stamp is not None and not item["invalid"] and now - stamp >= item.get("cooldown_seconds", GROQ_RATE_LIMIT_COOLDOWN):
             item["exhausted_at"] = None
             print(f"[Groq Key] Ключ #{item['index']} снова доступен после cooldown")
 
@@ -48,8 +49,8 @@ def get_groq_key():
         return ""
 
 
-def mark_groq_key_exhausted(permanent=False):
-    """Mark the currently selected key invalid (401) or temporarily rate-limited (429)."""
+def mark_groq_key_exhausted(permanent=False, cooldown_seconds=GROQ_RATE_LIMIT_COOLDOWN):
+    """Mark a key invalid (401) or rate-limited (429) for the supplied cooldown."""
     global groq_key_index
     if not GROQ_KEYS:
         return
@@ -62,7 +63,8 @@ def mark_groq_key_exhausted(permanent=False):
         else:
             item["invalid"] = False
             item["exhausted_at"] = time.time()
-            print(f"[Groq Key] Ключ #{item['index']} превысил лимит, cooldown 25 часов")
+            item["cooldown_seconds"] = max(1, int(cooldown_seconds or GROQ_RATE_LIMIT_COOLDOWN))
+            print(f"[Groq Key] Ключ #{item['index']} ограничен, cooldown {item['cooldown_seconds']} сек.")
 
         for offset in range(1, len(GROQ_KEYS) + 1):
             idx = (groq_key_index + offset) % len(GROQ_KEYS)
@@ -84,7 +86,7 @@ def get_groq_key_status():
             if item["invalid"]:
                 status.append({"index": item["index"], "active": False, "status": "invalid"})
             elif item["exhausted_at"] is not None:
-                remaining = max(0, GROQ_KEY_COOLDOWN - (now - item["exhausted_at"]))
+                remaining = max(0, item.get("cooldown_seconds", GROQ_RATE_LIMIT_COOLDOWN) - (now - item["exhausted_at"]))
                 status.append({
                     "index": item["index"], "active": False, "status": "cooldown",
                     "cooldown_remaining_sec": int(remaining),
