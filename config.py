@@ -38,9 +38,9 @@ PROVIDERS = {
             "Content-Type": "application/json"
         },
         "models": [
-            {"id": "openai/gpt-oss-120b",          "name": "GPT-OSS 120B"},
-            {"id": "llama-3.3-70b-versatile",       "name": "Llama 3.3 70B"},
-            {"id": "llama-3.1-8b-instant",          "name": "Llama 3.1 8B"},
+            {"id": "openai/gpt-oss-120b", "name": "GPT-OSS 120B"},
+            {"id": "openai/gpt-oss-20b", "name": "GPT-OSS 20B"},
+            {"id": "qwen/qwen3.8-27b", "name": "Qwen 3.8 27B"},
         ]
     },
     "cerebras": {
@@ -121,7 +121,7 @@ PROVIDERS = {
 
 # Текущий провайдер и модель (меняются через /api/settings/select)
 current_provider = "groq"
-current_model    = "llama-3.3-70b-versatile"
+current_model    = "openai/gpt-oss-120b"
 system_prompt    = os.getenv("SYSTEM_PROMPT", "Ты — NovaMind, умный AI-ассистент. Отвечай чётко и по делу.")
 
 # Выбранная медиа-модель (изображение / аудио / видео).
@@ -148,6 +148,13 @@ def load_runtime_settings():
                 s = json.load(f)
             current_provider = s.get("provider", current_provider)
             current_model    = s.get("model",    current_model)
+            # Автоматически мигрируем модели Groq, отключённые на Developer/free-тарифах.
+            if current_provider == "groq" and current_model in {
+                "llama-3.3-70b-versatile",
+                "llama-3.1-8b-instant",
+                "qwen/qwen3.6-27b",
+            }:
+                current_model = "openai/gpt-oss-120b"
             system_prompt    = s.get("system_prompt", system_prompt)
             saved_media = s.get("media_selection")
             media_selection = saved_media if isinstance(saved_media, dict) else {}
