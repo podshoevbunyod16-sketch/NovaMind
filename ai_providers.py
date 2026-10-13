@@ -5,7 +5,7 @@ import os
 import json
 import time
 import requests
-from groq_rotation import get_groq_key, mark_groq_key_exhausted
+from groq_rotation import get_groq_key, mark_groq_key_exhausted, GROQ_KEY_COOLDOWN
 
 def openai_compatible_request(url, payload, headers, timeout=90, max_retries=2):
     """Запрос к любому OpenAI-compatible серверу: Ollama, LM Studio, vLLM или облачному endpoint."""
@@ -129,61 +129,68 @@ def gemini_stream_request(model,payload,timeout=90):
 
 def groq_request_with_rotation(url, payload, headers, timeout=90, max_retries=3):
     """
-    Выполняет запрос к Groq с автоматической ротацией ключей при rate limit.
-    Возвращает (response_data, None) или (None, error_message).
+    Запрос к Groq. Ротация выполняется только при 401/429:
+    ошибки модели/параметров (400/403/404) не должны портить состояние ключей.
     """
     if "generativelanguage.googleapis.com" in url:
-        return gemini_request(payload.get("model"),payload,timeout=timeout,max_retries=max_retries)
-    # Cerebras, OpenRouter и локальные серверы используют обычный OpenAI-compatible протокол.
+        return gemini_request(payload.get("model"), payload, timeout=timeout, max_retries=max_retries)
     if "api.groq.com" not in url:
         return openai_compatible_request(url, payload, headers, timeout=timeout, max_retries=max_retries)
 
-    for attempt in range(max_retries):
+    last_error = None
+    max_attempts = max(1, min(max_retries, len(GROQ_KEYS_LIST())))
+    if not GROQ_KEYS_LIST():
+        return None, "Groq API ключ не найден. Добавьте GROQ_API_KEY в .env."
+
+    for attempt in range(max_attempts):
         current_key = get_groq_key()
         if not current_key:
-            return None, "Нет доступных Groq API ключей"
+            return None, last_error or "Все Groq API ключи временно недоступны или помечены как неисправные."
 
-        headers["Authorization"] = f"Bearer {current_key}"
+        request_headers = dict(headers or {})
+        request_headers["Authorization"] = f"Bearer {current_key}"
+        request_headers.setdefault("Content-Type", "application/json")
 
         try:
-            resp = requests.post(url, json=payload, headers=headers, timeout=timeout)
-
-            # Rate limit / quota exceeded
-            if resp.status_code == 429:
-                error_text = resp.text.lower()
-                if "rate limit" in error_text or "quota" in error_text or "exceeded" in error_text:
-                    print(f"[Groq Key] Rate limit на ключе, ротируем...")
-                    mark_groq_key_exhausted()
-                    continue
-                else:
-                    time.sleep(2 ** attempt)
-                    continue
-
-            if resp.status_code == 401:
-                print(f"[Groq Key] 401 Unauthorized, ключ неверный навсегда")
-                mark_groq_key_exhausted(permanent=True)  # FIX: 401 != временный лимит
-                continue
-
-            resp.raise_for_status()
-            return resp.json(), None
-
+            resp = requests.post(url, json=payload, headers=request_headers, timeout=timeout)
         except requests.exceptions.Timeout:
-            if attempt < max_retries - 1:
+            last_error = "Таймаут запроса к Groq"
+            if attempt < max_attempts - 1:
                 time.sleep(1)
                 continue
-            return None, "Таймаут запроса к Groq"
-        except requests.exceptions.RequestException as e:
-            error_str = str(e).lower()
-            if "rate limit" in error_str or "quota" in error_str or "429" in error_str:
-                print(f"[Groq Key] Rate limit detected in exception, ротируем...")
-                mark_groq_key_exhausted()
-                continue
-            if attempt < max_retries - 1:
+            return None, last_error
+        except requests.exceptions.RequestException as exc:
+            last_error = f"Ошибка соединения с Groq: {exc}"
+            if attempt < max_attempts - 1:
                 time.sleep(1)
                 continue
-            return None, str(e)
+            return None, last_error
 
-    return None, "Все Groq ключи исчерпаны или недоступны"
+        if resp.status_code == 401:
+            last_error = "Groq HTTP 401: API-ключ отклонён. Проверьте ключ в .env."
+            mark_groq_key_exhausted(permanent=True)
+            continue
+
+        if resp.status_code == 429:
+            detail = (resp.text or "")[:400]
+            last_error = f"Groq HTTP 429: превышен лимит запросов/токенов. {detail}".strip()
+            lowered = detail.lower()
+            daily_quota = any(term in lowered for term in ("per day", "per-day", "daily", "quota", "tokens per day", "requests per day"))
+            mark_groq_key_exhausted(cooldown_seconds=GROQ_KEY_COOLDOWN if daily_quota else 60)
+            if attempt < max_attempts - 1:
+                continue
+            return None, last_error
+
+        if resp.status_code >= 400:
+            detail = (resp.text or "")[:600]
+            return None, f"Groq HTTP {resp.status_code}: {detail}"
+
+        try:
+            return resp.json(), None
+        except ValueError:
+            return None, "Groq вернул некорректный JSON"
+
+    return None, last_error or "Не удалось выполнить запрос к Groq"
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -424,35 +431,49 @@ def _raw_stream(provider, model, payload, cfg, timeout):
         attempts = 1
 
     last_error = None
-    for _ in range(attempts):
+    for attempt in range(attempts):
+        if provider == "groq":
+            current_key = get_groq_key()
+            if not current_key:
+                yield "error", last_error or "Все ключи Groq временно недоступны. Проверьте GROQ_API_KEY и лимиты."
+                return
+            headers = dict(headers or {})
+            headers["Authorization"] = f"Bearer {current_key}"
+
         try:
             # (подключение, ожидание очередной порции данных) — долгий первый
             # токен у reasoning-моделей не должен обрываться по общему таймауту
             response = requests.post(cfg["url"], json=payload, headers=headers,
                                      timeout=(min(30, timeout), timeout), stream=True)
         except requests.exceptions.RequestException as exc:
-            last_error = str(exc)
-            if provider == "groq":
-                mark_groq_key_exhausted()
-                headers = provider_headers("groq")
-            continue
+            last_error = f"Ошибка соединения с {provider}: {exc.__class__.__name__}"
+            if attempt < attempts - 1:
+                time.sleep(1)
+                continue
+            yield "error", last_error
+            return
 
-        if response.status_code in (401, 429) and provider == "groq":
-            last_error = f"Groq HTTP {response.status_code}"
-            mark_groq_key_exhausted(permanent=response.status_code == 401)
+        if provider == "groq" and response.status_code in (401, 429):
+            status_code = response.status_code
+            detail = (response.text or "")[:400]
             response.close()
-            headers = provider_headers("groq")
+            if status_code == 401:
+                last_error = "Groq HTTP 401: API-ключ отклонён. Проверьте ключ в .env."
+                mark_groq_key_exhausted(permanent=True)
+            else:
+                last_error = f"Groq HTTP 429: превышен лимит запросов/токенов. {detail}".strip()
+                lowered = detail.lower()
+                daily_quota = any(term in lowered for term in ("per day", "per-day", "daily", "quota", "tokens per day", "requests per day"))
+                mark_groq_key_exhausted(cooldown_seconds=GROQ_KEY_COOLDOWN if daily_quota else 60)
             continue
 
         if response.status_code >= 400:
             detail = (response.text or "")[:600]
             response.close()
-            last_error = f"HTTP {response.status_code}: {detail}"
-            if provider == "groq":
-                mark_groq_key_exhausted()
-                headers = provider_headers("groq")
-                continue
-            break
+            last_error = f"{provider} HTTP {response.status_code}: {detail}"
+            # Ошибки модели/параметров не относятся к состоянию API-ключа.
+            yield "error", last_error
+            return
 
         response.encoding = "utf-8"
         try:
@@ -677,7 +698,14 @@ def fetch_available_models(provider, force=False):
                         }, provider))
             else:
                 raw = resp.json().get("data", resp.json().get("models", []))
-                models = [normalize_model(m, provider) for m in raw if m.get("id") or m.get("name")]
+                # Groq can include inactive/retired IDs in some catalog responses.
+                # Do not offer them in the model picker.
+                models = [
+                    normalize_model(m, provider)
+                    for m in raw
+                    if (m.get("id") or m.get("name"))
+                    and (provider != "groq" or m.get("active", True) is not False)
+                ]
 
             if models:
                 MODEL_CACHE[provider] = models
