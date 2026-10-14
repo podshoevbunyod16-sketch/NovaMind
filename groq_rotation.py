@@ -4,6 +4,10 @@ groq_rotation.py — Thread-safe rotation of Groq API keys.
 import os
 import time
 import threading
+import logging
+
+logger = logging.getLogger(__name__)
+AUTH_FAILURE_THRESHOLD = max(2, int(os.getenv("GROQ_401_FAILURE_THRESHOLD", "3")))
 
 # Daily quota is skipped for 25 hours; short rate limits default to 60 seconds.
 GROQ_KEY_COOLDOWN = 25 * 3600
@@ -13,13 +17,13 @@ GROQ_KEYS = []
 for i in range(1, 10):
     key = os.getenv(f"GROQ_API_KEY_{i}", "").strip()
     if key:
-        GROQ_KEYS.append({"key": key, "index": i, "exhausted_at": None, "cooldown_seconds": GROQ_RATE_LIMIT_COOLDOWN, "invalid": False})
+        GROQ_KEYS.append({"key": key, "index": i, "exhausted_at": None, "cooldown_seconds": GROQ_RATE_LIMIT_COOLDOWN, "invalid": False, "auth_failures": 0})
 
 # Main key is used only when numbered keys are absent, avoiding duplicate attempts.
 if not GROQ_KEYS:
     main_key = os.getenv("GROQ_API_KEY", "").strip()
     if main_key:
-        GROQ_KEYS.append({"key": main_key, "index": 0, "exhausted_at": None, "cooldown_seconds": GROQ_RATE_LIMIT_COOLDOWN, "invalid": False})
+        GROQ_KEYS.append({"key": main_key, "index": 0, "exhausted_at": None, "cooldown_seconds": GROQ_RATE_LIMIT_COOLDOWN, "invalid": False, "auth_failures": 0})
 
 groq_key_index = 0
 _groq_lock = threading.Lock()
@@ -30,7 +34,7 @@ def _refresh_expired_keys(now):
         stamp = item["exhausted_at"]
         if stamp is not None and not item["invalid"] and now - stamp >= item.get("cooldown_seconds", GROQ_RATE_LIMIT_COOLDOWN):
             item["exhausted_at"] = None
-            print(f"[Groq Key] Ключ #{item['index']} снова доступен после cooldown")
+            logger.info("Groq key #%s available after cooldown", item["index"])
 
 
 def get_groq_key():
@@ -49,31 +53,45 @@ def get_groq_key():
         return ""
 
 
-def mark_groq_key_exhausted(permanent=False, cooldown_seconds=GROQ_RATE_LIMIT_COOLDOWN):
-    """Mark a key invalid (401) or rate-limited (429) for the supplied cooldown."""
+def mark_groq_key_exhausted(permanent=False, cooldown_seconds=GROQ_RATE_LIMIT_COOLDOWN,
+                            key=None, auth_failure=False):
+    """Cool down a key; disable it permanently only after repeated consecutive 401s."""
     global groq_key_index
     if not GROQ_KEYS:
         return
     with _groq_lock:
-        item = GROQ_KEYS[groq_key_index]
+        item = next((entry for entry in GROQ_KEYS if key and entry["key"] == key), GROQ_KEYS[groq_key_index])
+        if auth_failure:
+            item["auth_failures"] = item.get("auth_failures", 0) + 1
+            permanent = permanent or item["auth_failures"] >= AUTH_FAILURE_THRESHOLD
         if permanent:
             item["invalid"] = True
             item["exhausted_at"] = None
-            print(f"[Groq Key] Ключ #{item['index']} отклонён (401), отключён до перезапуска/замены")
+            logger.error("Groq key #%s disabled after %s consecutive 401s", item["index"], item.get("auth_failures", 0))
         else:
             item["invalid"] = False
             item["exhausted_at"] = time.time()
             item["cooldown_seconds"] = max(1, int(cooldown_seconds or GROQ_RATE_LIMIT_COOLDOWN))
-            print(f"[Groq Key] Ключ #{item['index']} ограничен, cooldown {item['cooldown_seconds']} сек.")
-
+            logger.warning("Groq key #%s cooldown: %s seconds", item["index"], item["cooldown_seconds"])
+        failed_idx = GROQ_KEYS.index(item)
         for offset in range(1, len(GROQ_KEYS) + 1):
-            idx = (groq_key_index + offset) % len(GROQ_KEYS)
+            idx = (failed_idx + offset) % len(GROQ_KEYS)
             candidate = GROQ_KEYS[idx]
             if candidate["exhausted_at"] is None and not candidate["invalid"]:
                 groq_key_index = idx
-                print(f"[Groq Key] Переключение на ключ #{candidate['index']}")
+                logger.info("Rotating to Groq key #%s", candidate["index"])
                 return
-        print("[Groq Key] Нет доступных ключей; проверьте ключи и лимиты")
+        logger.warning("No available Groq keys; check credentials and limits")
+
+
+def mark_groq_key_success(key=None):
+    """Reset consecutive authentication failures after a successful request."""
+    if not GROQ_KEYS:
+        return
+    with _groq_lock:
+        item = next((entry for entry in GROQ_KEYS if key and entry["key"] == key), None)
+        if item:
+            item["auth_failures"] = 0
 
 
 def get_groq_key_status():
