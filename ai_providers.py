@@ -563,13 +563,12 @@ def _raw_stream(provider, model, payload, cfg, timeout):
             detail = (response.text or "")[:400]
             response.close()
             if status_code == 401:
-                last_error = "Groq HTTP 401: API-ключ отклонён. Проверьте ключ в .env."
-                mark_groq_key_exhausted(permanent=True)
+                last_error = "Groq HTTP 401: API-ключ отклонён; временная блокировка, отключение после 3 последовательных 401."
+                mark_groq_key_exhausted(permanent=False, cooldown_seconds=60, key=current_key, auth_failure=True)
             else:
                 last_error = f"Groq HTTP 429: превышен лимит запросов/токенов. {detail}".strip()
-                lowered = detail.lower()
-                daily_quota = any(term in lowered for term in ("per day", "per-day", "daily", "quota", "tokens per day", "requests per day"))
-                mark_groq_key_exhausted(cooldown_seconds=GROQ_KEY_COOLDOWN if daily_quota else 60)
+                cooldown = _groq_429_cooldown(response, detail)
+                mark_groq_key_exhausted(cooldown_seconds=cooldown, key=current_key)
             continue
 
         if response.status_code >= 400:
@@ -580,6 +579,8 @@ def _raw_stream(provider, model, payload, cfg, timeout):
             yield "error", last_error
             return
 
+        if provider == "groq":
+            mark_groq_key_success(current_key)
         response.encoding = "utf-8"
         try:
             for raw in response.iter_lines(decode_unicode=True):
@@ -740,13 +741,13 @@ def _local_catalog_urls():
     else:
         base = configured
     lowered = base.lower()
-    if ":11434" in lowered or lowered.endswith("/api"):
-        # Native Ollama catalog is /api/tags; optional OpenAI mode is /v1/models.
-        if lowered.endswith("/api"):
-            native, root = base + "/tags", base[:-len("/api")].rstrip("/")
-        else:
-            native, root = base + "/api/tags", base
-        candidates = [native, root + "/v1/models"]
+    if ":11434" in lowered:
+        # Strip optional /v1 suffix before constructing Ollama native endpoints.
+        root = base[:-len("/v1")].rstrip("/") if base.lower().endswith("/v1") else base
+        candidates = [root + "/api/tags", root + "/v1/models"]
+    elif lowered.endswith("/api"):
+        root = base[:-len("/api")].rstrip("/")
+        candidates = [base + "/tags", root + "/v1/models"]
     elif base.endswith("/v1"):
         candidates = [base + "/models"]
     else:
