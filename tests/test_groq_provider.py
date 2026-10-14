@@ -143,3 +143,44 @@ def test_groq_success_resets_consecutive_401_counter(monkeypatch):
     monkeypatch.setattr(groq_rotation, "GROQ_KEYS", keys)
     groq_rotation.mark_groq_key_success("auth-key")
     assert keys[0]["auth_failures"] == 0
+
+
+
+def test_chat_completion_rejects_whitespace_only_response(monkeypatch):
+    monkeypatch.setattr(ai_providers, "resolve_target",
+                        lambda provider=None, model=None: ("openai_compatible", "test-model", {"url": "unused", "max_tokens": 10}))
+    monkeypatch.setattr(ai_providers, "openai_compatible_request",
+                        lambda *a, **k: ({"choices": [{"message": {"content": "  ", "reasoning_content": " "}}]}, None))
+    reply, error = ai_providers.chat_completion([{"role": "user", "content": "hi"}])
+    assert reply is None
+    assert "пустой ответ" in error
+
+
+def test_raw_stream_reports_connection_drop_after_partial_token(monkeypatch):
+    class Response:
+        status_code = 200
+        encoding = "utf-8"
+        def iter_lines(self, decode_unicode=True):
+            yield 'data: {"choices":[{"delta":{"content":"partial"}}]}'
+            raise ai_providers.requests.exceptions.ChunkedEncodingError("connection dropped")
+        def close(self):
+            pass
+    monkeypatch.setattr(ai_providers, "provider_headers", lambda provider: {})
+    monkeypatch.setattr(ai_providers.requests, "post", lambda *a, **k: Response())
+    events = list(ai_providers._raw_stream("openai_compatible", "test-model",
+        {"messages": [{"role": "user", "content": "hi"}]}, {"url": "unused"}, 1))
+    assert events[0] == ("token", "partial")
+    assert events[1][0] == "error"
+    assert "прервано" in events[1][1]
+
+
+def test_chat_stream_marks_partial_response_as_incomplete(monkeypatch):
+    monkeypatch.setattr(ai_providers, "resolve_target",
+                        lambda provider=None, model=None: ("openai_compatible", "test-model", {"url": "unused", "max_tokens": 10}))
+    def broken_stream(*args, **kwargs):
+        yield "token", "partial"
+        yield "error", "Соединение с моделью прервано"
+    monkeypatch.setattr(ai_providers, "_raw_stream", broken_stream)
+    events = list(ai_providers.chat_stream([{"role": "user", "content": "hi"}]))
+    errors = [chunk for kind, chunk in events if kind == "error"]
+    assert errors and "не полностью" in errors[0]
