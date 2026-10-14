@@ -5,6 +5,13 @@ import os
 import sys
 import json
 import time
+import logging
+
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+logging.basicConfig(level=getattr(logging, LOG_LEVEL, logging.INFO),
+                    format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+logger = logging.getLogger(__name__)
+PORT = int(os.getenv("PORT", "5000"))
 
 # ---------- Загрузка .env ----------
 _env_path = os.path.join(os.path.dirname(__file__), ".env")
@@ -162,7 +169,7 @@ def load_runtime_settings():
             if saved_lang in ("tg", "ru", "en"):
                 ui_language = saved_lang
         except Exception as e:
-            print(f"[config] Ошибка чтения runtime_settings: {e}")
+            logger.warning("Ошибка чтения runtime_settings: %s", e)
 
 def _write_runtime_settings():
     with open(RUNTIME_SETTINGS_FILE, "w", encoding="utf-8") as f:
@@ -182,7 +189,7 @@ def save_selected_model(provider, model):
     try:
         _write_runtime_settings()
     except Exception as e:
-        print(f"[config] Ошибка сохранения: {e}")
+        logger.warning("Ошибка сохранения runtime_settings: %s", e)
 
 def save_selected_media_model(selection):
     """Сохраняет выбранную медиа-модель (или очищает выбор, если selection пустое)."""
@@ -191,7 +198,7 @@ def save_selected_media_model(selection):
     try:
         _write_runtime_settings()
     except Exception as e:
-        print(f"[config] Ошибка сохранения медиа-модели: {e}")
+        logger.warning("Ошибка сохранения медиа-модели: %s", e)
     return media_selection
 
 
@@ -203,7 +210,7 @@ def save_ui_language(language: str):
     try:
         _write_runtime_settings()
     except Exception as e:
-        print(f"[config] Ошибка сохранения языка: {e}")
+        logger.warning("Ошибка сохранения языка: %s", e)
     return ui_language
 
 
@@ -256,7 +263,7 @@ def ensure_usable_provider() -> None:
     if current_provider == "local_demo" or has_credentials(current_provider):
         return
     fallback = first_available_provider()
-    print(f"[config] Провайдер '{current_provider}' не подключён — переключаюсь на '{fallback}'")
+    logger.warning("Провайдер '%s' не подключён — переключаюсь на '%s'", current_provider, fallback)
     current_provider = fallback
     models = PROVIDERS.get(fallback, {}).get("models") or []
     current_model = models[0]["id"] if models else "nova-local-1"
@@ -275,9 +282,9 @@ def load_custom_commands():
         try:
             with open(CUSTOM_COMMANDS_FILE, "r", encoding="utf-8") as f:
                 CUSTOM_ALIASES = json.load(f)
-            print(f"[config] Загружено {len(CUSTOM_ALIASES)} кастомных команд")
+            logger.info("Загружено %s кастомных команд", len(CUSTOM_ALIASES))
         except Exception as e:
-            print(f"[config] Ошибка чтения custom_commands.json: {e}")
+            logger.warning("Ошибка чтения custom_commands.json: %s", e)
             CUSTOM_ALIASES = {}
     else:
         CUSTOM_ALIASES = {}
@@ -306,6 +313,6 @@ def load_plugins():
                 mod = __import__(modname)
                 if hasattr(mod, "run"):
                     plugins[modname] = mod.run
-                    print(f"[config] Плагин загружен: {modname}")
+                    logger.info("Плагин загружен: %s", modname)
             except Exception as e:
-                print(f"[config] Ошибка загрузки плагина {modname}: {e}")
+                logger.warning("Ошибка загрузки плагина %s: %s", modname, e)

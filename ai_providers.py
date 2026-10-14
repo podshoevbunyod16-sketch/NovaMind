@@ -4,17 +4,25 @@ ai_providers.py — Запросы к AI провайдерам (Groq, Gemini, O
 import os
 import json
 import time
+import re
+import logging
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 import requests
-from groq_rotation import get_groq_key, mark_groq_key_exhausted, GROQ_KEY_COOLDOWN
+from groq_rotation import get_groq_key, mark_groq_key_exhausted, GROQ_KEY_COOLDOWN, mark_groq_key_success
+
+logger = logging.getLogger(__name__)
 
 def openai_compatible_request(url, payload, headers, timeout=90, max_retries=2):
-    """Запрос к любому OpenAI-compatible серверу: Ollama, LM Studio, vLLM или облачному endpoint."""
-    for attempt in range(max_retries):
+    """Запрос к OpenAI-compatible серверу; HTTP-ошибки разбираются по status_code."""
+    for attempt in range(max(1, int(max_retries))):
         try:
             resp = requests.post(url, json=payload, headers=headers, timeout=timeout)
-            if resp.status_code == 429 and attempt < max_retries - 1:
-                time.sleep(2 ** attempt)
-                continue
+            if resp.status_code == 429:
+                if attempt < max_retries - 1:
+                    time.sleep(_retry_after_seconds(resp.headers, 2 ** attempt))
+                    continue
+                return None, f"OpenAI-compatible сервер ограничил запросы (HTTP 429): {(resp.text or '')[:500]}"
             if resp.status_code == 401:
                 return None, "OpenAI-compatible сервер отклонил API ключ (401)"
             resp.raise_for_status()
@@ -23,14 +31,85 @@ def openai_compatible_request(url, payload, headers, timeout=90, max_retries=2):
             if attempt < max_retries - 1:
                 continue
             return None, "Таймаут OpenAI-compatible сервера"
-        except requests.exceptions.RequestException as e:
-            if attempt < max_retries - 1 and "429" in str(e):
+        except requests.exceptions.HTTPError as exc:
+            status = exc.response.status_code if exc.response is not None else "?"
+            if status == 429 and attempt < max_retries - 1:
                 time.sleep(2 ** attempt)
                 continue
-            return None, f"OpenAI-compatible сервер недоступен: {e}"
+            return None, f"OpenAI-compatible сервер вернул HTTP {status}: {str(exc)[:500]}"
+        except requests.exceptions.RequestException as exc:
+            if attempt < max_retries - 1:
+                time.sleep(2 ** attempt)
+                continue
+            return None, f"OpenAI-compatible сервер недоступен: {exc.__class__.__name__}"
         except ValueError:
             return None, "OpenAI-compatible сервер вернул некорректный JSON"
     return None, "OpenAI-compatible сервер недоступен"
+
+
+def _retry_after_seconds(headers, default=60):
+    """Разбирает Retry-After и rate-limit reset headers с верхним безопасным пределом."""
+    headers = headers or {}
+    value = headers.get("Retry-After")
+    if value:
+        try:
+            return max(1, min(int(float(value)), 25 * 3600))
+        except (TypeError, ValueError):
+            try:
+                when = parsedate_to_datetime(value)
+                if when.tzinfo is None:
+                    when = when.replace(tzinfo=timezone.utc)
+                return max(1, min(int((when - datetime.now(timezone.utc)).total_seconds()), 25 * 3600))
+            except (TypeError, ValueError, OverflowError):
+                pass
+    for name in ("X-RateLimit-Reset", "x-ratelimit-reset-requests", "x-ratelimit-reset-tokens", "x-ratelimit-reset"):
+        value = headers.get(name)
+        if not value:
+            continue
+        try:
+            raw = str(value).strip().lower()
+            seconds = float(raw[:-1]) if raw.endswith("s") else float(raw)
+            if not raw.endswith("s") and seconds > 1_000_000_000:
+                seconds -= time.time()
+            if seconds > 0:
+                return max(1, min(int(seconds), 25 * 3600))
+        except (TypeError, ValueError, OverflowError):
+            continue
+    return max(1, min(int(default), 25 * 3600))
+
+
+def _groq_429_cooldown(response, detail):
+    headers = getattr(response, "headers", {}) or {}
+    text = (detail or "").lower()
+    reset_headers = " ".join(str(v).lower() for k, v in headers.items() if "reset" in k.lower())
+    daily = ("per day", "per-day", "daily limit", "daily quota", "tokens per day", "requests per day", "day limit")
+    if any(term in text for term in daily) or "daily" in reset_headers:
+        return _retry_after_seconds(headers, GROQ_KEY_COOLDOWN)
+    # The word "quota" alone is ambiguous and should not trigger a 25-hour lockout.
+    return _retry_after_seconds(headers, 60)
+
+
+def _format_gemini_error(status_code, response):
+    """Извлекает код, статус и причину ошибки из Gemini JSON."""
+    try:
+        body = response.json()
+    except (ValueError, AttributeError):
+        body = {}
+    error = body.get("error", {}) if isinstance(body, dict) else {}
+    message = str(error.get("message") or getattr(response, "text", "") or "нет подробностей").strip()
+    api_status = str(error.get("status") or "").upper()
+    lowered = (message + " " + api_status).lower()
+    if status_code == 429 or any(x in lowered for x in ("quota", "rate limit", "resource_exhausted")):
+        reason = "превышена квота или частотный лимит"
+    elif status_code == 404 or any(x in lowered for x in ("model not found", "unknown model", "not found for api version")):
+        reason = "модель не найдена или недоступна"
+    elif status_code == 400:
+        reason = "ошибка запроса или параметров"
+    elif status_code in (401, 403):
+        reason = "ключ недействителен или доступ запрещён"
+    else:
+        reason = "ошибка API"
+    return f"Google AI Studio HTTP {status_code} ({reason}): {message[:900]}"
 
 
 def gemini_messages_from_openai(messages):
@@ -58,10 +137,15 @@ def gemini_request(model,payload,timeout=90,max_retries=2):
     for attempt in range(max_retries):
         try:
             r=requests.post(url,json=body,headers=headers,timeout=timeout)
-            if r.status_code==429 and attempt<max_retries-1: time.sleep(2**attempt); continue
-            if r.status_code==401: return None,"Google AI Studio: API ключ отклонён (401)"
-            if r.status_code==403: return None,"Google AI Studio: доступ запрещён (403)"
-            r.raise_for_status(); data=r.json(); parts=[]
+            if r.status_code == 429 and attempt < max_retries - 1:
+                time.sleep(min(_retry_after_seconds(r.headers, 2 ** attempt), 30))
+                continue
+            if r.status_code >= 400:
+                return None, _format_gemini_error(r.status_code, r)
+            data = r.json()
+            if not isinstance(data, dict):
+                return None, "Google AI Studio вернул ответ неожиданной структуры"
+            parts=[]
             for candidate in data.get("candidates",[]):
                 for part in (candidate.get("content") or {}).get("parts",[]):
                     if part.get("text"): parts.append(part["text"])
@@ -70,15 +154,20 @@ def gemini_request(model,payload,timeout=90,max_retries=2):
         except requests.exceptions.Timeout:
             if attempt<max_retries-1: continue
             return None,"Google AI Studio: таймаут"
+        except requests.exceptions.HTTPError as exc:
+            status = exc.response.status_code if exc.response is not None else "?"
+            return None, f"Google AI Studio HTTP {status}: {exc.__class__.__name__}"
         except requests.exceptions.RequestException as exc:
-            if attempt<max_retries-1 and "429" in str(exc): time.sleep(2**attempt); continue
-            return None,f"Google AI Studio: {exc}"
+            if attempt < max_retries - 1:
+                time.sleep(2 ** attempt)
+                continue
+            return None, f"Google AI Studio: {exc.__class__.__name__}"
         except (ValueError,TypeError): return None,"Google AI Studio вернул некорректный JSON"
     return None,"Google AI Studio: запрос не выполнен"
 
 def gemini_stream_request(model,payload,timeout=90):
     """Открывает нативный Gemini SSE-поток и возвращает подробную ошибку API."""
-    key=os.getenv("GEMINI_API_KEY","").strip()
+    key=(os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_AI_STUDIO_KEY") or "").strip()
     if not key:
         return None,"Google AI Studio: GEMINI_API_KEY не найден в .env"
 
@@ -114,12 +203,7 @@ def gemini_stream_request(model,payload,timeout=90):
             stream=True
         )
         if r.status_code >= 400:
-            try:
-                detail=r.json()
-                detail_text=json.dumps(detail,ensure_ascii=False)
-            except ValueError:
-                detail_text=(r.text or "").strip()
-            return None,f"Google AI Studio HTTP {r.status_code}: {detail_text[:1200]}"
+            return None, _format_gemini_error(r.status_code, r)
         r.encoding="utf-8"
         return r,None
     except requests.exceptions.Timeout:
@@ -167,16 +251,15 @@ def groq_request_with_rotation(url, payload, headers, timeout=90, max_retries=3)
             return None, last_error
 
         if resp.status_code == 401:
-            last_error = "Groq HTTP 401: API-ключ отклонён. Проверьте ключ в .env."
-            mark_groq_key_exhausted(permanent=True)
+            last_error = "Groq HTTP 401: API-ключ отклонён; ключ временно отложен. После 3 последовательных 401 он будет отключён до перезапуска."
+            mark_groq_key_exhausted(permanent=False, cooldown_seconds=60, key=current_key, auth_failure=True)
             continue
 
         if resp.status_code == 429:
             detail = (resp.text or "")[:400]
             last_error = f"Groq HTTP 429: превышен лимит запросов/токенов. {detail}".strip()
-            lowered = detail.lower()
-            daily_quota = any(term in lowered for term in ("per day", "per-day", "daily", "quota", "tokens per day", "requests per day"))
-            mark_groq_key_exhausted(cooldown_seconds=GROQ_KEY_COOLDOWN if daily_quota else 60)
+            cooldown = _groq_429_cooldown(resp, detail)
+            mark_groq_key_exhausted(cooldown_seconds=cooldown, key=current_key)
             if attempt < max_attempts - 1:
                 continue
             return None, last_error
@@ -186,7 +269,9 @@ def groq_request_with_rotation(url, payload, headers, timeout=90, max_retries=3)
             return None, f"Groq HTTP {resp.status_code}: {detail}"
 
         try:
-            return resp.json(), None
+            data = resp.json()
+            mark_groq_key_success(current_key)
+            return data, None
         except ValueError:
             return None, "Groq вернул некорректный JSON"
 
@@ -201,6 +286,15 @@ def groq_request_with_rotation(url, payload, headers, timeout=90, max_retries=3)
 # ══════════════════════════════════════════════════════════════════
 
 REASONING_MODELS_HINT = ("gpt-oss", "deepseek-r1", "qwen-3", "glm-4.5", "o1", "o3")
+
+
+def _clean_reasoning_tail(value):
+    """Удаляет распространённые служебные маркеры, сохраняя обычный текст."""
+    text = str(value or "")
+    text = re.sub(r"(?is)\[/?(?:THINK|REASONING|ANALYSIS|INTERNAL)\]", "", text)
+    text = re.sub(r"(?is)</?(?:thought|think|analysis|reasoning|internal)\b[^>]*>", "", text)
+    text = re.sub(r"(?is)<\|(?:think|analysis|reasoning)[^|]*\|>", "", text)
+    return text.strip()
 
 
 def provider_headers(provider: str) -> dict:
@@ -279,16 +373,16 @@ def chat_completion(messages, provider=None, model=None, system=None,
         if isinstance(text, list):
             text = "".join(str(p.get("text", "")) for p in text if isinstance(p, dict))
         text = str(text)
-        if not text.strip():
-            # reasoning-модели при малом max_tokens возвращают только
-            # рассуждение — используем его как ответ, а не молчим.
-            thought = message.get("reasoning") or message.get("reasoning_content") or ""
-            if isinstance(thought, str) and thought.strip():
-                text = thought.strip()
+        thought = message.get("reasoning") or message.get("reasoning_content") or ""
+        thought = thought if isinstance(thought, str) else ""
+        if not text.strip() and thought.strip():
+            text = thought
     except (AttributeError, IndexError, TypeError):
+        logger.warning("Неожиданный формат ответа (provider=%s, model=%s)", provider, model, exc_info=True)
         return None, "Провайдер вернул ответ в неожиданном формате"
     if not text.strip():
-        return None, "Провайдер вернул пустой ответ"
+        logger.warning("Пустые content и reasoning (provider=%s, model=%s)", provider, model)
+        return None, "Провайдер вернул пустой ответ (content и reasoning отсутствуют)"
     return text, {"provider": provider, "model": model, "offline": False}
 
 
@@ -353,7 +447,7 @@ def chat_stream(messages, provider=None, model=None, system=None, temperature=0.
                 yield "reasoning", chunk
             elif kind == "error":
                 # План не получился — не роняем основной ответ.
-                print(f"[reasoning prepass] {chunk}")
+                logger.warning("Reasoning prepass failed: %s", chunk)
                 break
 
     tokens_seen = False
@@ -367,13 +461,17 @@ def chat_stream(messages, provider=None, model=None, system=None, temperature=0.
         elif kind == "token":
             tokens_seen = True
             reasoning_tail = []
+        if kind == "error":
+            if tokens_seen:
+                yield "error", f"Ответ получен не полностью: поток оборвался после части текста. {chunk}"
+            else:
+                yield "error", chunk
+            continue
         yield kind, chunk
 
-    # Страховка: reasoning-модель может закончить поток рассуждением, не вернув
-    # content. Молчать нельзя — хвост рассуждения отдаём как ответ, чтобы
-    # пузырь пользователя не остался пустым.
+    # Не показываем пользователю служебные теги из хвоста reasoning.
     if not tokens_seen and reasoning_tail:
-        tail = "".join(reasoning_tail).strip()
+        tail = _clean_reasoning_tail("".join(reasoning_tail))
         if tail:
             yield "token", tail
 
@@ -395,9 +493,16 @@ def _raw_stream(provider, model, payload, cfg, timeout):
             if fallback_error:
                 yield "error", f"{error}. Fallback: {fallback_error}"
                 return
-            text = ((data.get("choices") or [{}])[0].get("message") or {}).get("content", "")
-            if text:
+            choices = data.get("choices") if isinstance(data, dict) else None
+            first = choices[0] if isinstance(choices, list) and choices and isinstance(choices[0], dict) else {}
+            message = first.get("message") if isinstance(first.get("message"), dict) else {}
+            text = message.get("content") or ""
+            if isinstance(text, list):
+                text = "".join(str(part.get("text", "")) for part in text if isinstance(part, dict))
+            if isinstance(text, str) and text.strip():
                 yield "token", text
+            else:
+                logger.warning("Gemini fallback вернул пустой или неожиданный ответ")
             return
         try:
             for raw in upstream.iter_lines(decode_unicode=True):
@@ -458,13 +563,12 @@ def _raw_stream(provider, model, payload, cfg, timeout):
             detail = (response.text or "")[:400]
             response.close()
             if status_code == 401:
-                last_error = "Groq HTTP 401: API-ключ отклонён. Проверьте ключ в .env."
-                mark_groq_key_exhausted(permanent=True)
+                last_error = "Groq HTTP 401: API-ключ отклонён; временная блокировка, отключение после 3 последовательных 401."
+                mark_groq_key_exhausted(permanent=False, cooldown_seconds=60, key=current_key, auth_failure=True)
             else:
                 last_error = f"Groq HTTP 429: превышен лимит запросов/токенов. {detail}".strip()
-                lowered = detail.lower()
-                daily_quota = any(term in lowered for term in ("per day", "per-day", "daily", "quota", "tokens per day", "requests per day"))
-                mark_groq_key_exhausted(cooldown_seconds=GROQ_KEY_COOLDOWN if daily_quota else 60)
+                cooldown = _groq_429_cooldown(response, detail)
+                mark_groq_key_exhausted(cooldown_seconds=cooldown, key=current_key)
             continue
 
         if response.status_code >= 400:
@@ -475,6 +579,8 @@ def _raw_stream(provider, model, payload, cfg, timeout):
             yield "error", last_error
             return
 
+        if provider == "groq":
+            mark_groq_key_success(current_key)
         response.encoding = "utf-8"
         try:
             for raw in response.iter_lines(decode_unicode=True):
@@ -626,20 +732,26 @@ def _local_catalog_urls():
     """
     from config import PROVIDERS
     configured = (
-        PROVIDERS.get("openai_compatible", {}).get("url")
-        or os.getenv("OPENAI_COMPATIBLE_URL")
-        or os.getenv("OPENAI_BASE_URL")
-        or "http://127.0.0.1:8080/v1"
-    )
-    base = configured.rstrip("/")
-    if base.endswith("/chat/completions"):
-        base = base[: -len("/chat/completions")].rstrip("/")
-    if base.endswith("/models"):
-        base = base[: -len("/models")].rstrip("/")
-
-    candidates = [base + "/models"]
-    if not base.endswith("/v1"):
-        candidates.append(base + "/v1/models")
+        os.getenv("OPENAI_COMPATIBLE_URL") or os.getenv("OPENAI_BASE_URL")
+        or PROVIDERS.get("openai_compatible", {}).get("url")
+        or "http://127.0.0.1:8080/v1/chat/completions"
+    ).strip().rstrip("/")
+    if configured.endswith("/chat/completions"):
+        base = configured[:-len("/chat/completions")].rstrip("/")
+    else:
+        base = configured
+    lowered = base.lower()
+    if ":11434" in lowered:
+        # Strip optional /v1 suffix before constructing Ollama native endpoints.
+        root = base[:-len("/v1")].rstrip("/") if base.lower().endswith("/v1") else base
+        candidates = [root + "/api/tags", root + "/v1/models"]
+    elif lowered.endswith("/api"):
+        root = base[:-len("/api")].rstrip("/")
+        candidates = [base + "/tags", root + "/v1/models"]
+    elif base.endswith("/v1"):
+        candidates = [base + "/models"]
+    else:
+        candidates = [base + "/models", base + "/v1/models"]
     return list(dict.fromkeys(candidates))
 
 def fetch_available_models(provider, force=False):
@@ -718,7 +830,7 @@ def fetch_available_models(provider, force=False):
             if provider != "openai_compatible":
                 break
 
-    print(f"[ai_providers] Model catalog error ({provider}): {last_error}")
+    logger.warning("Model catalog error (%s): %s", provider, last_error)
     MODEL_ERRORS[provider] = last_error or "Каталог моделей недоступен"
 
     # Local provider must remain selectable even if its catalog endpoint
