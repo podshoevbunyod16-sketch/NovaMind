@@ -135,10 +135,11 @@ def test_groq_key_becomes_permanent_only_after_three_401s(monkeypatch):
     assert groq_rotation.GROQ_KEYS[0]["auth_failures"] == 3
 
 
-def test_groq_success_resets_consecutive_401_counter():
-    groq_rotation.GROQ_KEYS[:] = [{
+def test_groq_success_resets_consecutive_401_counter(monkeypatch):
+    keys = [{
         "key": "auth-key", "index": 1, "exhausted_at": None,
         "cooldown_seconds": 60, "invalid": False, "auth_failures": 2,
     }]
+    monkeypatch.setattr(groq_rotation, "GROQ_KEYS", keys)
     groq_rotation.mark_groq_key_success("auth-key")
-    assert groq_rotation.GROQ_KEYS[0]["auth_failures"] == 0
+    assert keys[0]["auth_failures"] == 0
