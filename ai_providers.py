@@ -447,7 +447,7 @@ def chat_stream(messages, provider=None, model=None, system=None, temperature=0.
                 yield "reasoning", chunk
             elif kind == "error":
                 # План не получился — не роняем основной ответ.
-                print(f"[reasoning prepass] {chunk}")
+                logger.warning("Reasoning prepass failed: %s", chunk)
                 break
 
     tokens_seen = False
