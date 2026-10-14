@@ -15,9 +15,10 @@ app.py — Точка входа NovaMind. Только Flask init + регис�
     composio.py     — /composio, /api/composio/*
 """
 import os
+import logging
 from flask import Flask, send_from_directory, redirect
 
-from config import ADMIN_SESSION_KEY, load_plugins
+from config import ADMIN_SESSION_KEY, load_plugins, PORT
 from database import init_db
 from routes import ALL_BLUEPRINTS
 
@@ -45,7 +46,7 @@ def index():
 
 # ========== ЗАПУСК ==========
 if __name__ == '__main__':
-    port = int(os.getenv("PORT", 5000))
+    port = PORT
     debug = os.getenv("FLASK_DEBUG", "false").lower() == "true"
-    print(f"[NovaMind] Запуск на порту {port}, debug={debug}")
+    logging.getLogger(__name__).info("Запуск NovaMind на порту %s, debug=%s", port, debug)
     app.run(host="0.0.0.0", port=port, debug=debug)
