@@ -71,4 +71,47 @@ def test_groq_429_uses_short_cooldown_for_transient_limit(monkeypatch):
     )
     assert data is None
     assert "429" in error
-    assert calls == [{"cooldown_seconds": 60}]
+    assert calls == [{"cooldown_seconds": 60, "key": "test-key"}]
+
+
+
+def test_groq_401_is_temporary(monkeypatch):
+    calls = []
+    class Response:
+        status_code = 401
+        text = '{"error":{"message":"unauthorized"}}'
+    monkeypatch.setattr(ai_providers, "GROQ_KEYS_LIST", lambda: [{"key": "test"}])
+    monkeypatch.setattr(ai_providers, "get_groq_key", lambda: "test-key")
+    monkeypatch.setattr(ai_providers.requests, "post", lambda *a, **k: Response())
+    monkeypatch.setattr(ai_providers, "mark_groq_key_exhausted", lambda **kwargs: calls.append(kwargs))
+    _, error = ai_providers.groq_request_with_rotation(
+        "https://api.groq.com/openai/v1/chat/completions",
+        {"model": "openai/gpt-oss-20b", "messages": [{"role": "user", "content": "hi"}]},
+        {}, timeout=1, max_retries=1)
+    assert "временно" in error
+    assert calls == [{"permanent": False, "cooldown_seconds": 60, "key": "test-key", "auth_failure": True}]
+
+
+def test_retry_after_header_is_used():
+    assert ai_providers._retry_after_seconds({"Retry-After": "120"}) == 120
+
+
+def test_generic_quota_does_not_trigger_daily_cooldown():
+    class Response:
+        headers = {}
+    assert ai_providers._groq_429_cooldown(Response(), "quota exceeded") == 60
+
+
+def test_gemini_fallback_handles_missing_choices(monkeypatch):
+    monkeypatch.setattr(ai_providers, "gemini_stream_request", lambda *a, **k: (None, "stream unavailable"))
+    monkeypatch.setattr(ai_providers, "gemini_request", lambda *a, **k: ({"candidates": []}, None))
+    assert list(ai_providers._raw_stream("google_ai_studio", "gemini-test",
+        {"messages": [{"role": "user", "content": "hello"}]}, {"url": "unused"}, 1)) == []
+
+
+def test_gemini_error_classifies_quota():
+    class Response:
+        text = "Quota exceeded"
+        def json(self):
+            return {"error": {"message": "Quota exceeded", "status": "RESOURCE_EXHAUSTED"}}
+    assert "квота" in ai_providers._format_gemini_error(400, Response())
