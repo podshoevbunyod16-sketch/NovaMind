@@ -115,3 +115,30 @@ def test_gemini_error_classifies_quota():
         def json(self):
             return {"error": {"message": "Quota exceeded", "status": "RESOURCE_EXHAUSTED"}}
     assert "квота" in ai_providers._format_gemini_error(400, Response())
+
+
+
+def test_groq_key_becomes_permanent_only_after_three_401s(monkeypatch):
+    monkeypatch.setattr(groq_rotation, "GROQ_KEYS", [{
+        "key": "auth-key", "index": 1, "exhausted_at": None,
+        "cooldown_seconds": 60, "invalid": False, "auth_failures": 0,
+    }])
+    monkeypatch.setattr(groq_rotation, "groq_key_index", 0)
+    monkeypatch.setattr(groq_rotation.time, "time", lambda: 1000)
+    for expected_invalid in (False, False, True):
+        groq_rotation.mark_groq_key_exhausted(
+            permanent=False, cooldown_seconds=1, key="auth-key", auth_failure=True
+        )
+        assert groq_rotation.GROQ_KEYS[0]["invalid"] is expected_invalid
+        # Let the temporary cooldown expire between attempts.
+        groq_rotation.GROQ_KEYS[0]["exhausted_at"] = None
+    assert groq_rotation.GROQ_KEYS[0]["auth_failures"] == 3
+
+
+def test_groq_success_resets_consecutive_401_counter():
+    groq_rotation.GROQ_KEYS[:] = [{
+        "key": "auth-key", "index": 1, "exhausted_at": None,
+        "cooldown_seconds": 60, "invalid": False, "auth_failures": 2,
+    }]
+    groq_rotation.mark_groq_key_success("auth-key")
+    assert groq_rotation.GROQ_KEYS[0]["auth_failures"] == 0
