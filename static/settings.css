@@ -229,6 +229,10 @@ html[data-glass-theme="light"] .provider-mark { color: var(--accent); }
 .health-item small { display: block; color: var(--text-4); font-size: 10px; margin-top: 2px; }
 .health-item .lg-dot { margin-left: auto; }
 
+.mcp-connect-form { display: grid; grid-template-columns: 1fr 1.6fr 1fr 1fr auto; gap: 9px; margin-top: 18px; }
+.mcp-connect-form input, .mcp-connect-form select { min-width: 0; height: 42px; border-radius: var(--r-sm); border: 1px solid var(--glass-border-soft); background: var(--glass-fill); color: var(--text-1); padding: 0 11px; font-size: 12px; outline: none; }
+.mcp-connect-form input:focus, .mcp-connect-form select:focus { border-color: color-mix(in srgb, var(--accent) 55%, transparent); box-shadow: 0 0 0 3px var(--accent-soft); }
+
 /* ── Подсказки ── */
 .tips-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; margin-top: 18px; }
 .tips-grid article { padding: 18px 20px; }
@@ -255,6 +259,7 @@ html[data-glass-theme="light"] .provider-mark { color: var(--accent); }
 @media (max-width: 900px) {
   .filters { grid-template-columns: repeat(2, 1fr); }
   .search-field { grid-column: 1 / -1; }
+  .mcp-connect-form { grid-template-columns: repeat(2, 1fr); }
 }
 @media (max-width: 580px) {
   .settings-topbar { padding: 10px 14px; gap: 10px; }

@@ -199,11 +199,7 @@ _JOBS_LOCK = threading.Lock()
 def provider_connected(provider: str) -> bool:
     """Подключён ли провайдер (есть ключ или ключ не нужен)."""
     if provider == "pollinations":
-        return bool(
-            (os.getenv("POLLINATIONS_API_KEY")
-             or os.getenv("POLLINATIONS_KEY")
-             or os.getenv("POLLINATIONS_TOKEN") or "").strip()
-        )
+        return True
     if provider == "custom":
         return bool(
             os.getenv("IMAGE_GENERATION_URL")
@@ -474,7 +470,12 @@ def media_catalog(media_type="all", provider="all", query="", include_paid=False
         dict(item) for item in MEDIA_MODEL_REGISTRY
         if item.get("provider") != "pollinations"
     ]
-    entries.extend(_pollinations_media_entries(force=refresh))
+    pollinations_live = _pollinations_media_entries(force=refresh) if provider in ("all", "pollinations") else []
+    # Keep the verified static entries as a safety net: the live endpoint can
+    # omit premium/trial IDs or report incomplete pricing during outages.
+    entries.extend(pollinations_live)
+    entries.extend([dict(item) for item in MEDIA_MODEL_REGISTRY
+                    if item.get("provider") == "pollinations"])
     entries.extend(_openrouter_media_entries(live))
     entries.extend(_custom_endpoint_entries())
 
@@ -909,10 +910,8 @@ def generate_pollinations_image(model: dict, prompt: str, options=None, on_statu
         params += f"&seed={int(options['seed'])}"
     key = _pollinations_key()
     headers = {"Authorization": f"Bearer {key}"} if key else {}
-    url = f"https://gen.pollinations.ai/image/{quote(prompt)}?{params}"
+    url = f"https://image.pollinations.ai/prompt/{quote(prompt)}?{params}"
     _report(on_status, f"Отправка запроса к Pollinations ({model['id']})")
-    if not key:
-        return None, "Pollinations: нужен POLLINATIONS_API_KEY/POLLINATIONS_KEY для генерации."
     try:
         resp = requests.get(url, headers=headers, timeout=240)
     except requests.exceptions.Timeout:

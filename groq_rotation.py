@@ -31,8 +31,8 @@ _groq_lock = threading.Lock()
 
 def _refresh_expired_keys(now):
     for item in GROQ_KEYS:
-        stamp = item["exhausted_at"]
-        if stamp is not None and not item["invalid"] and now - stamp >= item.get("cooldown_seconds", GROQ_RATE_LIMIT_COOLDOWN):
+        stamp = item.get("exhausted_at")
+        if stamp is not None and not item.get("invalid", False) and now - stamp >= item.get("cooldown_seconds", GROQ_RATE_LIMIT_COOLDOWN):
             item["exhausted_at"] = None
             logger.info("Groq key #%s available after cooldown", item["index"])
 
@@ -47,7 +47,7 @@ def get_groq_key():
         for offset in range(len(GROQ_KEYS)):
             idx = (groq_key_index + offset) % len(GROQ_KEYS)
             item = GROQ_KEYS[idx]
-            if item["exhausted_at"] is None and not item["invalid"]:
+            if item.get("exhausted_at") is None and not item.get("invalid", False):
                 groq_key_index = idx
                 return item["key"]
         return ""

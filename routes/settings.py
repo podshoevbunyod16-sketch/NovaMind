@@ -4,6 +4,7 @@ routes/settings.py — Настройки провайдеров и моделе
 from flask import Blueprint, request, jsonify, render_template, session
 from ai_providers import fetch_available_models, provider_status, PROVIDER_LABELS, MODEL_ERRORS, media_models_catalog
 from config import PROVIDERS, save_selected_model, current_provider, current_model, GOOGLE_CLIENT_ID
+import mcp_registry
 
 settings_bp = Blueprint("settings", __name__)
 
@@ -80,6 +81,47 @@ def settings_media_models():
         return jsonify({"models":models, "type":media_type, "provider":provider, "count":len(models)})
     except Exception as exc:
         return jsonify({"models":[], "error":str(exc)}), 500
+
+
+@settings_bp.route('/api/settings/mcp')
+def settings_mcp_catalog():
+    """Return public MCP catalog and masked local connection metadata."""
+    return jsonify({"catalog": mcp_registry.catalog(), "connections": mcp_registry.public_connections()})
+
+
+@settings_bp.route('/api/settings/mcp/connect', methods=['POST'])
+def settings_mcp_connect():
+    try:
+        server_id = mcp_registry.save_connection(request.get_json(silent=True) or {})
+        result = mcp_registry.test_connection(server_id)
+        return jsonify({"id": server_id, **result}), (200 if result.get("connected") else 502)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+
+@settings_bp.route('/api/settings/mcp/<server_id>/test', methods=['POST'])
+def settings_mcp_test(server_id):
+    try:
+        result = mcp_registry.test_connection(server_id)
+        return jsonify(result), (200 if result.get("connected") else 502)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 404
+
+
+@settings_bp.route('/api/settings/mcp/<server_id>/tools')
+def settings_mcp_tools(server_id):
+    try:
+        return jsonify(mcp_registry.request(server_id, "tools/list"))
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 404
+    except Exception as exc:
+        return jsonify({"error": f"MCP: {exc}"}), 502
+
+
+@settings_bp.route('/api/settings/mcp/<server_id>', methods=['DELETE'])
+def settings_mcp_delete(server_id):
+    mcp_registry.remove_connection(server_id)
+    return jsonify({"success": True})
 
 @settings_bp.route('/api/settings/select', methods=['POST'])
 def settings_select():

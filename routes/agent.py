@@ -269,6 +269,8 @@ def agent_status():
         "admin": bool(session.get("admin_logged_in")),
         "hint": ("" if enabled
                  else "Включите AGENT_ENABLED=1 и TERMINAL_ENABLED=1 в .env и перезапустите сервер"),
+        "media": {kind: __import__("media_agent").quick_available(kind)
+                  for kind in ("image", "audio", "video")},
     })
 
 
@@ -302,7 +304,8 @@ def agent_stream():
     def generate():
         started = time.time()
         state = {"task_id": None, "steps": 0, "answer": "", "sources": [], "notes": [],
-                 "research": 0, "searched": bool(data.get("search")), "tool_steps": 0}
+                 "research": 0, "searched": bool(data.get("search")), "tool_steps": 0,
+                 "media_context": [], "media": []}
 
         # 1. Один первый запрос: простой вопрос получает обычный ответ без лишнего plan/stage.
         # Если модель вернула action=plan, показываем его как план и продолжаем цикл.
@@ -355,15 +358,15 @@ def agent_stream():
 
         # 2. Цикл действий
         seen, duplicates, parse_fails = set(), 0, 0
+        limit_reached = False
         for step in range(1, MAX_STEPS + 4):
             if time.time() - started > AGENT_TIMEOUT:
                 yield _ndjson({"type": "step", "icon": "⏱", "text": "Время вышло — собираю ответ"})
                 break
-            if not use_tools:
-                break
-
             ask_kwargs = {"provider": provider, "model": model,
                           "temperature": 0.1, "max_tokens": 1200, "timeout": 60}
+            if not use_tools:
+                ask_kwargs["system"] = "Linux-окружение сейчас выключено (TERMINAL_ENABLED=0). Не вызывай инструменты workspace; медиа-действия доступны."
             if data.get("search"):
                 ask_kwargs["system"] = "ПОИСК ВКЛЮЧЁН. Используй найденные данные и указывай источники [1], [2], [3]."
             raw, error = _ask(history, **ask_kwargs)
@@ -418,9 +421,12 @@ def agent_stream():
                 yield _ndjson({"type": "step", "icon": "🧠", "text": str(action.get("thought"))[:900]})
             if kind not in ("answer", "plan"):
                 if state["tool_steps"] >= MAX_STEPS:
+                    limit_reached = True
                     break
                 state["tool_steps"] += 1
                 state["steps"] += 1
+                if state["tool_steps"] >= MAX_STEPS:
+                    limit_reached = True
             key = _action_key(action, kind)
             if key in seen and kind not in ("answer", "task", "task_done"):
                 duplicates += 1
@@ -450,7 +456,7 @@ def agent_stream():
             history.append({"role": "user", "content":
                             f"Результат действия:\n{observation}" + (f"\n\n{nudge}" if nudge else "")})
 
-        if state["tool_steps"] >= MAX_STEPS and not state["answer"]:
+        if limit_reached or (state["tool_steps"] >= MAX_STEPS and not state["answer"]):
             yield _ndjson({"type": "step", "icon": "⏹", "text": "Шаги закончились — готовлю итог"})
 
         # 3. Нет ответа (лимит шагов, таймаут, повторы, сбой) — собираем его по найденному
@@ -458,7 +464,10 @@ def agent_stream():
             yield _ndjson({"type": "step", "icon": "✍️", "text": "Готовлю ответ по найденному"})
             state["answer"] = _synthesize(goal, state, provider, model)
         if not state["answer"] and not use_tools:
-            # инструментов нет — обычный ответ модели
+            # инструменты нет — обычный ответ модели
+            history.append({"role": "user", "content":
+                            "Инструменты отключены: TERMINAL_ENABLED=0. Не вызывай run/read/write; "
+                            "ответь пользователю обычным текстом."})
             text, _err = _ask(history, provider=provider, model=model,
                               temperature=0.3, max_tokens=1200, timeout=60)
             action = parse_action(text)
@@ -483,14 +492,17 @@ def agent_stream():
                                           log=clip(state["answer"], 1500))
                 yield _ndjson({"type": "task", "task": database.get_task(state["task_id"])})
 
+        historical_answer = state["answer"]
+        if state["media_context"]:
+            historical_answer += "\n" + "\n".join(state["media_context"])
         updated_history = (prior + [{"role": "user", "content": goal},
-                                       {"role": "assistant", "content": state["answer"]}])[-10:]
+                                       {"role": "assistant", "content": historical_answer}])[-10:]
         _AGENT_HISTORY_CACHE[history_key] = updated_history
         session["agent_history"] = updated_history
         yield _ndjson({"type": "result", "reply": state["answer"], "steps": state["steps"],
                        "task_id": state["task_id"], "model": model,
                        "sources": state["sources"], "searched": state["searched"],
-                       "offline": provider == "local_demo"})
+                       "media": state["media"], "offline": provider == "local_demo"})
         yield _ndjson({"type": "done"})
 
     return Response(generate(), mimetype="application/x-ndjson",
@@ -547,6 +559,38 @@ def _perform(action, kind, use_tools, state, goal=""):
     """
     import database
 
+    if kind == "media_models":
+        import media_agent
+        media_type = str(action.get("type") or "all")
+        text = media_agent.describe(media_type)
+        yield _ndjson({"type": "step", "icon": "🎨", "text": "Проверил доступные media-модели"})
+        return text
+
+    if kind in ("image", "audio", "video"):
+        import media_agent
+        prompt = str(action.get("prompt") or action.get("text") or "").strip()
+        options = media_agent.build_options(kind, action)
+        errors = []
+        yield _ndjson({"type": "stage", "scene": "media", "title": "Рисую медиа",
+                       "text": f"Подбираю модель для типа: {kind}"})
+        def status(message):
+            yield_value = _ndjson({"type": "step", "icon": "🎨", "text": str(message)[:500]})
+            # A generator callback cannot yield into the outer generator;
+            # retain the final error/result while generation remains synchronous.
+            errors.append(yield_value)
+        result, model, generation_errors = media_agent.generate(kind, prompt, options=options,
+                                                                  wanted_model=str(action.get("model") or ""))
+        errors.extend(generation_errors or [])
+        if result:
+            state["media_context"].append(f"Создано {kind}: {prompt}")
+            state["media"].append(result)
+            yield _ndjson({"type": "media", "media": result, "model": model})
+            if isinstance(result, dict) and result.get("state") == "queued":
+                return f"Медиа поставлено в очередь: {prompt}"
+            return f"Медиа создано: {prompt}"
+        yield _ndjson({"type": "step", "icon": "⚠️", "text": "Не получилось создать медиа"})
+        return "Не получилось создать медиа: " + "; ".join(str(item) for item in errors[-3:])
+
     if kind == "task":
         task = database.create_task(
             title=(action.get("title") or goal or "Задача агента")[:200],
@@ -571,7 +615,7 @@ def _perform(action, kind, use_tools, state, goal=""):
         return ""  # цикл прервётся сам
 
     if not use_tools:
-        return "Инструменты недоступны. Ответь пользователю по имеющимся данным."
+        return "Инструменты недоступны: TERMINAL_ENABLED=0. Ответь пользователю по имеющимся данным."
 
     if kind == "search":
         state["searched"] = True
@@ -579,13 +623,16 @@ def _perform(action, kind, use_tools, state, goal=""):
         if not query:
             return 'Пустой поисковый запрос. Повтори с {"action":"search","query":"..."}.'
         state["research"] += 1
-        tool_result = call_tool("web_search", query=query, limit=3)
-        results = tool_result.get("results") or []
-        trace = tool_result.get("trace") or []
+        # Use the same function as the terminal/UI search. This keeps one
+        # internet-search implementation (Scrapling) and makes source
+        # collection deterministic for agent actions.
+        results, search_meta = nova_search(query, limit=3)
+        results = results or []
+        trace = search_meta.get("trace") or []
         text = "\n".join(
             f"{i}. {item.get('title','')}\n   {item.get('url','')}\n   {item.get('snippet','')}"
             for i, item in enumerate(results, 1)
-        ) or str(tool_result.get("error") or "Поиск ничего не вернул.")
+        ) or "Поиск ничего не вернул."
         backend = next((x.get("backend") for x in trace if x.get("ok")), "registry")
         elapsed = next((x.get("ms") for x in trace if x.get("ok")), 0)
         if not results:

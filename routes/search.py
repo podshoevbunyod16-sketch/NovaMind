@@ -1,8 +1,7 @@
 """
 routes/search.py — Веб-поиск с реальными результатами и живым стримом шагов.
 
-Порядок бэкендов (настраивается через SEARCH_BACKENDS в .env):
-  apilayer → serper → searxng → ddg → ddg_lite → wiki
+ Единственный интернет-поиск — Scrapling + DuckDuckGo HTML.
 
 Ключевые отличия от прошлой версии:
   * нет привязки к Groq: ответы генерирует единый слой ai_providers.chat_*;
@@ -21,6 +20,7 @@ from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import urlparse, quote_plus
 
 import requests
+from scrapling.fetchers import Fetcher
 
 import config
 import local_llm
@@ -38,8 +38,7 @@ _HEADERS = {
     "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
 }
 
-DEFAULT_BACKENDS = ["apilayer", "serper", "bing", "searxng", "mojeek",
-                     "ddg", "ddg_lite", "wiki"]
+DEFAULT_BACKENDS = ["scrapling"]
 
 SEARXNG_INSTANCES = [
     item.strip()
@@ -218,6 +217,31 @@ def search_web_ddg_lite(query, num=8):
     if resp.status_code != 200:
         return [], f"DDG Lite HTTP {resp.status_code}"
     return _parse_ddg(resp.text, num)
+
+
+def search_web_scrapling(query, num=8):
+    """Единый веб-поиск через Scrapling (официальный GitHub-проект).
+
+    Scrapling отвечает за HTTP и HTML-парсинг; остальные поисковые
+    провайдеры остаются только для обратной совместимости тестов/конфигов,
+    но по умолчанию не используются.
+    """
+    url = "https://html.duckduckgo.com/html/?q=" + quote_plus(query) + "&kl=ru-ru"
+    try:
+        page = Fetcher.get(url, headers=_HEADERS, timeout=SEARCH_TIMEOUT)
+        links = page.css("a.result__a")
+        snippets = page.css(".result__snippet")
+        results = []
+        for index, link in enumerate(links[:num]):
+            href = link.attrib.get("href", "")
+            title = link.xpath("string(.)").get(default="").strip()
+            snippet = snippets[index].xpath("string(.)").get(default="").strip() if index < len(snippets) else ""
+            href = _unwrap_ddg_url(href)
+            if href and title:
+                results.append(_norm_result(title, href, snippet))
+        return results, None if results else "Scrapling: пустая выдача"
+    except Exception as exc:
+        return [], f"Scrapling: {exc.__class__.__name__}: {exc}"
 
 
 def _parse_ddg(html, num=8):
@@ -453,6 +477,7 @@ def _parallel_search(query, emit):
 
 
 BACKENDS = {
+    "scrapling": search_web_scrapling,
     "apilayer": search_web_apilayer,
     "serper": search_web_serper,
     "searxng": search_web_searxng,
