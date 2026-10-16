@@ -163,7 +163,10 @@ def safe_path(relative=""):
 
     Любая попытка выйти за пределы песочницы → ValueError.
     """
-    relative = (relative or "").strip().lstrip("/")
+    relative = (relative or "").strip()
+    if os.path.isabs(relative):
+        raise ValueError("Абсолютные пути запрещены")
+    relative = relative.lstrip("/")
     target = os.path.realpath(os.path.join(WORKSPACE, relative))
     if target != WORKSPACE and not target.startswith(WORKSPACE + os.sep):
         raise ValueError("Путь выходит за пределы рабочей папки")
@@ -243,9 +246,11 @@ def _tokenize(command):
     разбивает на «2» и «>». Здесь такие пары склеиваются обратно, чтобы
     `cmd 2>err.log` (без пробела) разбиралось как редирект.
     """
-    lexer = shlex.shlex(command, posix=True)
+    # ``punctuation_chars`` is constructor-only on Python 3.11+; assigning
+    # it after construction raises ``AttributeError`` and breaks every
+    # terminal-backed feature (including ``nova search``).
+    lexer = shlex.shlex(command, posix=True, punctuation_chars="|><&")
     lexer.whitespace_split = True
-    lexer.punctuation_chars = "|><&"
     raw = list(lexer)
     merged, i = [], 0
     while i < len(raw):
@@ -685,6 +690,11 @@ def terminal_run():
     try:
         result = run_command(command, timeout=data.get("timeout"))
     except ValueError as exc:
+        # Traversal errors remain a structured command result so agent/tool
+        # callers can recover; malformed shell constructs keep a 400.
+        if ".." in str(command):
+            return jsonify({**_result(2, "", str(exc)), "command": command,
+                            "cwd": relative_to_workspace(WORKSPACE)})
         return jsonify({"error": str(exc), "command": command}), 400
     except RuntimeError as exc:
         return jsonify({"error": str(exc), "command": command}), 429

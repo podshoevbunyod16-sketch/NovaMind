@@ -87,6 +87,26 @@
         <div class="health-grid" id="healthGrid"><div class="empty-card loading-card">Проверка бэкендов…</div></div>
       </section>
 
+      <section class="health-card mcp-section">
+        <div class="catalog-heading">
+          <div>
+            <div class="eyebrow">MODEL CONTEXT PROTOCOL</div>
+            <h2>Каталог MCP-серверов</h2>
+            <p>Подключайте Streamable HTTP MCP-серверы через API-ключ, Bearer/OAuth, Google OAuth, Basic Auth или без авторизации. Секреты остаются на сервере.</p>
+          </div>
+          <button class="outline-btn" id="refreshMcp" type="button">↻ Обновить каталог</button>
+        </div>
+        <div class="mcp-connect-form">
+          <input id="mcpName" placeholder="Название сервера" maxlength="80">
+          <input id="mcpUrl" type="url" placeholder="https://example.com/mcp" required>
+          <select id="mcpAuth"><option value="none">Без авторизации</option><option value="api_key">API-ключ (X-API-Key)</option><option value="bearer">Bearer token</option><option value="google_oauth">Google OAuth</option><option value="oauth">OAuth 2.0 token</option><option value="basic">Basic Auth</option></select>
+          <input id="mcpSecret" type="password" placeholder="Ключ или токен (не показывается)" autocomplete="off">
+          <button class="refresh-btn" id="connectMcp" type="button">Подключить и проверить</button>
+        </div>
+        <div class="catalog-meta"><span id="mcpStatus">Загружаю каталог…</span><span>Поддерживается MCP Streamable HTTP</span></div>
+        <div class="model-grid" id="mcpGrid"><div class="empty-card loading-card">Загрузка MCP-каталога…</div></div>
+      </section>
+
       <section class="health-card">
         <div class="catalog-heading">
           <div>
@@ -112,5 +132,6 @@
   <div class="toast" id="toast" role="status"></div>
   <script src="/static/i18n.js"></script>
   <script src="/static/settings.js"></script>
+  <script src="/static/mcp-settings.js"></script>
 </body>
 </html>

@@ -75,6 +75,8 @@ def _usable(model: dict) -> bool:
     """Можно ли брать модель без вопроса пользователю."""
     if not model.get("provider_connected") or model.get("in_provider_catalog") is False:
         return False
+    if model.get("provider") == "pollinations" and not mg._pollinations_key():
+        return False
     status = model.get("pricing_status")
     if status == mg.PRICING_FREE or model.get("provider") == "custom":
         return True
@@ -83,7 +85,7 @@ def _usable(model: dict) -> bool:
 
 def _static_fallback(kind: str) -> list:
     """Бесплатные модели Pollinations из реестра — если живой каталог не ответил."""
-    if not mg.provider_connected("pollinations"):
+    if not mg.provider_connected("pollinations") or not mg._pollinations_key():
         return []
     models = []
     for item in mg.MEDIA_MODEL_REGISTRY:
