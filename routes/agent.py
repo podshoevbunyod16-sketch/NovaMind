@@ -624,7 +624,7 @@ def _perform(action, kind, use_tools, state, goal=""):
             return 'Пустой поисковый запрос. Повтори с {"action":"search","query":"..."}.'
         state["research"] += 1
         # Use the same function as the terminal/UI search. This keeps one
-        # internet-search implementation (Scrapling) and makes source
+        # internet-search implementation (httpx + BeautifulSoup4) and makes source
         # collection deterministic for agent actions.
         results, search_meta = nova_search(query, limit=3)
         results = results or []

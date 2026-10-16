@@ -233,7 +233,7 @@ async function loadSearchHealth(force = false) {
   const status = $('healthStatus');
   if (!grid) return;
   status.textContent = 'Проверяю поисковые бэкенды…';
-  grid.innerHTML = '<div class="empty-card loading-card">Проверяю единый поиск Scrapling…</div>';
+  grid.innerHTML = '<div class="empty-card loading-card">Проверяю единый HTTP-поиск…</div>';
   try {
     const response = await fetch('/api/search/health' + (force ? '?refresh=1' : ''));
     const data = await response.json();
@@ -241,7 +241,7 @@ async function loadSearchHealth(force = false) {
     const alive = (data.alive || []).length;
     status.textContent = data.ok
       ? `Поиск работает: доступно ${alive} из ${data.backends.length} бэкендов`
-      : 'Scrapling не ответил. Проверьте интернет и доступность DuckDuckGo.';
+      : 'HTTP-поиск не ответил. Проверьте интернет и доступность поисковой системы.';
     grid.innerHTML = (data.backends || []).map((item) => `
       <div class="health-item">
         <div>
