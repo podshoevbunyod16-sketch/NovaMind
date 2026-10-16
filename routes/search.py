@@ -1,7 +1,7 @@
 """
 routes/search.py — Веб-поиск с реальными результатами и живым стримом шагов.
 
- Единственный интернет-поиск — Scrapling + DuckDuckGo HTML.
+ Единственный интернет-поиск — httpx + BeautifulSoup4 + DuckDuckGo HTML.
 
 Ключевые отличия от прошлой версии:
   * нет привязки к Groq: ответы генерирует единый слой ai_providers.chat_*;
@@ -19,8 +19,9 @@ import concurrent.futures
 from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import urlparse, quote_plus
 
+import httpx
 import requests
-from scrapling.fetchers import Fetcher
+from bs4 import BeautifulSoup
 
 import config
 import local_llm
@@ -38,7 +39,7 @@ _HEADERS = {
     "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
 }
 
-DEFAULT_BACKENDS = ["scrapling"]
+DEFAULT_BACKENDS = ["searxng", "ddg", "wiki"]
 
 SEARXNG_INSTANCES = [
     item.strip()
@@ -219,29 +220,29 @@ def search_web_ddg_lite(query, num=8):
     return _parse_ddg(resp.text, num)
 
 
-def search_web_scrapling(query, num=8):
-    """Единый веб-поиск через Scrapling (официальный GitHub-проект).
-
-    Scrapling отвечает за HTTP и HTML-парсинг; остальные поисковые
-    провайдеры остаются только для обратной совместимости тестов/конфигов,
-    но по умолчанию не используются.
-    """
+def search_web_httpx_ddg(query, num=8):
+    """Лёгкий HTML-поиск через httpx и BeautifulSoup4."""
     url = "https://html.duckduckgo.com/html/?q=" + quote_plus(query) + "&kl=ru-ru"
     try:
-        page = Fetcher.get(url, headers=_HEADERS, timeout=SEARCH_TIMEOUT)
-        links = page.css("a.result__a")
-        snippets = page.css(".result__snippet")
+        response = httpx.get(url, headers=_HEADERS, timeout=SEARCH_TIMEOUT,
+                             follow_redirects=True)
+        response.raise_for_status()
+        soup = BeautifulSoup(response.text, "html.parser")
         results = []
-        for index, link in enumerate(links[:num]):
-            href = link.attrib.get("href", "")
-            title = link.xpath("string(.)").get(default="").strip()
-            snippet = snippets[index].xpath("string(.)").get(default="").strip() if index < len(snippets) else ""
+        for result in soup.select(".result")[:num]:
+            link = result.select_one("a.result__a")
+            if not link:
+                continue
+            href = link.get("href", "")
+            title = link.get_text(" ", strip=True)
+            snippet_node = result.select_one(".result__snippet")
+            snippet = snippet_node.get_text(" ", strip=True) if snippet_node else ""
             href = _unwrap_ddg_url(href)
             if href and title:
                 results.append(_norm_result(title, href, snippet))
-        return results, None if results else "Scrapling: пустая выдача"
-    except Exception as exc:
-        return [], f"Scrapling: {exc.__class__.__name__}: {exc}"
+        return results, None if results else "httpx/ДДГ: пустая выдача"
+    except httpx.HTTPError as exc:
+        return [], f"httpx/ДДГ: {exc.__class__.__name__}"
 
 
 def _parse_ddg(html, num=8):
@@ -341,34 +342,24 @@ def search_web_wiki(query, num=6):
     return results, None
 
 
-def _get_html_with_fallback(url):
-    """HTML страницы: сначала напрямую, при блокировке — через Jina Reader."""
+def _get_html(url):
+    """Получает HTML напрямую через httpx без внешнего reader-прокси."""
     try:
-        resp = requests.get(url, headers=_HEADERS, timeout=SEARCH_TIMEOUT,
-                            allow_redirects=True)
-        if resp.status_code == 200 and len(resp.text or "") > 500:
-            return resp.text
-    except requests.RequestException:
-        pass
-    try:
-        resp = requests.get("https://r.jina.ai/" + url,
-                            headers={"User-Agent": "Mozilla/5.0",
-                                     "Accept": "text/plain,*/*"},
-                            timeout=READER_TIMEOUT)
-        if resp.status_code == 200 and len(resp.text or "") > 400:
-            return resp.text
-    except requests.RequestException:
-        pass
-    return None
+        response = httpx.get(url, headers=_HEADERS, timeout=SEARCH_TIMEOUT,
+                             follow_redirects=True)
+        response.raise_for_status()
+        return response.text if len(response.text or "") > 100 else None
+    except httpx.HTTPError:
+        return None
 
 
 def search_web_bing(query, num=8):
-    """Bing HTML: работает без ключа; при блокировке — через Jina Reader.
+    """Bing HTML: работает без ключа.
 
     Бесплатный запасной бэкенд: у DDG и публичных SearXNG бывают блокировки
     и пустые выдачи, а Bing стабильно отдаёт органику по русским запросам.
     """
-    html = _get_html_with_fallback(
+    html = _get_html(
         "https://www.bing.com/search?q=" + quote_plus(query) + "&setlang=ru")
     if not html:
         return [], "Bing недоступен"
@@ -395,7 +386,7 @@ def search_web_bing(query, num=8):
 
 def search_web_mojeek(query, num=8):
     """Mojeek: независимый индексатор, без ключа, лоялен к роботам."""
-    html = _get_html_with_fallback(
+    html = _get_html(
         "https://www.mojeek.com/search?q=" + quote_plus(query))
     if not html:
         return [], "Mojeek недоступен"
@@ -477,7 +468,7 @@ def _parallel_search(query, emit):
 
 
 BACKENDS = {
-    "scrapling": search_web_scrapling,
+    "httpx_ddg": search_web_httpx_ddg,
     "apilayer": search_web_apilayer,
     "serper": search_web_serper,
     "searxng": search_web_searxng,
@@ -528,49 +519,34 @@ def search_web(query, num=8, backends=None, on_progress=None):
 # ══════════════════════════════════════════════════════════════════
 
 def _html_to_text(html):
-    html = re.sub(r"<(script|style|svg|noscript|head)[^>]*>.*?</\1>", " ", html,
-                  flags=re.DOTALL | re.IGNORECASE)
-    html = re.sub(r"<br\s*/?>", "\n", html, flags=re.IGNORECASE)
-    html = re.sub(r"</(p|div|li|h[1-6]|tr)>", "\n", html, flags=re.IGNORECASE)
-    text = re.sub(r"<[^>]+>", " ", html)
-    text = (text.replace("&nbsp;", " ").replace("&amp;", "&")
-                .replace("&lt;", "<").replace("&gt;", ">")
-                .replace("&quot;", '"').replace("&#39;", "'"))
+    soup = BeautifulSoup(html or "", "html.parser")
+    for node in soup(["script", "style", "svg", "noscript", "head", "nav", "footer"]):
+        node.decompose()
+    for node in soup.find_all(["br", "p", "div", "li", "h1", "h2", "h3", "h4", "h5", "h6", "tr"]):
+        node.append("\n")
+    text = soup.get_text(" ", strip=False)
     text = re.sub(r"[ \t]+", " ", text)
-    text = re.sub(r"\n{3,}", "\n\n", text)
+    text = re.sub(r"\n\s*\n+", "\n\n", text)
     return text.strip()
 
 
 def fetch_page_text(url, max_chars=6000):
-    """Читает страницу: сначала Jina Reader (обходит защиту), потом напрямую."""
+    """Читает HTML-страницу напрямую через httpx и очищает её BeautifulSoup4."""
     if not url or not url.lower().startswith(("http://", "https://")):
         return None, "некорректный URL"
 
     try:
-        resp = requests.get(
-            f"https://r.jina.ai/{url}",
-            headers={"User-Agent": "Mozilla/5.0", "Accept": "text/plain,*/*"},
-            timeout=READER_TIMEOUT,
-        )
-        if resp.status_code == 200 and len(resp.text) > 200:
-            text = re.sub(r"!\[.*?\]\(.*?\)", "", resp.text)
-            text = re.sub(r"\n{3,}", "\n\n", text).strip()
-            if text:
-                return text[:max_chars], None
-    except requests.RequestException:
-        pass
-
-    try:
-        resp = requests.get(url, headers=_HEADERS, timeout=READER_TIMEOUT, allow_redirects=True)
+        resp = httpx.get(url, headers=_HEADERS, timeout=READER_TIMEOUT,
+                         follow_redirects=True)
         resp.raise_for_status()
-        content_type = resp.headers.get("Content-Type", "")
+        content_type = resp.headers.get("content-type", "")
         if "html" not in content_type and "text" not in content_type:
             return None, "не текстовая страница"
         text = _html_to_text(resp.text)
         if not text:
             return None, "пустая страница"
         return text[:max_chars], None
-    except requests.RequestException as exc:
+    except httpx.HTTPError as exc:
         return None, f"{exc.__class__.__name__}"
 
 

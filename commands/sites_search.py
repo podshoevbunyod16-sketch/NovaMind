@@ -19,6 +19,8 @@ import re
 from urllib.parse import quote_plus
 
 import requests
+import httpx
+from bs4 import BeautifulSoup
 
 TIMEOUT = float(os.getenv("SITES_SEARCH_TIMEOUT", "12"))
 
@@ -68,35 +70,27 @@ def _looks_like_shopping(query):
 
 
 def _fetch(url):
-    """Прямой запрос; при отказе — Jina Reader, который обходит защиту сайтов."""
+    """Прямой запрос HTML через httpx."""
     try:
-        resp = requests.get(url, headers=_HEADERS, timeout=TIMEOUT, allow_redirects=True)
-        if resp.status_code == 200 and len(resp.text or "") > 500:
-            return resp.text
-    except requests.RequestException:
-        pass
-    try:
-        resp = requests.get("https://r.jina.ai/" + url,
-                            headers={"User-Agent": "Mozilla/5.0", "Accept": "text/plain,*/*"},
-                            timeout=TIMEOUT)
-        if resp.status_code == 200 and len(resp.text or "") > 300:
-            return resp.text
-    except requests.RequestException:
-        pass
-    return None
+        resp = httpx.get(url, headers=_HEADERS, timeout=TIMEOUT, follow_redirects=True)
+        resp.raise_for_status()
+        return resp.text if len(resp.text or "") > 300 else None
+    except httpx.HTTPError:
+        return None
 
 
 def _parse_ads(html, num=8):
     """Достаёт объявления: ссылки вида /adv/<id>_<slug>, заголовок и цену рядом."""
     results, seen = [], set()
-    for match in _AD_RE.finditer(html):
-        path, raw_title = match.group(1), match.group(2)
-        title = _clean(raw_title)
+    soup = BeautifulSoup(html or "", "html.parser")
+    for link in soup.select('a[href^="/adv/"]'):
+        path = link.get("href", "").split("#", 1)[0].split("?", 1)[0]
+        title = _clean(link.get_text(" ", strip=True))
         if not title or len(title) < 8 or path in seen:
             continue
         seen.add(path)
-        window = html[match.end():match.end() + 700]
-        price_match = _PRICE_RE.search(window)
+        parent_text = link.parent.get_text(" ", strip=True) if link.parent else ""
+        price_match = _PRICE_RE.search(parent_text)
         price = _clean(price_match.group(0)) if price_match else ""
         line = (title + " — " + price) if price else title
         results.append({
