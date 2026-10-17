@@ -74,6 +74,14 @@ def is_enabled():
     return os.getenv("AGENT_ENABLED", os.getenv("TERMINAL_ENABLED", "0")) == "1"
 
 
+def strict_mcp_request(text: str) -> bool:
+    """Определяет запросы, где пользователь явно запретил обычный web-search."""
+    value = str(text or "").lower()
+    explicit = re.search(r"не\s+используй\s+(?:web[_ -]?search|поиск)|только\s+(?:mcp|github|composio|switchboard|youtube)", value)
+    named_service = any(name in value for name in ("github mcp", "composio", "switchboard", "mcp-инструмент", "mcp инструмент"))
+    return bool(explicit or named_service)
+
+
 def tools_enabled():
     """Инструменты терминала и файлов — любому вошедшему при включённом окружении.
 
@@ -299,6 +307,7 @@ def agent_stream():
 
     provider, model, _ = resolve_target()
     use_tools = tools_enabled()
+    strict_mcp = strict_mcp_request(goal)
     try:
         import mcp_registry
         mcp_available = bool(mcp_registry.connected_tools())
@@ -316,6 +325,9 @@ def agent_stream():
         bootstrap_default_tools()
         ensure_workspace()
     available_schemas = tool_schemas() if (use_tools or mcp_available) else []
+    if strict_mcp:
+        # В этом запросе модель физически не получает web/shell/file schemas.
+        available_schemas = [item for item in available_schemas if item.get("name") == "mcp_call"]
 
     @stream_with_context
     def generate():
@@ -327,6 +339,13 @@ def agent_stream():
         # 1. Один первый запрос: простой вопрос получает обычный ответ без лишнего plan/stage.
         # Если модель вернула action=plan, показываем его как план и продолжаем цикл.
         system_content = AGENT_SYSTEM_PROMPT
+        if strict_mcp:
+            system_content += (
+                "\n\nSTRICT MCP MODE: Пользователь запретил web_search. "
+                "Не вызывай search, open, run, shell или другие локальные инструменты. "
+                "Используй только action=mcp_call с доступным server_id/tool. "
+                "Если mcp_call недоступен, ответь action=answer с MCP_UNAVAILABLE и причиной."
+            )
         if available_schemas:
             system_content += "\n\nAVAILABLE TOOL REGISTRY:\n" + json.dumps(available_schemas, ensure_ascii=False)
         history = [{"role": "system", "content": system_content}]
@@ -335,7 +354,7 @@ def agent_stream():
                 history.append({"role": item["role"], "content": str(item.get("content") or "")[:4000]})
         history.append({"role": "user", "content": goal})
 
-        if data.get("search") and use_tools:
+        if data.get("search") and use_tools and not strict_mcp:
             yield _ndjson({"type": "stage", "scene": "search", "title": "Поиск в интернете",
                            "text": "Ищу свежие данные и проверяю страницы…"})
             pre = call_tool("web_search", query=goal, limit=3)
@@ -385,9 +404,14 @@ def agent_stream():
                 break
             ask_kwargs = {"provider": provider, "model": model,
                           "temperature": 0.1, "max_tokens": 1200, "timeout": 60}
-            if not use_tools:
+            if strict_mcp:
+                ask_kwargs["system"] = (
+                    "STRICT MCP MODE. Не используй web_search, web_open, shell, run, read или write. "
+                    "Выполни только mcp_call; если он недоступен, верни action=answer с MCP_UNAVAILABLE."
+                )
+            elif not use_tools:
                 ask_kwargs["system"] = "Linux-окружение сейчас выключено (TERMINAL_ENABLED=0). Не вызывай инструменты workspace; медиа-действия доступны."
-            if data.get("search"):
+            if data.get("search") and not strict_mcp:
                 ask_kwargs["system"] = "ПОИСК ВКЛЮЧЁН. Используй найденные данные и указывай источники [1], [2], [3]."
             raw, error = _ask(history, **ask_kwargs)
             if error:
@@ -457,7 +481,15 @@ def agent_stream():
                                "используй имеющиеся данные и дай action=answer.")
             else:
                 seen.add(key)
-                observation = yield from _perform(action, kind, use_tools, state, goal=goal)
+                if strict_mcp and kind not in ("mcp_call", "answer", "plan"):
+                    observation = (
+                        "MCP_ONLY: действие запрещено. Пользователь разрешил только mcp_call. "
+                        "Используй доступный server_id и tool из AVAILABLE TOOL REGISTRY."
+                    )
+                    yield _ndjson({"type": "tool", "name": kind, "command": "blocked", "code": 1,
+                                   "output": observation})
+                else:
+                    observation = yield from _perform(action, kind, use_tools, state, goal=goal)
 
             if kind == "answer":
                 state["answer"] = str(action.get("text") or "").strip()
