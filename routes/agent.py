@@ -50,6 +50,7 @@ AGENT_SYSTEM_PROMPT = """Ты — агент NovaMind внутри «мален�
   {"action":"ls"}                                          список файлов
   {"action":"search","query":"что найти"}                   ПОИСК В ИНТЕРНЕТЕ
   {"action":"open","url":"https://…"}                       прочитать страницу
+  {"action":"mcp_call","server_id":"github","tool":"...","arguments":{...}}  вызвать MCP-инструмент
   {"action":"task","title":"…","detail":"…"}                завести задачу с подпунктами в detail
   {"action":"task_done","note":"что сделано"}               задача выполнена
   {"action":"answer","text":"ответ пользователю"}            закончить и ответить
@@ -62,7 +63,9 @@ AGENT_SYSTEM_PROMPT = """Ты — агент NovaMind внутри «мален�
 5. Нужны свежие данные или факты — сделай search (обычно хватает 1–3 поисков), потом опирайся на найденное.
 6. НЕ повторяй одно и то же действие: результат уже перед тобой. Как только данных хватает —
    сразу action=answer. Шагов у тебя мало, лишние поиски и чтение страниц тратят их впустую.
-7. В answer дай ПРЯМОЙ ответ на вопрос пользователя по-русски: сначала суть (названия, цифры, годы),
+7. MCP-инструменты можно вызывать только из AVAILABLE TOOL REGISTRY. Для Notion/GitHub/email
+   сначала используй mcp_call с точным server_id и tool, затем проверь результат.
+8. В answer дай ПРЯМОЙ ответ на вопрос пользователя по-русски: сначала суть (названия, цифры, годы),
    потом 1–3 предложения пояснения. Не пересказывай свои шаги и не вставляй JSON.
    Ссылки на источники писать не нужно — интерфейс покажет их сам."""
 
@@ -288,6 +291,11 @@ def agent_stream():
 
     provider, model, _ = resolve_target()
     use_tools = tools_enabled()
+    try:
+        import mcp_registry
+        mcp_available = bool(mcp_registry.connected_tools())
+    except Exception:
+        mcp_available = False
     history_key = (
         str(session.get("user_email") or session.get("email") or session.get("username") or "")
         or request.cookies.get("session")
@@ -299,6 +307,7 @@ def agent_stream():
     if use_tools:
         bootstrap_default_tools()
         ensure_workspace()
+    available_schemas = tool_schemas() if (use_tools or mcp_available) else []
 
     @stream_with_context
     def generate():
@@ -309,7 +318,10 @@ def agent_stream():
 
         # 1. Один первый запрос: простой вопрос получает обычный ответ без лишнего plan/stage.
         # Если модель вернула action=plan, показываем его как план и продолжаем цикл.
-        history = [{"role": "system", "content": AGENT_SYSTEM_PROMPT + "\n\nAVAILABLE TOOL REGISTRY:\n" + json.dumps(tool_schemas(), ensure_ascii=False) if use_tools else AGENT_SYSTEM_PROMPT}]
+        system_content = AGENT_SYSTEM_PROMPT
+        if available_schemas:
+            system_content += "\n\nAVAILABLE TOOL REGISTRY:\n" + json.dumps(available_schemas, ensure_ascii=False)
+        history = [{"role": "system", "content": system_content}]
         for item in prior[-8:]:
             if isinstance(item, dict) and item.get("role") in ("user", "assistant"):
                 history.append({"role": item["role"], "content": str(item.get("content") or "")[:4000]})
@@ -523,6 +535,8 @@ def _action_key(action, kind):
     """Ключ действия для поиска повторов."""
     value = (action.get("command") or action.get("query") or action.get("url")
              or action.get("path") or "")
+    if kind == "mcp_call":
+        value = f"{action.get('server_id', '')}:{action.get('tool', '')}:{json.dumps(action.get('arguments') or {}, sort_keys=True, ensure_ascii=False)}"
     if kind == "write":
         value = f"{value}|{str(action.get('content') or '')[:200]}"
     return (kind, " ".join(str(value).lower().split()))
@@ -530,7 +544,7 @@ def _action_key(action, kind):
 
 def _verify_action(kind, observation):
     text = str(observation or "").strip()
-    if kind in ("search", "open", "read", "run", "write", "ls") and not text:
+    if kind in ("search", "open", "read", "run", "write", "ls", "mcp_call") and not text:
         return {"ok": False, "message": "Проверка не пройдена: инструмент вернул пустой результат."}
     if kind == "run" and "код -1" in text:
         return {"ok": False, "message": "Проверка не пройдена: команда не выполнилась."}
@@ -558,6 +572,29 @@ def _perform(action, kind, use_tools, state, goal=""):
     возвращает наблюдение, которое уходит обратно в модель.
     """
     import database
+
+    if kind == "mcp_call":
+        import mcp_registry
+        server_id = str(action.get("server_id") or "").strip()
+        tool_name = str(action.get("tool") or "").strip()
+        arguments = action.get("arguments") or {}
+        if not server_id or not tool_name or not isinstance(arguments, dict):
+            return "MCP: нужны server_id, tool и объект arguments."
+        try:
+            result = mcp_registry.call_tool(server_id, tool_name, arguments)
+            text = json.dumps(result, ensure_ascii=False, indent=2)
+            state["notes"].append(f"MCP {server_id}:{tool_name}\n{text[:MAX_NOTE]}")
+            state["research"] += 1
+            yield _ndjson({"type": "tool", "name": "mcp_call",
+                           "command": f"{server_id}:{tool_name}", "code": 0,
+                           "output": clip(text, 1500)})
+            return text
+        except Exception as exc:
+            message = f"MCP {server_id}:{tool_name} не выполнен: {exc}"
+            yield _ndjson({"type": "tool", "name": "mcp_call",
+                           "command": f"{server_id}:{tool_name}", "code": 1,
+                           "output": message})
+            return message
 
     if kind == "media_models":
         import media_agent

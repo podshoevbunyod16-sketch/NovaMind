@@ -46,8 +46,31 @@ def list_tools() -> list[ToolSpec]:
     return list(_REGISTRY.values())
 
 def tool_schemas() -> list[dict]:
-    return [{"name": t.name, "description": t.description, "schema": dict(t.schema),
-             "permissions": list(t.permissions), "timeout": t.timeout} for t in list_tools()]
+    schemas = [{"name": t.name, "description": t.description, "schema": dict(t.schema),
+                "permissions": list(t.permissions), "timeout": t.timeout} for t in list_tools()]
+    try:
+        import mcp_registry
+        connected = mcp_registry.connected_tools()
+        if connected:
+            available = ", ".join(f"{x['server_id']}:{x['name']}" for x in connected)
+            schemas.append({
+                "name": "mcp_call",
+                "description": "Вызвать инструмент подключённого MCP-сервера. Доступные инструменты: " + available,
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "server_id": {"type": "string"},
+                        "tool": {"type": "string"},
+                        "arguments": {"type": "object"},
+                    },
+                    "required": ["server_id", "tool"],
+                },
+                "permissions": ["network", "external_service"],
+                "timeout": 30,
+            })
+    except Exception:
+        pass
+    return schemas
 
 def call_tool(name: str, **kwargs) -> dict:
     spec = get_tool(name)

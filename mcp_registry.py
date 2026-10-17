@@ -86,6 +86,8 @@ def remove_connection(server_id: str) -> None:
 
 def _headers(item: dict[str, Any]) -> dict[str, str]:
     headers = {"Accept": "application/json, text/event-stream", "Content-Type": "application/json"}
+    if item.get("session_id"):
+        headers["MCP-Session-Id"] = item["session_id"]
     auth = item.get("auth")
     if auth == "api_key" and item.get("api_key"):
         headers["X-API-Key"] = item["api_key"]
@@ -107,8 +109,14 @@ def request(server_id: str, method: str, params: dict[str, Any] | None = None) -
         pass
     payload = {"jsonrpc": "2.0", "id": int(time.time() * 1000) % 1000000000, "method": method, "params": params or {}}
     response = requests.post(item["url"], headers=_headers(item), json=payload, timeout=TIMEOUT)
+    session_id = response.headers.get("mcp-session-id")
+    if session_id:
+        data[server_id]["session_id"] = session_id
+        _write(data)
     response.raise_for_status()
     content_type = response.headers.get("content-type", "")
+    if response.status_code in {202, 204} or not response.text.strip():
+        return {}
     if "text/event-stream" in content_type:
         # Streamable HTTP servers commonly send one JSON event per data line.
         for line in response.text.splitlines():
@@ -121,17 +129,63 @@ def request(server_id: str, method: str, params: dict[str, Any] | None = None) -
     return response.json()
 
 
+def _result_body(response: dict[str, Any]) -> dict[str, Any]:
+    """Возвращает result MCP, сохраняя совместимость с JSON-RPC-ответом."""
+    return response.get("result", response) if isinstance(response, dict) else {}
+
+
+def list_tools(server_id: str) -> list[dict[str, Any]]:
+    """Получает инструменты подключённого MCP-сервера."""
+    body = _result_body(request(server_id, "tools/list"))
+    tools = body.get("tools", []) if isinstance(body, dict) else []
+    return [tool for tool in tools if isinstance(tool, dict) and tool.get("name")]
+
+
+def connected_tools() -> list[dict[str, Any]]:
+    """Собирает инструменты всех подключённых MCP-серверов."""
+    result = []
+    for server_id, item in _read().items():
+        if not item.get("connected"):
+            continue
+        try:
+            for tool in list_tools(server_id):
+                result.append({
+                    "server_id": server_id,
+                    "server_name": item.get("name", server_id),
+                    "name": tool["name"],
+                    "description": tool.get("description", ""),
+                    "inputSchema": tool.get("inputSchema") or {"type": "object"},
+                })
+        except Exception as exc:
+            item["last_error"] = f"{exc.__class__.__name__}: {exc}"
+    return result
+
+
+def call_tool(server_id: str, tool_name: str, arguments: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Вызывает MCP tools/call и возвращает структурированный результат."""
+    response = request(server_id, "tools/call", {
+        "name": tool_name,
+        "arguments": arguments or {},
+    })
+    body = _result_body(response)
+    if isinstance(body, dict) and body.get("isError"):
+        raise RuntimeError(str(body.get("content") or "MCP tool returned an error"))
+    return body if isinstance(body, dict) else {"content": body}
+
+
 def test_connection(server_id: str) -> dict[str, Any]:
     data = _read()
     item = data.get(server_id)
     if not item:
         raise ValueError("MCP-сервер не найден")
     try:
-        result = request(server_id, "initialize", {"protocolVersion": "2024-11-05", "capabilities": {}, "clientInfo": {"name": "NovaMind", "version": "1.0"}})
+        result = request(server_id, "initialize", {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "NovaMind", "version": "1.0"}})
         data[server_id]["connected"] = "error" not in result
         data[server_id]["last_error"] = None if data[server_id]["connected"] else str(result.get("error"))
         data[server_id]["updated_at"] = int(time.time())
         _write(data)
+        # MCP requires this notification after a successful initialize.
+        request(server_id, "notifications/initialized", {})
         return {"connected": data[server_id]["connected"], "server": result.get("result", result)}
     except Exception as exc:
         data[server_id]["connected"] = False
