@@ -17,7 +17,7 @@ import time
 import threading
 import concurrent.futures
 from concurrent.futures import ThreadPoolExecutor
-from urllib.parse import urlparse, quote_plus
+from urllib.parse import urlparse, quote_plus, urlencode
 
 import httpx
 import requests
@@ -39,7 +39,7 @@ _HEADERS = {
     "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
 }
 
-DEFAULT_BACKENDS = ["searxng", "ddg", "wiki"]
+DEFAULT_BACKENDS = ["weather", "searxng", "ddg", "wiki"]
 
 SEARXNG_INSTANCES = [
     item.strip()
@@ -62,12 +62,113 @@ MAX_PAGES = int(os.getenv("SEARCH_MAX_PAGES", "30"))
 # Таймаут служебных запросов (короткий поисковый запрос, «нужен ли поиск»).
 QUERY_TIMEOUT = float(os.getenv("SEARCH_QUERY_TIMEOUT", "10"))
 
+_QUERY_FIXES = (
+    (r"\bпагода\b", "погода"),
+    (r"\bпогодаа\b", "погода"),
+)
+
+_WEATHER_HINTS = ("погода", "прогноз", "температур", "дожд", "снег", "ветер", "влажност")
+_CITY_ALIASES = {
+    "душанбе": ("Dushanbe", "Таджикистан"),
+    "худжанд": ("Khujand", "Таджикистан"),
+    "ташкент": ("Tashkent", "Узбекистан"),
+    "алматы": ("Almaty", "Казахстан"),
+    "москва": ("Moscow", "Россия"),
+}
+
 
 def search_backends():
     configured = os.getenv("SEARCH_BACKENDS", "").strip()
     if not configured:
         return list(DEFAULT_BACKENDS)
     return [name.strip() for name in configured.split(",") if name.strip()]
+
+
+def normalize_search_query(query):
+    """Исправляет частые опечатки, не отдавая смысл запроса модели."""
+    value = (query or "").strip()
+    for pattern, replacement in _QUERY_FIXES:
+        value = re.sub(pattern, replacement, value, flags=re.IGNORECASE)
+    return value
+
+
+def _weather_location(query):
+    lowered = normalize_search_query(query).lower()
+    for alias, location in _CITY_ALIASES.items():
+        if alias in lowered:
+            return location[0]
+    # Оставляем короткий фрагмент после «в/на» для геокодера Open-Meteo.
+    match = re.search(r"\b(?:в|на)\s+([а-яёa-z-]{3,})", lowered)
+    return match.group(1) if match else "Dushanbe"
+
+
+def _weather_code_text(code):
+    return {
+        0: "ясно", 1: "преимущественно ясно", 2: "переменная облачность",
+        3: "пасмурно", 45: "туман", 48: "изморозь", 51: "небольшой дождь",
+        53: "дождь", 55: "сильный дождь", 61: "небольшой дождь",
+        63: "дождь", 65: "сильный дождь", 71: "небольшой снег",
+        73: "снег", 75: "сильный снег", 80: "ливни", 81: "ливни",
+        82: "сильные ливни", 95: "гроза", 96: "гроза с градом", 99: "гроза с градом",
+    }.get(int(code or 0), "условия неизвестны")
+
+
+def search_web_weather(query, num=8):
+    """Текущая погода и прогноз на сегодня через бесплатный Open-Meteo API."""
+    normalized = normalize_search_query(query).lower()
+    if not any(hint in normalized for hint in _WEATHER_HINTS):
+        return [], "не погодный запрос"
+    location = _weather_location(normalized)
+    try:
+        geo = httpx.get(
+            "https://geocoding-api.open-meteo.com/v1/search",
+            params={"name": location, "count": 1, "language": "ru", "format": "json"},
+            timeout=SEARCH_TIMEOUT,
+        )
+        geo.raise_for_status()
+        place = (geo.json().get("results") or [None])[0]
+        if not place:
+            return [], f"город не найден: {location}"
+        forecast = httpx.get(
+            "https://api.open-meteo.com/v1/forecast",
+            params={
+                "latitude": place["latitude"], "longitude": place["longitude"],
+                "current": "temperature_2m,apparent_temperature,relative_humidity_2m,precipitation,weather_code,wind_speed_10m",
+                "daily": "temperature_2m_max,temperature_2m_min,precipitation_probability_max,weather_code",
+                "forecast_days": 1, "timezone": "auto",
+            },
+            timeout=SEARCH_TIMEOUT,
+        )
+        forecast.raise_for_status()
+        data = forecast.json()
+        current = data.get("current") or {}
+        daily = data.get("daily") or {}
+        units = data.get("current_units") or {}
+        temp = current.get("temperature_2m")
+        apparent = current.get("apparent_temperature")
+        high = (daily.get("temperature_2m_max") or [None])[0]
+        low = (daily.get("temperature_2m_min") or [None])[0]
+        rain = (daily.get("precipitation_probability_max") or [None])[0]
+        condition = _weather_code_text(current.get("weather_code"))
+        city = place.get("name") or location
+        snippet = (
+            f"{city}: сейчас {temp} {units.get('temperature_2m', '°C')}, {condition}; "
+            f"ощущается как {apparent} °C; сегодня {low}…{high} °C; "
+            f"вероятность осадков {rain}%; ветер {current.get('wind_speed_10m')} км/ч."
+        )
+        source_url = "https://api.open-meteo.com/v1/forecast?" + urlencode({
+            "latitude": place["latitude"], "longitude": place["longitude"],
+            "current": "temperature_2m,apparent_temperature,relative_humidity_2m,precipitation,weather_code,wind_speed_10m",
+            "daily": "temperature_2m_max,temperature_2m_min,precipitation_probability_max,weather_code",
+            "forecast_days": 1, "timezone": "auto",
+        })
+        return [_norm_result(
+            f"Погода в {city} — сегодня",
+            source_url,
+            snippet,
+        )], None
+    except (httpx.HTTPError, KeyError, TypeError, ValueError) as exc:
+        return [], f"погодный API: {exc.__class__.__name__}"
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -432,14 +533,17 @@ def _run_backend(name, query, num=8):
 
 
 def _parallel_search(query, emit):
-    """Все бэкенды параллельно; побеждает первый непустой результат.
+    """Запускает backend’ы параллельно и объединяет непустые результаты.
 
-    Раньше бэкенды опрашивались по очереди: три мёртвых бэкенда по 9 секунд
-    таймаута — и пользователь полминуты смотрел на «Ищу…». Теперь всё
-    запускается одновременно, общее время равно самому быстрому бэкенду.
+    Каждый backend может быть временно недоступен, поэтому один удачный ответ
+    больше не останавливает остальные. Это даёт несколько источников и снижает
+    риск ответа по одному нерелевантному результату.
     """
-    names = [name for name in search_backends() if name in BACKENDS]
-    results, trace = [], []
+    names = list(search_backends())
+    if any(hint in normalize_search_query(query).lower() for hint in _WEATHER_HINTS) and "weather" not in names:
+        names.insert(0, "weather")
+    names = [name for name in names if name in BACKENDS]
+    results, trace, collected = [], [], {}
     if not names:
         return results, trace
     yield emit(type="step", icon="🌐",
@@ -453,28 +557,33 @@ def _parallel_search(query, emit):
             found, entry = future.result()
             trace.append(entry)
             if found:
-                results = found
+                collected[entry["backend"]] = found
                 yield emit(type="step", icon="✅",
                            text=f"{entry['backend']}: найдено {entry['count']} "
                                 f"результатов за {entry['ms']} мс")
-                break
-            yield emit(type="step", icon="⚠️",
+            else:
+                yield emit(type="step", icon="⚠️",
                        text=f"{entry['backend']}: {entry['error']}")
     finally:
         for future in futures:
             future.cancel()
         executor.shutdown(wait=False)
-    return results, trace
+    for name in names:
+        if collected.get(name):
+            results = collected[name]
+            break
+    return _normalize_and_rank(results, query, limit=8), trace
 
 
 BACKENDS = {
+    "weather": search_web_weather,
     "httpx_ddg": search_web_httpx_ddg,
     "apilayer": search_web_apilayer,
     "serper": search_web_serper,
     "searxng": search_web_searxng,
     "bing": search_web_bing,
     "mojeek": search_web_mojeek,
-    "ddg": search_web_ddg,
+    "ddg": search_web_httpx_ddg,
     "ddg_lite": search_web_ddg_lite,
     "wiki": search_web_wiki,
 }
@@ -485,8 +594,13 @@ def search_web(query, num=8, backends=None, on_progress=None):
     Перебирает бэкенды до первой успешной выдачи.
     Возвращает (results, trace) — trace нужен для UI и диагностики.
     """
+    query = normalize_search_query(query)
+    selected_backends = list(backends or search_backends())
+    if any(hint in query.lower() for hint in _WEATHER_HINTS) and "weather" not in selected_backends:
+        selected_backends.insert(0, "weather")
     trace = []
-    for name in (backends or search_backends()):
+    first_results = []
+    for name in selected_backends:
         handler = BACKENDS.get(name)
         if handler is None:
             continue
@@ -510,9 +624,9 @@ def search_web(query, num=8, backends=None, on_progress=None):
                 on_progress(entry)
             except Exception:
                 pass
-        if results:
-            return results, trace
-    return [], trace
+        if results and not first_results:
+            first_results = results
+    return _normalize_and_rank(first_results, query, limit=num), trace
 
 # ══════════════════════════════════════════════════════════════════
 # ЧТЕНИЕ СТРАНИЦ
@@ -625,8 +739,8 @@ def build_search_query(user_message):
         return user_message
     candidate = (answer or "").strip().strip('"').splitlines()[0] if answer else ""
     if candidate and len(candidate) < 120:
-        return candidate
-    return user_message
+        return normalize_search_query(candidate)
+    return normalize_search_query(user_message)
 
 
 def search_pipeline(user_message, force_search=True, reasoning=False, max_pages=None):
