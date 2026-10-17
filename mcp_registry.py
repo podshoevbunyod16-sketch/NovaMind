@@ -86,7 +86,10 @@ def remove_connection(server_id: str) -> None:
 
 def _headers(item: dict[str, Any]) -> dict[str, str]:
     headers = {"Accept": "application/json, text/event-stream", "Content-Type": "application/json"}
-    headers["MCP-Protocol-Version"] = item.get("protocol_version", "2025-06-18")
+    # Этот заголовок обязателен для последующих запросов сессии, но часть
+    # локальных серверов отвергает его на самом первом initialize.
+    if item.get("initialized"):
+        headers["MCP-Protocol-Version"] = item.get("protocol_version", "2025-06-18")
     if item.get("session_id"):
         headers["MCP-Session-Id"] = item["session_id"]
     auth = item.get("auth")
@@ -188,10 +191,18 @@ def test_connection(server_id: str) -> dict[str, Any]:
         result = request(server_id, "initialize", {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "NovaMind", "version": "1.0"}})
         data[server_id]["connected"] = "error" not in result
         data[server_id]["last_error"] = None if data[server_id]["connected"] else str(result.get("error"))
+        if data[server_id]["connected"]:
+            body = _result_body(result)
+            data[server_id]["initialized"] = True
+            data[server_id]["protocol_version"] = body.get("protocolVersion", "2025-06-18")
         data[server_id]["updated_at"] = int(time.time())
         _write(data)
         # MCP requires this notification after a successful initialize.
-        request(server_id, "notifications/initialized", {})
+        try:
+            request(server_id, "notifications/initialized", {})
+        except Exception:
+            # Notification is not needed for stateless/simple local servers.
+            pass
         return {"connected": data[server_id]["connected"], "server": result.get("result", result)}
     except Exception as exc:
         data[server_id]["connected"] = False
