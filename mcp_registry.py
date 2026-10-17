@@ -101,7 +101,7 @@ def _headers(item: dict[str, Any]) -> dict[str, str]:
     return headers
 
 
-def request(server_id: str, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+def request(server_id: str, method: str, params: dict[str, Any] | None = None, _retry_session: bool = True) -> dict[str, Any]:
     data = _read()
     item = data.get(server_id)
     if not item:
@@ -116,6 +116,15 @@ def request(server_id: str, method: str, params: dict[str, Any] | None = None) -
         _write(data)
     if response.status_code >= 400:
         detail = (response.text or "").strip().replace("\n", " ")[:600]
+        if (_retry_session and method != "initialize" and
+                "missing mcp-session-id" in detail.lower()):
+            # A connection saved by an older NovaMind version may be marked
+            # connected but have no session id. Recreate the MCP session once.
+            data[server_id].pop("session_id", None)
+            data[server_id].pop("initialized", None)
+            _write(data)
+            _initialize_session(server_id)
+            return request(server_id, method, params, _retry_session=False)
         raise requests.HTTPError(
             f"MCP HTTP {response.status_code}: {detail or 'сервер не сообщил причину'}",
             response=response,
@@ -133,6 +142,26 @@ def request(server_id: str, method: str, params: dict[str, Any] | None = None) -
                     continue
         raise ValueError("MCP-сервер вернул пустой SSE-ответ")
     return response.json()
+
+
+def _initialize_session(server_id: str) -> dict[str, Any]:
+    """Создаёт новую MCP-сессию и сохраняет session id/protocol version."""
+    result = request(server_id, "initialize", {
+        "protocolVersion": "2025-06-18",
+        "capabilities": {},
+        "clientInfo": {"name": "NovaMind", "version": "1.0"},
+    }, _retry_session=False)
+    data = _read()
+    item = data.get(server_id)
+    if item and "error" not in result:
+        body = _result_body(result)
+        item["connected"] = True
+        item["initialized"] = True
+        item["protocol_version"] = body.get("protocolVersion", "2025-06-18")
+        item["last_error"] = None
+        item["updated_at"] = int(time.time())
+        _write(data)
+    return result
 
 
 def _result_body(response: dict[str, Any]) -> dict[str, Any]:
@@ -185,7 +214,7 @@ def test_connection(server_id: str) -> dict[str, Any]:
     if not item:
         raise ValueError("MCP-сервер не найден")
     try:
-        result = request(server_id, "initialize", {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "NovaMind", "version": "1.0"}})
+        result = _initialize_session(server_id)
         data[server_id]["connected"] = "error" not in result
         data[server_id]["last_error"] = None if data[server_id]["connected"] else str(result.get("error"))
         if data[server_id]["connected"]:
