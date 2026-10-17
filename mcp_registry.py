@@ -86,6 +86,7 @@ def remove_connection(server_id: str) -> None:
 
 def _headers(item: dict[str, Any]) -> dict[str, str]:
     headers = {"Accept": "application/json, text/event-stream", "Content-Type": "application/json"}
+    headers["MCP-Protocol-Version"] = item.get("protocol_version", "2025-06-18")
     if item.get("session_id"):
         headers["MCP-Session-Id"] = item["session_id"]
     auth = item.get("auth")
@@ -113,7 +114,12 @@ def request(server_id: str, method: str, params: dict[str, Any] | None = None) -
     if session_id:
         data[server_id]["session_id"] = session_id
         _write(data)
-    response.raise_for_status()
+    if response.status_code >= 400:
+        detail = (response.text or "").strip().replace("\n", " ")[:600]
+        raise requests.HTTPError(
+            f"MCP HTTP {response.status_code}: {detail or 'сервер не сообщил причину'}",
+            response=response,
+        )
     content_type = response.headers.get("content-type", "")
     if response.status_code in {202, 204} or not response.text.strip():
         return {}
