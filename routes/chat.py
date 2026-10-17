@@ -18,6 +18,7 @@ from ai_providers import chat_completion, chat_stream, resolve_target
 from groq_rotation import get_groq_key, mark_groq_key_exhausted, GROQ_KEYS
 import config
 import media_generation as mg
+from mcp_chat import complete_with_mcp
 
 # In-memory compatibility cache. Persistent chat history is stored in the database.
 contents = []
@@ -173,6 +174,20 @@ def send():
             'chat_id': chat_id,
         })
 
+    # Если MCP подключён, обычный чат тоже получает его tools и может
+    # выполнить mcp_call перед финальным ответом.
+    provider, model_name, provider_cfg = resolve_target()
+    reply, meta, _mcp_events = complete_with_mcp(
+        history + [{"role": "user", "content": message}],
+        system=config.system_prompt, provider=provider, model=model_name,
+        temperature=0.7, max_tokens=provider_cfg.get("max_tokens", 8192), timeout=120,
+    )
+    if reply is not None:
+        add_message(chat_id, "assistant", reply)
+        trim_messages(chat_id, max_messages=100)
+        contents = get_chat_history(chat_id, limit=20)
+        return jsonify({'reply': reply, 'chat_id': chat_id, 'mcp': True})
+
     # Единый слой провайдеров: сам выбирает рабочий транспорт
     # (Groq / Gemini / OpenRouter / локальный llama-server / офлайн-модель).
     reply, meta = chat_completion(
@@ -244,6 +259,27 @@ def send_stream():
         full_reply = ""
         reasoning_text = ""
         try:
+            mcp_reply, mcp_meta, mcp_events = complete_with_mcp(
+                history_for_prompt + [{"role": "user", "content": message}],
+                system=config.system_prompt, provider=provider, model=model,
+                temperature=0.7, max_tokens=provider_cfg.get("max_tokens", 8192), timeout=120,
+            )
+            if mcp_reply is not None:
+                for event in mcp_events:
+                    yield emit(event)
+                full_reply = mcp_reply
+                for index in range(0, len(full_reply), 48):
+                    yield emit({"token": full_reply[index:index + 48]})
+                add_message(_chat_id_stream, "assistant", full_reply)
+                trim_messages(_chat_id_stream, max_messages=100)
+                contents.append({"role": "assistant", "content": full_reply})
+                if len(contents) > 20:
+                    del contents[:-20]
+                yield emit({"done": True, "model": model, "provider": provider,
+                            "offline": provider == "local_demo", "has_reply": True,
+                            "mcp": True, "reasoning_chars": 0})
+                return
+
             for kind, chunk in chat_stream(
                 history_for_prompt + [{"role": "user", "content": message}],
                 provider=provider,
