@@ -263,15 +263,23 @@ def _fallback_answer(state):
 @agent_bp.route("/api/agent/status")
 def agent_status():
     enabled = is_enabled()
+    try:
+        import mcp_registry
+        mcp_tool_count = len(mcp_registry.connected_tools())
+    except Exception:
+        mcp_tool_count = 0
+    mcp_available = mcp_tool_count > 0
     return jsonify({
         "enabled": enabled,
         "tools": tools_enabled(),
-        "available": bool(is_enabled() and tools_enabled()),
+        "mcp": mcp_available,
+        "mcp_tools": mcp_tool_count,
+        "available": bool(is_enabled() and (tools_enabled() or mcp_available)),
         "max_steps": MAX_STEPS,
         "user": signed_in(),
         "admin": bool(session.get("admin_logged_in")),
         "hint": ("" if enabled
-                 else "Включите AGENT_ENABLED=1 и TERMINAL_ENABLED=1 в .env и перезапустите сервер"),
+                 else "Включите AGENT_ENABLED=1 в .env и перезапустите сервер"),
         "media": {kind: __import__("media_agent").quick_available(kind)
                   for kind in ("image", "audio", "video")},
     })
