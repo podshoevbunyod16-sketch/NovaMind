@@ -3,10 +3,31 @@
   const esc = (value) => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[c]));
   const toast = (message, type = '') => window.showToast ? window.showToast(message, type) : alert(message);
   const authLabel = (auth) => Array.isArray(auth) ? auth.join(', ') : String(auth || 'none');
+  function ensureAuthOptions() {
+    const select = $('mcpAuth');
+    if (!select) return;
+    const options = [
+      ['none', 'Без авторизации'],
+      ['api_key', 'API-ключ (X-API-Key)'],
+      ['bearer', 'Bearer token'],
+      ['google_oauth', 'Google OAuth'],
+      ['oauth', 'OAuth 2.0 token'],
+      ['basic', 'Basic Auth'],
+    ];
+    const current = select.value || 'none';
+    select.replaceChildren(...options.map(([value, label]) => {
+      const option = document.createElement('option');
+      option.value = value;
+      option.textContent = label;
+      return option;
+    }));
+    select.value = options.some(([value]) => value === current) ? current : 'none';
+  }
   function card(item, connected = false) {
     const auth = authLabel(item.auth);
     return `<article class="model-card"><div class="model-card-top"><span class="model-badge ${connected ? 'free' : 'paid'}">${connected ? 'CONNECTED' : 'AVAILABLE'}</span><span class="model-id">${esc(auth)}</span></div><h3>${esc(item.name)}</h3><p>${esc(item.description || item.url || '')}</p>${item.url ? `<p><code>${esc(item.url)}</code></p>` : ''}<div class="model-stats"><span>Авторизация <b>${esc(auth)}</b></span><span>Статус <b>${connected ? 'доступен' : 'не подключён'}</b></span></div>${item.id && connected ? `<button class="select-model" data-mcp-test="${esc(item.id)}" type="button">Проверить tools/list</button>` : ''}</article>`;
   }
+  ensureAuthOptions();
   async function loadMcp() {
     const response = await fetch('/api/settings/mcp');
     const data = await response.json();
