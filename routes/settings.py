@@ -94,6 +94,10 @@ def settings_mcp_connect():
     try:
         server_id = mcp_registry.save_connection(request.get_json(silent=True) or {})
         result = mcp_registry.test_connection(server_id)
+        if not result.get("connected"):
+            # Не оставляем в каталоге разовые неудачные попытки подключения.
+            # Подробная причина уже возвращается клиенту в result["error"].
+            mcp_registry.remove_connection(server_id)
         return jsonify({"id": server_id, **result}), (200 if result.get("connected") else 502)
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400

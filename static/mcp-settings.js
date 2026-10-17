@@ -15,7 +15,8 @@
     const catalog = (data.catalog || []).map(item => card(item)).join('');
     const connections = (data.connections || []).map(item => card({ ...item, auth: item.auth, description: item.last_error || 'Подключённый MCP-сервер' }, item.connected)).join('');
     grid.innerHTML = connections + catalog || '<div class="empty-card">Каталог пуст</div>';
-    $('mcpStatus').textContent = `${data.connections?.length || 0} подключений · ${(data.catalog || []).length} шаблонов`;
+    const connectedCount = (data.connections || []).filter(item => item.connected).length;
+    $('mcpStatus').textContent = `${connectedCount} подключений · ${(data.catalog || []).length} шаблонов`;
     grid.querySelectorAll('[data-mcp-test]').forEach(button => button.addEventListener('click', async () => {
       const result = await fetch(`/api/settings/mcp/${encodeURIComponent(button.dataset.mcpTest)}/tools`);
       const body = await result.json();
