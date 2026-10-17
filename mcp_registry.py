@@ -21,9 +21,6 @@ STORE = Path(os.getenv("MCP_CONNECTIONS_FILE", ROOT / "mcp_connections.json"))
 TIMEOUT = float(os.getenv("MCP_TIMEOUT", "12"))
 
 CATALOG = [
-    {"id": "github", "name": "GitHub", "description": "Репозитории, issues и pull requests", "auth": ["api_key", "oauth"]},
-    {"id": "google-drive", "name": "Google Drive", "description": "Поиск и чтение файлов Drive", "auth": ["google_oauth", "api_key"]},
-    {"id": "filesystem", "name": "Filesystem", "description": "Локальные файлы через MCP", "auth": ["none"]},
     {"id": "custom", "name": "Свой MCP-сервер", "description": "Любой Streamable HTTP MCP endpoint", "auth": ["api_key", "bearer", "basic", "oauth", "none"]},
 ]
 
