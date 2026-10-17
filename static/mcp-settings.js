@@ -2,8 +2,10 @@
   const $ = (id) => document.getElementById(id);
   const esc = (value) => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[c]));
   const toast = (message, type = '') => window.showToast ? window.showToast(message, type) : alert(message);
+  const authLabel = (auth) => Array.isArray(auth) ? auth.join(', ') : String(auth || 'none');
   function card(item, connected = false) {
-    return `<article class="model-card"><div class="model-card-top"><span class="model-badge ${connected ? 'free' : 'paid'}">${connected ? 'CONNECTED' : 'AVAILABLE'}</span><span class="model-id">${esc((item.auth || []).join(', '))}</span></div><h3>${esc(item.name)}</h3><p>${esc(item.description || item.url || '')}</p>${item.url ? `<p><code>${esc(item.url)}</code></p>` : ''}<div class="model-stats"><span>Авторизация <b>${esc(item.auth || 'none')}</b></span><span>Статус <b>${connected ? 'доступен' : 'не подключён'}</b></span></div>${item.id && connected ? `<button class="select-model" data-mcp-test="${esc(item.id)}" type="button">Проверить tools/list</button>` : ''}</article>`;
+    const auth = authLabel(item.auth);
+    return `<article class="model-card"><div class="model-card-top"><span class="model-badge ${connected ? 'free' : 'paid'}">${connected ? 'CONNECTED' : 'AVAILABLE'}</span><span class="model-id">${esc(auth)}</span></div><h3>${esc(item.name)}</h3><p>${esc(item.description || item.url || '')}</p>${item.url ? `<p><code>${esc(item.url)}</code></p>` : ''}<div class="model-stats"><span>Авторизация <b>${esc(auth)}</b></span><span>Статус <b>${connected ? 'доступен' : 'не подключён'}</b></span></div>${item.id && connected ? `<button class="select-model" data-mcp-test="${esc(item.id)}" type="button">Проверить tools/list</button>` : ''}</article>`;
   }
   async function loadMcp() {
     const response = await fetch('/api/settings/mcp');
