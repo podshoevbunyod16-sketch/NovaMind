@@ -53,6 +53,12 @@ def tool_schemas() -> list[dict]:
         connected = mcp_registry.connected_tools()
         if connected:
             available = ", ".join(f"{x['server_id']}:{x['name']}" for x in connected)
+            catalog = [{
+                "server_id": x["server_id"],
+                "name": x["name"],
+                "description": str(x.get("description") or "")[:500],
+                "inputSchema": x.get("inputSchema") or {"type": "object"},
+            } for x in connected]
             schemas.append({
                 "name": "mcp_call",
                 "description": "Вызвать инструмент подключённого MCP-сервера. Доступные инструменты: " + available,
@@ -65,6 +71,7 @@ def tool_schemas() -> list[dict]:
                     },
                     "required": ["server_id", "tool"],
                 },
+                "mcp_tools": catalog,
                 "permissions": ["network", "external_service"],
                 "timeout": 30,
             })
