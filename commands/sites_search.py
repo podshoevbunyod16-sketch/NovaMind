@@ -11,8 +11,9 @@ commands/sites_search.py — плагин прямого поиска по са�
 поэтому установка происходит при импорте — бэкенд регистрируется в
 routes.search.BACKENDS и ставится первым в SEARCH_BACKENDS.
 
-Если запрос не похож на поиск товара или сайт закрыл доступ — бэкенд
-мгновенно возвращает пустой результат, остальные бэкенды продолжают работу.
+Плагин регистрирует backend, но не меняет SEARCH_BACKENDS автоматически.
+Somon.tj подключается только если пользователь явно добавил `sites` в
+SEARCH_BACKENDS или включил SITES_SEARCH_AUTO=1 для товарных запросов.
 """
 import os
 import re
@@ -33,7 +34,7 @@ _HEADERS = {
 
 # Запросы, похожие на поиск товара или объявления.
 _SHOP_HINTS = (
-    "сомон", "somon", "olx", "таджик", "душанбе", "худжанд", "кулоб", "бохтар",
+    "сомон", "somon", "olx",
     "купить", "куплю", "продаю", "продажа", "б/у", "объявлен", "цена",
     "ноутбук", "компьютер", "телефон", "смартфон", "iphone", "айфон", "samsung",
     "стиральн", "холодильник", "телевизор", "авто", "машин", "квартир", "техник",
@@ -133,12 +134,7 @@ def _install():
     try:
         if "sites" not in rs.BACKENDS:
             rs.BACKENDS["sites"] = search_web_sites
-        configured = os.getenv("SEARCH_BACKENDS", "").strip()
-        if not configured:
-            os.environ["SEARCH_BACKENDS"] = "sites," + ",".join(rs.DEFAULT_BACKENDS)
-        elif "sites" not in [name.strip() for name in configured.split(",")]:
-            os.environ["SEARCH_BACKENDS"] = "sites," + configured
-        print("[sites_search] Бэкенд 'sites' (somon.tj) подключён первым")
+        print("[sites_search] Бэкенд 'sites' зарегистрирован; общий поиск Somon.tj не использует")
     except Exception as exc:
         print("[sites_search] Ошибка установки: %s" % exc)
 
