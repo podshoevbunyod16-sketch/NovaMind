@@ -99,6 +99,23 @@ def requested_media_kind(text: str):
     return None
 
 
+def is_simple_chat_request(text: str) -> bool:
+    """Определяет короткие вопросы, которым не нужны внешние инструменты."""
+    value = str(text or "").strip().lower()
+    if not value or len(value) > 240 or requested_media_kind(value):
+        return False
+    tool_words = (
+        "найди", "поищи", "поиск", "проверь", "актуальн", "сегодня", "сейчас",
+        "последн", "новост", "ссылк", "открой", "прочитай", "репозитор",
+        "github", "youtube", "composio", "mcp", "switchboard", "exa",
+        "термукс", "termux", "linux", "команд", "файл", "код", "запусти",
+        "папк", "folder", "посчитай", "выполни", "запусти",
+        "сгенерируй", "создай", "нарисуй", "отправь", "удали", "сохрани",
+        "инструмент", "email", "почт", "notion", "drive",
+    )
+    return not any(word in value for word in tool_words)
+
+
 def tools_enabled():
     """Инструменты терминала и файлов — любому вошедшему при включённом окружении.
 
@@ -383,6 +400,37 @@ def agent_stream():
             if isinstance(item, dict) and item.get("role") in ("user", "assistant"):
                 history.append({"role": item["role"], "content": str(item.get("content") or "")[:4000]})
         history.append({"role": "user", "content": goal})
+
+        if is_simple_chat_request(goal) and not strict_mcp:
+            # Короткие разговорные/объяснительные вопросы не должны ждать
+            # discovery MCP, web-search и планирования из нескольких шагов.
+            fast_history = [{
+                "role": "system",
+                "content": "Ты NovaMind. Ответь прямо и кратко по-русски. "
+                           "Не вызывай инструменты, не пиши JSON и не описывай внутренние шаги.",
+            }]
+            fast_history.extend(history[-5:])
+            fast_answer, fast_error = _ask(
+                fast_history, provider=provider, model=model,
+                temperature=0.3, max_tokens=700, timeout=30)
+            if fast_error:
+                fast_answer = "Не удалось получить быстрый ответ: " + str(fast_error)
+            parsed_fast = parse_action(fast_answer)
+            if parsed_fast and parsed_fast.get("action") == "answer":
+                fast_answer = str(parsed_fast.get("text") or "").strip()
+            state["answer"] = fast_answer.strip()
+            updated_fast_history = (prior + [{"role": "user", "content": goal},
+                                             {"role": "assistant", "content": state["answer"]}])[-10:]
+            _AGENT_HISTORY_CACHE[history_key] = updated_fast_history
+            session["agent_history"] = updated_fast_history
+            for chunk in _chunks(state["answer"]):
+                yield _ndjson({"type": "token", "token": chunk})
+            yield _ndjson({"type": "result", "reply": state["answer"], "steps": 0,
+                           "task_id": None, "model": model, "sources": [],
+                           "searched": False, "media": [], "linux": False,
+                           "offline": provider == "local_demo", "fast": True})
+            yield _ndjson({"type": "done"})
+            return
 
         # Раньше флаг search автоматически запускал DuckDuckGo до первого
         # решения модели. Теперь он только передаёт агенту подсказку: агент
