@@ -2,9 +2,11 @@
 routes/settings.py — Настройки провайдеров и моделей
 """
 from flask import Blueprint, request, jsonify, render_template, session
+import zipfile
 from ai_providers import fetch_available_models, provider_status, PROVIDER_LABELS, MODEL_ERRORS, media_models_catalog
 from config import PROVIDERS, save_selected_model, current_provider, current_model, GOOGLE_CLIENT_ID
 import mcp_registry
+import skills_registry
 
 settings_bp = Blueprint("settings", __name__)
 
@@ -19,6 +21,47 @@ def chat_page():
 @settings_bp.route('/settings')
 def settings_page():
     return render_template('settings.html')
+
+
+@settings_bp.route('/api/settings/skills')
+def settings_skills():
+    return jsonify({"skills": skills_registry.list_skills()})
+
+
+@settings_bp.route('/api/settings/skills/<skill_id>')
+def settings_skill(skill_id):
+    try:
+        return jsonify(skills_registry.get_skill(skill_id))
+    except (ValueError, FileNotFoundError) as exc:
+        return jsonify({"error": str(exc)}), 404
+
+
+@settings_bp.route('/api/settings/skills/text', methods=['POST'])
+def settings_skill_text():
+    data = request.get_json(silent=True) or {}
+    try:
+        item = skills_registry.save_text(data.get('id') or data.get('name'), data.get('content') or '')
+        return jsonify({"success": True, "skill": item})
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+
+@settings_bp.route('/api/settings/skills/zip', methods=['POST'])
+def settings_skill_zip():
+    try:
+        item = skills_registry.import_zip(request.files.get('file'))
+        return jsonify({"success": True, "skill": item})
+    except (ValueError, zipfile.BadZipFile) as exc:
+        return jsonify({"error": str(exc)}), 400
+
+
+@settings_bp.route('/api/settings/skills/<skill_id>', methods=['DELETE'])
+def settings_skill_delete(skill_id):
+    try:
+        skills_registry.delete_skill(skill_id)
+        return jsonify({"success": True})
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
 
 PROVIDER_HINTS = {
     "groq": "Бесплатный тариф, нужен GROQ_API_KEY",

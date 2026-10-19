@@ -50,6 +50,31 @@ html[data-glass-theme="light"] .eyebrow { color: var(--accent); }
 
 .settings-content { width: min(1250px, calc(100% - 32px)); margin: 26px auto 70px; }
 
+.settings-nav {
+  position: sticky; top: 78px; z-index: 10; display: flex; gap: 8px; flex-wrap: wrap;
+  margin-bottom: 18px; padding: 10px; border: 1px solid var(--glass-border-soft);
+  border-radius: var(--r-md); background: var(--glass-fill); backdrop-filter: blur(16px);
+}
+.settings-nav a, .skill-add-tab {
+  color: var(--text-2); text-decoration: none; border: 1px solid var(--glass-border-soft);
+  border-radius: var(--r-pill); background: var(--glass-fill); padding: 9px 13px;
+  font: 700 11px/1 inherit; cursor: pointer;
+}
+.settings-nav a:hover, .skill-add-tab:hover, .skill-add-tab.active {
+  color: var(--on-accent); background: linear-gradient(150deg, var(--accent), var(--accent-2));
+  border-color: transparent;
+}
+.skills-section { scroll-margin-top: 90px; }
+.settings-content > section { scroll-margin-top: 90px; }
+.skill-add-tabs { display: flex; gap: 8px; flex-wrap: wrap; margin: 18px 0 12px; }
+.skill-add-tab { font: 700 11px/1 inherit; }
+.skill-add-panel { display: flex; gap: 9px; align-items: center; flex-wrap: wrap; padding: 13px; border-radius: var(--r-sm); background: rgba(255,255,255,.035); border: 1px solid var(--glass-border-soft); }
+.skill-add-panel input[type="text"], .skill-add-panel input[type="file"], .skill-add-panel textarea { min-width: 0; color: var(--text-1); background: var(--glass-fill); border: 1px solid var(--glass-border-soft); border-radius: var(--r-sm); padding: 10px; font: 12px/1.5 inherit; }
+.skill-add-panel input[type="file"] { flex: 1; }
+.skill-add-panel textarea { width: 100%; resize: vertical; }
+.skill-add-panel small { color: var(--text-4); font-size: 10px; }
+.skill-delete { background: var(--glass-fill); color: var(--err); box-shadow: none; border-color: color-mix(in srgb, var(--err) 35%, transparent); }
+
 /* ── Карточки ── */
 .hero-card, .catalog-section, .media-section, .tips-grid article, .health-card {
   position: relative;
@@ -274,4 +299,8 @@ html[data-glass-theme="light"] .provider-mark { color: var(--accent); }
   .search-field { grid-column: auto; }
   .catalog-meta { display: block; line-height: 1.8; }
   .model-card p { min-height: 0; }
+  .settings-nav { top: 64px; overflow-x: auto; flex-wrap: nowrap; }
+  .settings-nav a { flex: 0 0 auto; }
+  .skill-add-panel { display: grid; }
+  .skill-add-panel .refresh-btn { width: 100%; margin-top: 0; }
 }

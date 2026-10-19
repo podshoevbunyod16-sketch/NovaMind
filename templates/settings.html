@@ -23,10 +23,47 @@
 
     <main class="settings-content">
 
+      <nav class="settings-nav" aria-label="Разделы настроек">
+        <a href="#skills-section">🧩 Skills</a>
+        <a href="#mcp-section">🔗 MCP</a>
+        <a href="#provider-section">🤖 Провайдер</a>
+        <a href="#media-section">🎨 Медиа</a>
+        <a href="#search-section">🔎 Поиск</a>
+        <a href="#language-section">🌐 Язык</a>
+      </nav>
+
+      <section class="health-card skills-section" id="skills-section">
+        <div class="catalog-heading">
+          <div>
+            <div class="eyebrow">SKILLS</div>
+            <h2>Навыки NovaMind</h2>
+            <p>Сохраняйте инструкции и ресурсы, чтобы агент использовал их в следующих запросах.</p>
+          </div>
+          <button class="outline-btn" id="refreshSkills" type="button">↻ Обновить список</button>
+        </div>
+        <div class="skill-add-tabs" role="tablist">
+          <button class="skill-add-tab active" type="button" data-skill-tab="zip">ZIP-архив</button>
+          <button class="skill-add-tab" type="button" data-skill-tab="text">Текст SKILL.md</button>
+          <a class="skill-add-tab skill-chat-link" href="/chat?skill=create">Создать через главный чат</a>
+        </div>
+        <div class="skill-add-panel" id="skillZipPanel">
+          <input id="skillZip" type="file" accept=".zip,application/zip">
+          <button class="refresh-btn" id="uploadSkillZip" type="button">Загрузить ZIP</button>
+          <small>В архиве должен быть один SKILL.md с полями name и description.</small>
+        </div>
+        <div class="skill-add-panel" id="skillTextPanel" hidden>
+          <input id="skillTextName" placeholder="Имя skill, например research-helper" maxlength="64">
+          <textarea id="skillTextContent" rows="10" placeholder="---\nname: research-helper\ndescription: ...\n---\n\n# Инструкции"></textarea>
+          <button class="refresh-btn" id="saveSkillText" type="button">Сохранить skill</button>
+        </div>
+        <div class="catalog-meta"><span id="skillsStatus">Загружаю skills…</span><span>Хранятся в user_skills/</span></div>
+        <div class="model-grid" id="skillsGrid"><div class="empty-card loading-card">Загрузка skills…</div></div>
+      </section>
 
 
 
-     <section class="health-card mcp-section">
+
+     <section class="health-card mcp-section" id="mcp-section">
         <div class="catalog-heading">
           <div>
             <div class="eyebrow">MODEL CONTEXT PROTOCOL</div>
@@ -49,7 +86,7 @@
 
 
 
-      <section class="hero-card">
+      <section class="hero-card" id="provider-section">
         <div>
           <div class="eyebrow">ПРОВАЙДЕРЫ И МОДЕЛИ</div>
           <h2>Выберите движок для чата</h2>
@@ -84,7 +121,7 @@
         <div class="model-grid" id="modelGrid"><div class="empty-card">Модели ещё не загружены</div></div>
       </section>
 
-      <section class="media-section">
+      <section class="media-section" id="media-section">
         <div class="catalog-heading">
           <div>
             <div class="eyebrow">GENERATIVE MEDIA</div>
@@ -102,7 +139,7 @@
         <div class="model-grid" id="mediaGrid"><div class="empty-card">Загружаю media-модели…</div></div>
       </section>
 
-      <section class="health-card">
+      <section class="health-card" id="search-section">
         <div class="catalog-heading">
           <div>
             <div class="eyebrow">WEB SEARCH DIAGNOSTICS</div>
@@ -114,7 +151,7 @@
         <div class="health-grid" id="healthGrid"><div class="empty-card loading-card">Проверка бэкендов…</div></div>
       </section>
 
-      <section class="health-card">
+      <section class="health-card" id="language-section">
         <div class="catalog-heading">
           <div>
             <div class="eyebrow">INTERFACE LANGUAGE</div>
@@ -138,7 +175,8 @@
   </div>
   <div class="toast" id="toast" role="status"></div>
   <script src="/static/i18n.js"></script>
-  <script src="/static/settings.js"></script>
+  <script src="/static/settings.js?v=skills1"></script>
   <script src="/static/mcp-settings.js?v=3"></script>
+  <script src="/static/skills-settings.js?v=1"></script>
 </body>
 </html>

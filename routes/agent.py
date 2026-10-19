@@ -52,6 +52,7 @@ AGENT_SYSTEM_PROMPT = """Ты — агент NovaMind внутри «мален�
   {"action":"open","url":"https://…"}                       прочитать страницу
   {"action":"mcp_call","server_id":"github","tool":"...","arguments":{...}}  вызвать MCP-инструмент
   {"action":"image|audio|video","prompt":"…"}              сгенерировать медиа
+  {"action":"skill_create","name":"slug","content":"полный SKILL.md"} создать skill
   {"action":"task","title":"…","detail":"…"}                завести задачу с подпунктами в detail
   {"action":"task_done","note":"что сделано"}               задача выполнена
   {"action":"answer","text":"ответ пользователю"}            закончить и ответить
@@ -68,7 +69,9 @@ AGENT_SYSTEM_PROMPT = """Ты — агент NovaMind внутри «мален�
 7. Повторяй действие только если результат пустой или содержит ошибку; успешное действие не повторяй.
 8. MCP-инструменты можно вызывать только из AVAILABLE TOOL REGISTRY. Для Notion/GitHub/email
    сначала используй mcp_call с точным server_id и tool, затем проверь результат.
-9. В answer дай ПРЯМОЙ ответ на вопрос пользователя по-русски: сначала суть (названия, цифры, годы),
+9. Используй SKILL CONTEXT, если запрос соответствует сохранённому skill. Для создания skill
+   сформируй полный SKILL.md с frontmatter name и description и используй skill_create.
+10. В answer дай ПРЯМОЙ ответ на вопрос пользователя по-русски: сначала суть (названия, цифры, годы),
    потом 1–3 предложения пояснения. Не пересказывай свои шаги и не вставляй JSON.
    Ссылки на источники писать не нужно — интерфейс покажет их сам."""
 
@@ -97,6 +100,11 @@ def requested_media_kind(text: str):
     if re.search(r"(аудио|озвуч|голос|музык|audio|voice|music)", value):
         return "audio"
     return None
+
+
+def requested_skill_creation(text: str) -> bool:
+    value = str(text or "").lower()
+    return bool(re.search(r"(создай|создать|сделай|напиши|добавь)\s+(?:мне\s+)?(?:skill|скилл|навык)", value))
 
 
 def is_simple_chat_request(text: str) -> bool:
@@ -385,6 +393,13 @@ def agent_stream():
             )
         if available_schemas:
             system_content += "\n\nAVAILABLE TOOL REGISTRY:\n" + json.dumps(available_schemas, ensure_ascii=False)
+        try:
+            import skills_registry
+            skill_context = skills_registry.prompt_context()
+            if skill_context:
+                system_content += "\n\nSKILL CONTEXT (используй подходящие инструкции):\n" + skill_context
+        except Exception:
+            pass
         if data.get("search") and not strict_mcp:
             system_content += (
                 "\n\nSEARCH HINT: web search is allowed, but do not run it automatically. "
@@ -394,6 +409,12 @@ def agent_stream():
             system_content += (
                 "\n\nMCP SEARCH PREFERENCE: if AVAILABLE TOOL REGISTRY contains an Exa search tool, "
                 "use mcp_call to that Exa tool for web research before the built-in web_search."
+            )
+        if requested_skill_creation(goal):
+            system_content += (
+                "\n\nSKILL CREATION MODE: пользователь просит создать skill. Не отвечай только описанием. "
+                "Сначала подготовь валидный полный SKILL.md и вызови action=skill_create с name и content, "
+                "затем сообщи о сохранении."
             )
         history = [{"role": "system", "content": system_content}]
         for item in prior[-8:]:
@@ -709,6 +730,15 @@ def _perform(action, kind, use_tools, state, goal=""):
     возвращает наблюдение, которое уходит обратно в модель.
     """
     import database
+
+    if kind == "skill_create":
+        import skills_registry
+        try:
+            item = skills_registry.save_text(action.get("name"), action.get("content") or "")
+            yield _ndjson({"type": "skill", "skill": item})
+            return f"Skill «{item['name']}» сохранён и доступен в настройках и следующих запросах."
+        except ValueError as exc:
+            return f"Skill не сохранён: {exc}"
 
     if kind == "mcp_call":
         import mcp_registry
