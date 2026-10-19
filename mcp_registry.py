@@ -116,14 +116,26 @@ def request(server_id: str, method: str, params: dict[str, Any] | None = None, _
         _write(data)
     if response.status_code >= 400:
         detail = (response.text or "").strip().replace("\n", " ")[:600]
-        if (_retry_session and method != "initialize" and
-                "missing mcp-session-id" in detail.lower()):
-            # A connection saved by an older NovaMind version may be marked
-            # connected but have no session id. Recreate the MCP session once.
+        session_lost = any(marker in detail.lower() for marker in (
+            "missing mcp-session-id",
+            "session not found",
+            "reinitialize",
+            "invalid session",
+        ))
+        if _retry_session and method not in {"initialize", "notifications/initialized"} and session_lost:
+            # Streamable HTTP-сервер мог перезапуститься и забыть старую
+            # сессию, хотя NovaMind всё ещё хранит её id. Создаём новую один раз.
             data[server_id].pop("session_id", None)
             data[server_id].pop("initialized", None)
             _write(data)
-            _initialize_session(server_id)
+            initialized = _initialize_session(server_id)
+            if isinstance(initialized, dict) and initialized.get("error"):
+                raise requests.HTTPError(
+                    f"MCP reinitialize failed: {initialized.get('error')}", response=response)
+            try:
+                request(server_id, "notifications/initialized", {}, _retry_session=False)
+            except Exception:
+                pass
             return request(server_id, method, params, _retry_session=False)
         raise requests.HTTPError(
             f"MCP HTTP {response.status_code}: {detail or 'сервер не сообщил причину'}",
