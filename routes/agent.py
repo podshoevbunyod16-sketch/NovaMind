@@ -34,7 +34,7 @@ from routes.terminal import (run_agent as run_terminal, safe_path, relative_to_w
 agent_bp = Blueprint("agent", __name__)
 _AGENT_HISTORY_CACHE = {}
 
-MAX_STEPS = int(os.getenv("AGENT_MAX_STEPS", "8"))
+MAX_STEPS = int(os.getenv("AGENT_MAX_STEPS", "20"))
 AGENT_TIMEOUT = float(os.getenv("AGENT_TIMEOUT", "180"))
 STEP_TIMEOUT = float(os.getenv("AGENT_STEP_TIMEOUT", "12"))
 MAX_OBSERVATION = 2500
@@ -51,6 +51,7 @@ AGENT_SYSTEM_PROMPT = """Ты — агент NovaMind внутри «мален�
   {"action":"search","query":"что найти"}                   ПОИСК В ИНТЕРНЕТЕ
   {"action":"open","url":"https://…"}                       прочитать страницу
   {"action":"mcp_call","server_id":"github","tool":"...","arguments":{...}}  вызвать MCP-инструмент
+  {"action":"image|audio|video","prompt":"…"}              сгенерировать медиа
   {"action":"task","title":"…","detail":"…"}                завести задачу с подпунктами в detail
   {"action":"task_done","note":"что сделано"}               задача выполнена
   {"action":"answer","text":"ответ пользователю"}            закончить и ответить
@@ -60,12 +61,14 @@ AGENT_SYSTEM_PROMPT = """Ты — агент NovaMind внутри «мален�
 2. Сначала разберись в задаче (run/read/ls), потом действуй, потом answer.
 3. Один инструмент за один шаг. Не выдумывай результат команды — сначала выполни её.
 4. Команды выполняются ТОЛЬКО по одной, без | и >.
-5. Нужны свежие данные или факты — сделай search (обычно хватает 1–3 поисков), потом опирайся на найденное.
-6. НЕ повторяй одно и то же действие: результат уже перед тобой. Как только данных хватает —
-   сразу action=answer. Шагов у тебя мало, лишние поиски и чтение страниц тратят их впустую.
-7. MCP-инструменты можно вызывать только из AVAILABLE TOOL REGISTRY. Для Notion/GitHub/email
+5. Нужны свежие данные или факты — сначала проверь доступные MCP-инструменты. Для поиска
+   предпочитай инструмент Exa внутри MCP, если он есть; web search используй как запасной вариант.
+6. Если пользователь просит создать/сгенерировать/нарисовать изображение, видео или аудио,
+   сразу используй action=image, action=video или action=audio, а не текстовый ответ.
+7. Повторяй действие только если результат пустой или содержит ошибку; успешное действие не повторяй.
+8. MCP-инструменты можно вызывать только из AVAILABLE TOOL REGISTRY. Для Notion/GitHub/email
    сначала используй mcp_call с точным server_id и tool, затем проверь результат.
-8. В answer дай ПРЯМОЙ ответ на вопрос пользователя по-русски: сначала суть (названия, цифры, годы),
+9. В answer дай ПРЯМОЙ ответ на вопрос пользователя по-русски: сначала суть (названия, цифры, годы),
    потом 1–3 предложения пояснения. Не пересказывай свои шаги и не вставляй JSON.
    Ссылки на источники писать не нужно — интерфейс покажет их сам."""
 
@@ -80,6 +83,20 @@ def strict_mcp_request(text: str) -> bool:
     explicit = re.search(r"не\s+используй\s+(?:web[_ -]?search|поиск)|только\s+(?:mcp|github|composio|switchboard|youtube)", value)
     named_service = any(name in value for name in ("github mcp", "composio", "switchboard", "mcp-инструмент", "mcp инструмент"))
     return bool(explicit or named_service)
+
+
+def requested_media_kind(text: str):
+    """Возвращает media action только для явного запроса генерации."""
+    value = str(text or "").lower()
+    if not re.search(r"(сгенерируй|создай|нарисуй|сделай|generate|create|draw)", value):
+        return None
+    if re.search(r"(изображени|картинк|фото|иллюстрац|image|picture|photo)", value):
+        return "image"
+    if re.search(r"(видео|ролик|video|clip)", value):
+        return "video"
+    if re.search(r"(аудио|озвуч|голос|музык|audio|voice|music)", value):
+        return "audio"
+    return None
 
 
 def tools_enabled():
@@ -287,7 +304,7 @@ def agent_status():
         "user": signed_in(),
         "admin": bool(session.get("admin_logged_in")),
         "hint": ("" if enabled
-                 else "Включите AGENT_ENABLED=1 в .env и перезапустите сервер"),
+                 else "Включите AGENT_ENABLED=1 и при необходимости TERMINAL_ENABLED=1 в .env и перезапустите сервер"),
         "media": {kind: __import__("media_agent").quick_available(kind)
                   for kind in ("image", "audio", "video")},
     })
@@ -332,6 +349,7 @@ def agent_stream():
     @stream_with_context
     def generate():
         started = time.time()
+        forced_media_kind = requested_media_kind(goal)
         state = {"task_id": None, "steps": 0, "answer": "", "sources": [], "notes": [],
                  "research": 0, "searched": bool(data.get("search")), "tool_steps": 0,
                  "media_context": [], "media": []}
@@ -355,6 +373,11 @@ def agent_stream():
                 "\n\nSEARCH HINT: web search is allowed, but do not run it automatically. "
                 "First inspect the request and available MCP tools; use search only when it is actually needed."
             )
+        if available_schemas and not strict_mcp:
+            system_content += (
+                "\n\nMCP SEARCH PREFERENCE: if AVAILABLE TOOL REGISTRY contains an Exa search tool, "
+                "use mcp_call to that Exa tool for web research before the built-in web_search."
+            )
         history = [{"role": "system", "content": system_content}]
         for item in prior[-8:]:
             if isinstance(item, dict) and item.get("role") in ("user", "assistant"):
@@ -367,6 +390,7 @@ def agent_stream():
 
         # 2. Цикл действий
         seen, duplicates, parse_fails = set(), 0, 0
+        outcomes, retries = {}, {}
         limit_reached = False
         for step in range(1, MAX_STEPS + 4):
             if time.time() - started > AGENT_TIMEOUT:
@@ -396,6 +420,9 @@ def agent_stream():
                 action = parse_action(_extract_json_object(raw))
                 if action:
                     yield _ndjson({"type": "retract", "count": len(raw)})
+            if forced_media_kind and (not action or str(action.get("action")) == "answer"):
+                # Не даём модели превратить явный запрос генерации в текстовый ответ.
+                action = {"action": forced_media_kind, "prompt": goal}
             if not action and re.match(r"^План\s*:", strip_think(raw), re.I):
                 plan_text = strip_think(raw).split(":", 1)[1].strip()
                 yield _ndjson({"type": "stage", "scene": "agent", "title": "Планирую",
@@ -442,13 +469,23 @@ def agent_stream():
                 if state["tool_steps"] >= MAX_STEPS:
                     limit_reached = True
             key = _action_key(action, kind)
-            if key in seen and kind not in ("answer", "task", "task_done"):
+            previous = outcomes.get(key)
+            can_retry = bool(previous is not None and _retryable_observation(previous))
+            if key in seen and kind not in ("answer", "task", "task_done") and not can_retry:
                 duplicates += 1
                 yield _ndjson({"type": "step", "icon": "↺", "text": "Повторное действие пропущено"})
                 if duplicates >= 2:
                     break
                 observation = ("Ты уже выполнял именно это действие — результат выше. Не повторяй его: "
                                "используй имеющиеся данные и дай action=answer.")
+            elif can_retry and retries.get(key, 0) < 2:
+                retries[key] = retries.get(key, 0) + 1
+                yield _ndjson({"type": "step", "icon": "🔁",
+                               "text": f"Повторяю неудачное действие ({retries[key]}/2)"})
+                if strict_mcp and kind not in ("mcp_call", "answer", "plan"):
+                    observation = "MCP_ONLY: действие запрещено. Используй только mcp_call."
+                else:
+                    observation = yield from _perform(action, kind, use_tools, state, goal=goal)
             else:
                 seen.add(key)
                 if strict_mcp and kind not in ("mcp_call", "answer", "plan"):
@@ -460,6 +497,8 @@ def agent_stream():
                                    "output": observation})
                 else:
                     observation = yield from _perform(action, kind, use_tools, state, goal=goal)
+
+            outcomes[key] = observation
 
             if kind == "answer":
                 state["answer"] = str(action.get("text") or "").strip()
@@ -524,7 +563,8 @@ def agent_stream():
         yield _ndjson({"type": "result", "reply": state["answer"], "steps": state["steps"],
                        "task_id": state["task_id"], "model": model,
                        "sources": state["sources"], "searched": state["searched"],
-                       "media": state["media"], "offline": provider == "local_demo"})
+                       "media": state["media"], "linux": bool(use_tools),
+                       "offline": provider == "local_demo"})
         yield _ndjson({"type": "done"})
 
     return Response(generate(), mimetype="application/x-ndjson",
@@ -550,6 +590,45 @@ def _action_key(action, kind):
     if kind == "write":
         value = f"{value}|{str(action.get('content') or '')[:200]}"
     return (kind, " ".join(str(value).lower().split()))
+
+
+def _retryable_observation(observation):
+    """Пустой/ошибочный результат можно повторить ограниченное число раз."""
+    text = str(observation or "").strip().lower()
+    if not text:
+        return True
+    markers = (
+        "ошибка", "error", "не выполнен", "не выполнено", "недоступ",
+        "таймаут", "timeout", "пустой результат", "ничего не найден",
+        "mcp_unavailable", "http 4", "http 5", "код -1",
+    )
+    return any(marker in text for marker in markers)
+
+
+def _find_exa_search_tool():
+    """Находит Exa search tool среди инструментов единого MCP-шлюза."""
+    try:
+        import mcp_registry
+        tools = mcp_registry.connected_tools()
+    except Exception:
+        return None
+    candidates = [item for item in tools
+                  if "exa" in str(item.get("name", "")).lower()
+                  and any(word in str(item.get("name", "")).lower()
+                          for word in ("search", "find", "research"))]
+    return candidates[0] if candidates else None
+
+
+def _exa_arguments(tool, query, limit=3):
+    schema = tool.get("inputSchema") or {}
+    props = schema.get("properties") or {}
+    args = {}
+    query_key = next((key for key in ("query", "searchQuery", "q") if key in props), "query")
+    args[query_key] = query
+    limit_key = next((key for key in ("numResults", "limit", "maxResults") if key in props), None)
+    if limit_key:
+        args[limit_key] = limit
+    return args
 
 
 def _verify_action(kind, observation):
@@ -669,6 +748,28 @@ def _perform(action, kind, use_tools, state, goal=""):
         query = str(action.get("query") or "").strip()
         if not query:
             return 'Пустой поисковый запрос. Повтори с {"action":"search","query":"..."}.'
+        exa_tool = _find_exa_search_tool()
+        if exa_tool:
+            import mcp_registry
+            server_id = str(exa_tool.get("server_id") or "")
+            tool_name = str(exa_tool.get("name") or "")
+            try:
+                result = mcp_registry.call_tool(
+                    server_id, tool_name, _exa_arguments(exa_tool, query, limit=3))
+                text = json.dumps(result, ensure_ascii=False, indent=2)
+                state["research"] += 1
+                state["notes"].append(f"MCP Exa {tool_name}\n{text[:MAX_NOTE]}")
+                yield _ndjson({"type": "tool", "name": "mcp_call",
+                               "command": f"{server_id}:{tool_name}", "code": 0,
+                               "output": clip(text, 1800)})
+                if result and not (isinstance(result, dict) and result.get("error")):
+                    return text
+                return "Exa MCP вернул пустой или ошибочный результат."
+            except Exception as exc:
+                yield _ndjson({"type": "tool", "name": "mcp_call",
+                               "command": f"{server_id}:{tool_name}", "code": 1,
+                               "output": f"Exa MCP error: {exc}"})
+                # Ниже будет обычный поиск только как fallback после сбоя Exa.
         state["research"] += 1
         # Use the same function as the terminal/UI search. This keeps one
         # internet-search implementation (httpx + BeautifulSoup4) and makes source
