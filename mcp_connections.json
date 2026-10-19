@@ -1,60 +1,24 @@
 {
-  "0ic0pgUObz0": {
-    "name": "Social",
-    "url": "https://mcp.socialapis.io/mcp",
-    "auth": "none",
-    "connected": false,
-    "updated_at": 1792227036,
-    "last_error": "ConnectionError: HTTPSConnectionPool(host='mcp.socialapis.io', port=443): Max retries exceeded with url: /mcp (Caused by NewConnectionError(\"HTTPSConnection(host='mcp.socialapis.io', port=443): Failed to establish a new connection: [Errno 101] Network is unreachable\"))"
+  "vM8X9TP5ZfE": {
+    "name": "Local",
+    "url": "http://localhost:8787/mcp/novamind",
+    "auth": "bearer",
+    "connected": true,
+    "updated_at": 1792399734,
+    "last_error": null,
+    "token": "sk-sb-RBEhOEfBuzV7jsXdjwoIk_1dC75vr2s0",
+    "protocol_version": "2025-06-18",
+    "session_id": "8f7b13a4-e93c-4fe1-acf4-8b0067f9ede9",
+    "initialized": true
   },
-  "1S7ObaM1oEg": {
-    "name": "Поиск в интернете",
-    "url": "https://github.com/exa-labs/exa-mcp-server",
-    "auth": "none",
-    "connected": false,
-    "updated_at": 1792249101,
-    "last_error": "HTTPError: MCP HTTP 422: <!DOCTYPE html> <html lang=\"en\">   <head>     <meta http-equiv=\"Content-type\" content=\"text/html; charset=utf-8\">     <meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; base-uri 'self'; connect-src 'self'; form-action 'self'; img-src 'self' data:; script-src 'self'; style-src 'unsafe-inline'\">     <meta content=\"origin\" name=\"referrer\">     <title>Oh no &middot; GitHub</title>     <meta name=\"viewport\" content=\"width=device-width\">     <style type=\"text/css\" media=\"screen\">       /* BEGIN GENERATED STATIC ERROR COLORS: light */       /* @primer/primitives 11.1.0; regenerat"
-  },
-  "yMpFgjAyesk": {
-    "name": "Поиск в социальных сетях",
-    "url": "https://shortformkit.com/mcp",
+  "7N1xBIL9iaw": {
+    "name": "Tanod",
+    "url": "https://tanod.dev/mcp",
     "auth": "none",
     "connected": true,
-    "updated_at": 1792249463,
-    "last_error": null
-  },
-  "-Gfvgaa_8HM": {
-    "name": "Локальный",
-    "url": "http://localhost:8787",
-    "auth": "none",
-    "connected": false,
-    "updated_at": 1792267909,
-    "last_error": "HTTPError: MCP HTTP 404: 404 Not Found"
-  },
-  "7JgFVaQCfKQ": {
-    "name": "Локальный проект",
-    "url": "http://localhost:8787",
-    "auth": "api_key",
-    "connected": false,
-    "updated_at": 1792267992,
-    "last_error": "HTTPError: MCP HTTP 404: 404 Not Found",
-    "api_key": "08080909bunyod"
-  },
-  "rMRHj_3ODHg": {
-    "name": "Локальный проект",
-    "url": "http://localhost:8787",
-    "auth": "none",
-    "connected": false,
-    "updated_at": 1792268015,
-    "last_error": "HTTPError: MCP HTTP 404: 404 Not Found",
-    "token": "08080909bunyod"
-  },
-  "lqNhxGa_NBQ": {
-    "name": "Switching",
-    "url": "http://127.0.0.1:8787",
-    "auth": "none",
-    "connected": false,
-    "updated_at": 1792268265,
-    "last_error": "HTTPError: MCP HTTP 404: 404 Not Found"
+    "updated_at": 1792337645,
+    "last_error": null,
+    "initialized": true,
+    "protocol_version": "2025-06-18"
   }
 }
