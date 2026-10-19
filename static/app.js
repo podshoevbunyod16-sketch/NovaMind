@@ -1763,17 +1763,22 @@ function shareChat() {
   copyText(window.location.href);
 }
 
+let scrollFrame = 0;
 function scrollToBottom() {
-  requestAnimationFrame(() => {
-    // Прокручивается всё окно, поэтому целимся в нижний край панели ввода
-    // (она «прилипает» к низу и всегда закрывает собой хвост переписки).
+  if (scrollFrame) return;
+  scrollFrame = requestAnimationFrame(() => {
+    scrollFrame = 0;
+    // Прокручивается всё окно, поэтому целимся в нижний край панели ввода.
+    // Во время потоковой генерации нельзя запускать smooth-scroll на каждый
+    // токен: браузер складывает анимации, из-за чего нижняя кромка bubble
+    // визуально дрожит/искажается. Один auto-scroll на кадр этого не делает.
     const tail = document.querySelector('.input-area');
     const anchor = tail || chatContainer;
     const bottom = anchor.getBoundingClientRect().bottom;
     const max = Math.max(0, document.documentElement.scrollHeight - window.innerHeight);
     const target = Math.min(max, Math.max(0, window.scrollY + bottom));
     if (Math.abs(target - window.scrollY) < 2) return;
-    window.scrollTo({ top: target, behavior: 'smooth' });
+    window.scrollTo({ top: target, behavior: isTyping ? 'auto' : 'smooth' });
   });
 }
 
