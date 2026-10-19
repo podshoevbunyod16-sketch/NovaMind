@@ -1776,7 +1776,10 @@ function scrollToBottom() {
     const anchor = tail || chatContainer;
     const bottom = anchor.getBoundingClientRect().bottom;
     const max = Math.max(0, document.documentElement.scrollHeight - window.innerHeight);
-    const target = Math.min(max, Math.max(0, window.scrollY + bottom));
+    // bottom — координата внутри текущего viewport. Раньше она прибавлялась
+    // к scrollY целиком, без вычитания высоты viewport, поэтому страница
+    // уезжала примерно ещё на один экран и снизу появлялось пустое место.
+    const target = Math.min(max, Math.max(0, window.scrollY + bottom - window.innerHeight));
     if (Math.abs(target - window.scrollY) < 2) return;
     window.scrollTo({ top: target, behavior: isTyping ? 'auto' : 'smooth' });
   });
