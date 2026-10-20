@@ -79,11 +79,27 @@ def _media_stream_response(model, prompt, confirm, options, chat_id):
     started = time.time()
 
     def worker():
-        result, error = mg.generate_media(
-            model, prompt, options=options, confirm=confirm,
-            on_status=lambda message: events.put(("status", message)),
-        )
-        events.put(("done", (result, error)))
+        # The worker owns persistence. If the browser disconnects, this thread
+        # continues and stores the final result before notifying any listener.
+        try:
+            result, error = mg.generate_media(
+                model, prompt, options=options, confirm=confirm,
+                on_status=lambda message: events.put(("status", message)),
+            )
+            if error:
+                add_message(chat_id, "assistant", f"❌ {error}")
+            else:
+                marker = media_result_marker(result, model)
+                add_message(chat_id, "assistant", marker)
+                trim_messages(chat_id, max_messages=100)
+            events.put(("done", (result, error)))
+        except Exception as exc:
+            error = f"Ошибка генерации медиа: {exc}"
+            try:
+                add_message(chat_id, "assistant", f"❌ {error}")
+            except Exception:
+                pass
+            events.put(("done", (None, error)))
 
     thread = threading.Thread(target=worker, name="media-generation", daemon=True)
 
@@ -111,12 +127,11 @@ def _media_stream_response(model, prompt, confirm, options, chat_id):
             break
 
         if error:
-            add_message(chat_id, "assistant", f"❌ {error}")
             yield emit({"error": error, "elapsed_ms": int((time.time() - started) * 1000)})
             return
 
+        # Result was persisted by the independent worker before this event.
         marker = media_result_marker(result, model)
-        add_message(chat_id, "assistant", marker)
         contents.append({"role": "assistant", "content": marker})
         if len(contents) > 20:
             del contents[:-20]
@@ -230,8 +245,12 @@ def send_stream():
 
     contents.append({"role": "user", "content": message})
 
-    # FIX: загружаем историю из БД для send_stream тоже
-    _chat_id_stream = get_or_create_session_chat()
+    # Use the chat explicitly selected by the frontend, matching /send.
+    # This keeps streamed replies in the same conversation after chat switching.
+    _chat_id_stream = data.get("chat_id") or get_or_create_session_chat()
+    if not isinstance(_chat_id_stream, str) or not _chat_id_stream.strip():
+        return jsonify({"error": "Некорректный chat_id"}), 400
+    session["chat_id"] = _chat_id_stream
     _history_stream = get_chat_history(_chat_id_stream, limit=50)
     add_message(_chat_id_stream, "user", message)
 
@@ -254,8 +273,7 @@ def send_stream():
     def emit(payload: dict) -> str:
         return json.dumps(payload, ensure_ascii=False) + "\n"
 
-    @stream_with_context
-    def generate():
+    def generate_events():
         full_reply = ""
         reasoning_text = ""
         try:
@@ -340,8 +358,36 @@ def send_stream():
         except Exception as exc:
             yield emit({"error": f"Ошибка потокового ответа: {exc}"})
 
+    # Iterate the generation generator on a worker thread, not in the HTTP
+    # response generator. Closing the browser only closes the listener; it does
+    # not close the worker's generator or prevent its final database write.
+    event_queue = queue.Queue()
+
+    def run_generation():
+        try:
+            for event_line in generate_events():
+                event_queue.put(event_line)
+        except Exception as exc:
+            event_queue.put(emit({"error": f"Ошибка фоновой генерации: {exc}"}))
+        finally:
+            event_queue.put(None)
+
+    worker_thread = threading.Thread(
+        target=run_generation,
+        name=f"novamind-chat-{_chat_id_stream[:8]}",
+        daemon=True,
+    )
+    worker_thread.start()
+
+    def response_events():
+        while True:
+            event_line = event_queue.get()
+            if event_line is None:
+                break
+            yield event_line
+
     return Response(
-        generate(),
+        response_events(),
         mimetype="application/x-ndjson",
         headers={
             "Cache-Control": "no-cache",
