@@ -25,7 +25,14 @@ def system_health():
     except Exception as exc:
         tools=[]
         linux["tool_registry_error"]=str(exc)
-    return jsonify({"ai":{"provider":provider,"model":model,"configured":config.has_credentials(provider)},
+    try:
+        from routes.agent import is_enabled as agent_enabled
+        agent_on = bool(agent_enabled())
+    except Exception:
+        agent_on = os.getenv("AGENT_ENABLED", "1") == "1"
+    return jsonify({"ai":{"provider":provider,"model":model,"configured":config.has_credentials(provider),
+                          "offline":provider=="local_demo"},
                     "search":{"backends":backends,"configured":bool(backends)},
                     "linux":linux,
-                    "agent":{"enabled":os.getenv("AGENT_ENABLED","0")=="1","tools":tools}})
+                    "agent":{"enabled":agent_on,"tools":tools,
+                             "workspace":bool(linux.get("enabled"))}})

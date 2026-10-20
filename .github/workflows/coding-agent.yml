@@ -10,7 +10,7 @@ on:
       - "tests/test_coding_agent.py"
       - ".github/workflows/coding-agent.yml"
   push:
-    branches: ["feature/auto-coding-agent"]
+    branches: [main]
     paths:
       - "routes/coding_agent.py"
       - "routes/__init__.py"

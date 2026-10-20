@@ -223,6 +223,18 @@
 
 
 
+  <!-- Командная панель (Ctrl+K) -->
+  <div class="cmdk" id="cmdk" aria-hidden="true">
+    <div class="cmdk-panel" role="dialog" aria-modal="true" aria-label="Командная панель">
+      <input class="cmdk-input" id="cmdkInput" type="text" placeholder="Команда или действие…"
+             autocomplete="off" oninput="filterCmdk()" onkeydown="cmdkKey(event)">
+      <div class="cmdk-list" id="cmdkList"></div>
+    </div>
+  </div>
+
+  <!-- Куда складываются уведомления -->
+  <div class="lg-toast-stack" id="toastStack"></div>
+
   <script src="/static/i18n.js"></script>
   <script src="/static/app.js"></script>
   <script src="/static/linux.js"></script>

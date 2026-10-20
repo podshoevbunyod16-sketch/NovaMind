@@ -18,7 +18,7 @@ import os
 import logging
 from flask import Flask, send_from_directory, redirect
 
-from config import ADMIN_SESSION_KEY, load_plugins, PORT
+from config import ADMIN_SESSION_KEY, ADMIN_CODE, ADMIN_CODE_IS_DEFAULT, load_plugins, PORT
 from database import init_db
 from routes import ALL_BLUEPRINTS
 
@@ -49,4 +49,8 @@ if __name__ == '__main__':
     port = PORT
     debug = os.getenv("FLASK_DEBUG", "false").lower() == "true"
     logging.getLogger(__name__).info("Запуск NovaMind на порту %s, debug=%s", port, debug)
+    if ADMIN_CODE_IS_DEFAULT:
+        logging.getLogger(__name__).warning(
+            "ADMIN_CODE не задан — сгенерирован одноразовый код администратора: %s "
+            "(задайте ADMIN_CODE в .env, чтобы код был постоянным)", ADMIN_CODE)
     app.run(host="0.0.0.0", port=port, debug=debug)

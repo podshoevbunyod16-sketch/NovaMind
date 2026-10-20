@@ -10,7 +10,7 @@ on:
       - "tests/test_groq_provider.py"
       - ".github/workflows/groq-provider.yml"
   push:
-    branches: ["fix/groq-provider-rotation"]
+    branches: [main]
     paths:
       - "config.py"
       - "ai_providers.py"

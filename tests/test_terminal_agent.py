@@ -211,10 +211,18 @@ def test_agent_requires_enable_flag(google_client, monkeypatch, sandbox):
     assert google_client.post("/api/agent/stream", json={"message": "привет"}).status_code == 403
 
 
-def test_agent_requires_signed_in(client, sandbox):
-    """Главный чат с Linux — как и песочница — только для вошедших."""
-    assert client.post("/api/agent/stream", json={"message": "привет"}).status_code == 403
-    assert client.get("/api/agent/status").get_json()["tools"] is False
+def test_agent_works_for_guests_but_workspace_requires_login(client, sandbox):
+    """Агент доступен всем, а файлы/терминал — только вошедшим.
+
+    Раньше /api/agent/stream отвечал 403 без входа, и незалогиненный
+    пользователь получал обычный текстовый чат без инструментов.
+    """
+    response = client.post("/api/agent/stream", json={"message": "привет"})
+    response.get_data()          # поток нужно дочитать, иначе останется открытый контекст
+    assert response.status_code == 200
+    status = client.get("/api/agent/status").get_json()
+    assert status["enabled"] is True and status["available"] is True
+    assert status["tools"] is False and status["guest"] is True
 
 
 def test_simple_question_is_answered_in_one_streamed_call(google_client, monkeypatch, sandbox):

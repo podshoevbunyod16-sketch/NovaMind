@@ -10,7 +10,8 @@ from urllib.parse import quote
 import config
 import groq_rotation
 from groq_rotation import GROQ_KEYS, GROQ_KEY_COOLDOWN, get_groq_key_status
-from config import ADMIN_CREDENTIALS, PROVIDERS, GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET
+from config import (ADMIN_CREDENTIALS, PROVIDERS, GOOGLE_CLIENT_ID,
+                    GOOGLE_CLIENT_SECRET, GOOGLE_REDIRECT_URI)
 
 # Папка с сохранённым кодом лежит в корне проекта (а не в routes/) — как и generated_*
 SAVED_CODES_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "saved_codes")
@@ -38,7 +39,7 @@ def auth_google_callback():
         "code": code,
         "client_id": GOOGLE_CLIENT_ID,
         "client_secret": GOOGLE_CLIENT_SECRET,
-        "redirect_uri": "http://localhost:5000/auth/google/callback",
+        "redirect_uri": GOOGLE_REDIRECT_URI,
         "grant_type": "authorization_code"
     }
 
