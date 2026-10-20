@@ -418,12 +418,16 @@ html[data-glass-theme="light"] .menu-btn.is-open { color: var(--accent); }
   color: var(--text-1);
 }
 .message.user .msg-bubble {
-  background: linear-gradient(150deg, color-mix(in srgb, var(--accent) 78%, transparent),
-                                       color-mix(in srgb, var(--accent-2) 48%, transparent));
+  /* Android Chromium иногда рисует вертикальный шов у длинного пузыря
+     при color-mix(..., transparent). Непрозрачный градиент сохраняет
+     оформление и не создаёт отдельную compositing-плитку. */
+  background: linear-gradient(150deg, var(--accent), var(--accent-2));
   color: var(--on-accent);
-  border: 1px solid color-mix(in srgb, var(--accent) 45%, rgba(255,255,255,.22));
+  border: 1px solid rgba(190, 210, 255, .48);
   border-top-right-radius: 6px;
   box-shadow: 0 14px 34px -16px var(--accent-glow), inset 0 1px 0 rgba(255,255,255,.32);
+  background-clip: padding-box;
+  isolation: isolate;
 }
 .msg-bubble:empty { min-height: 4px; padding: 6px 16px; }
 .msg-bubble code {
