@@ -14,3 +14,5 @@ novamind_chats.db
 node_modules/
 package-lock.json
 .pytest_cache/
+mcp_connections.json
+novamind_chats.db
