@@ -280,3 +280,98 @@ def test_search_button_with_empty_results(google_client, sandbox, monkeypatch):
     assert any(event["type"] == "step" and "ничего не дал" in event["text"] for event in events)
     assert "ничего не нашёл" in seen[0]["messages"][-1]["content"]
     assert _answer(events) == "Отвечу из базы знаний"
+
+
+# ══════════════ регрессия: заметки разных форматов в итоговом ответе ══════════════
+
+def test_synthesize_accepts_mixed_note_shapes(monkeypatch):
+    """MCP-заметки раньше были строками и ломали `for label, text in notes`.
+
+    ValueError: too many values to unpack (expected 2) обрывал поток и
+    пользователь не получал ответ. Теперь формат приводится к паре.
+    """
+    seen = []
+
+    def fake_completion(messages, **kwargs):
+        seen.append(messages)
+        return "Ответ по собранным данным", {}
+
+    monkeypatch.setattr(agent_routes, "chat_completion", fake_completion)
+    state = {
+        "notes": [
+            ("поиск «привет»", "результаты поиска"),
+            'MCP exa:search\n{"title": "Привет"}',
+            {"label": "страница https://example.com", "text": "текст страницы"},
+        ],
+    }
+
+    answer = agent_routes._synthesize("что такое привет?", state, "gemini", "flash")
+
+    assert answer == "Ответ по собранным данным"
+    prompt = seen[-1][-1]["content"]
+    assert "результаты поиска" in prompt
+    assert "[MCP exa:search]" in prompt
+    assert "текст страницы" in prompt
+
+
+def test_fallback_answer_uses_latest_note_of_any_shape(monkeypatch):
+    state = {"notes": [("поиск", "старое"), "MCP exa:search\n{\"ok\": true}"]}
+    text = agent_routes._fallback_answer(state)
+    assert "MCP exa:search" in text and "{'ok': true}" not in text
+
+
+def test_mcp_note_is_stored_as_label_and_text(monkeypatch):
+    import mcp_registry
+
+    monkeypatch.setattr(mcp_registry, "call_tool",
+                        lambda server_id, tool, arguments: {"items": ["a", "b"]})
+    state = {"notes": [], "research": 0, "task_id": None}
+    events = [json.loads(event) for event in agent_routes._perform(
+        {"server_id": "exa", "tool": "search", "arguments": {}}, "mcp_call", True, state)
+        if isinstance(event, str) and event.strip()]
+
+    assert any(event.get("name") == "mcp_call" for event in events)
+    label, text = state["notes"][0]
+    assert label == "MCP exa:search" and "items" in text
+
+
+def test_agent_stream_synthesizes_answer_after_mcp_note(admin_client, sandbox, monkeypatch):
+    """Один шаг, затем сборка ответа: раньше здесь падал ValueError."""
+    import mcp_registry
+
+    monkeypatch.setattr(mcp_registry, "connected_tools", lambda: [{"server_id": "exa"}])
+    monkeypatch.setattr(mcp_registry, "call_tool",
+                        lambda server_id, tool, arguments: {"answer": "42"})
+    monkeypatch.setattr(agent_routes, "MAX_STEPS", 1)
+    _stub_model(monkeypatch, [
+        '{"action":"mcp_call","server_id":"exa","tool":"search","arguments":{"query":"x"}}',
+        "Итог: 42",
+    ])
+
+    response = admin_client.post("/api/agent/stream", json={"message": "узнай ответ через mcp"})
+    events = _ndjson(response)
+
+    assert _answer(events) == "Итог: 42"
+    assert any(event["type"] == "result" for event in events)
+
+
+def test_agent_stream_survives_synthesis_error(admin_client, sandbox, monkeypatch, web):
+    """Сбой при сборке итога не должен обрывать поток — отдаём найденное."""
+    monkeypatch.setattr(agent_routes, "MAX_STEPS", 1)
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("synthesis failed")
+
+    monkeypatch.setattr(agent_routes, "_synthesize", boom)
+    _stub_model(monkeypatch, [
+        '{"action":"search","query":"asyncio"}',
+        # лимит шагов уже исчерпан — цикл уходит в сборку итога
+        '{"action":"search","query":"asyncio docs"}',
+    ])
+
+    response = admin_client.post("/api/agent/stream", json={"message": "проверь asyncio"})
+    events = _ndjson(response)
+
+    assert any(event["type"] == "result" for event in events)
+    assert any(event["type"] == "token" for event in events)
+    assert "docs.python.org" in _answer(events)

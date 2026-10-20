@@ -37,6 +37,7 @@ from routes.terminal import (run_agent as run_terminal, safe_path, relative_to_w
 agent_bp = Blueprint("agent", __name__)
 log = logging.getLogger("novamind.agent")
 _AGENT_HISTORY_CACHE = {}
+log = logging.getLogger(__name__)
 
 MAX_STEPS = int(os.getenv("AGENT_MAX_STEPS", "20"))
 AGENT_TIMEOUT = float(os.getenv("AGENT_TIMEOUT", "180"))
@@ -347,6 +348,34 @@ def _note(state, label, text):
         state["notes"].append((label, clip(text, MAX_NOTE)))
 
 
+def _note_items(state):
+    """Заметки в едином виде (label, text).
+
+    Заметки приходят из разных мест: поиск и чтение страниц кладут кортежи,
+    а MCP-ответы раньше добавлялись простыми строками. Из-за этого финальный
+    синтез падал с `ValueError: too many values to unpack`. Приводим всё
+    к одной форме здесь, чтобы ни один источник не мог сломать ответ.
+    """
+    items = []
+    for note in state.get("notes") or []:
+        if isinstance(note, dict):
+            label, text = note.get("label"), note.get("text")
+        elif isinstance(note, (tuple, list)) and len(note) == 2:
+            label, text = note
+        else:
+            # Старый формат MCP-заметок: "MCP exa:search\n{...}".
+            raw = str(note or "")
+            first, _, rest = raw.partition("\n")
+            if rest and len(first) <= 120:
+                label, text = first, rest
+            else:
+                label, text = "находка", raw
+        text = str(text or "").strip()
+        if text:
+            items.append((str(label or "находка"), clip(text, MAX_NOTE)))
+    return items
+
+
 def _is_research_command(command):
     parts = str(command or "").split()
     return len(parts) >= 2 and parts[0] == "nova" and parts[1] in ("search", "read")
@@ -356,7 +385,7 @@ def _is_research_command(command):
 
 def _synthesize(goal, state, provider, model):
     """Финальный запрос: модель отвечает обычным текстом по собранным данным."""
-    notes = "\n\n".join(f"[{label}]\n{text}" for label, text in state["notes"][-6:])
+    notes = "\n\n".join(f"[{label}]\n{text}" for label, text in _note_items(state)[-6:])
     prompt = (
         f"Вопрос пользователя: {goal}\n\n"
         f"Найденные данные:\n{notes or 'ничего не найдено'}\n\n"
@@ -438,8 +467,9 @@ def _save_turn(chat_id, history_key, goal, answer, extra_messages=None):
 
 def _fallback_answer(state):
     """Модель молчит — отдаём хотя бы найденное, а не пустоту."""
-    if state["notes"]:
-        label, text = state["notes"][0]
+    items = _note_items(state)
+    if items:
+        label, text = items[-1]
         return ("Модель не смогла сформулировать ответ, но данные собраны. "
                 f"Вот что нашлось ({label}):\n\n{clip(text, 1500)}\n\n"
                 "Источники — в свёрнутом блоке ниже; попробуйте ещё раз или смените модель.")
@@ -790,7 +820,11 @@ def agent_stream():
         # 3. Нет ответа (лимит шагов, таймаут, повторы, сбой) — собираем его по найденному
         if not state["answer"] and (use_tools or state["notes"]):
             yield _ndjson({"type": "step", "icon": "✍️", "text": "Готовлю ответ по найденному"})
-            state["answer"] = _synthesize(goal, state, provider, model)
+            try:
+                state["answer"] = _synthesize(goal, state, provider, model)
+            except Exception as exc:  # поток не должен обрываться из-за сборки ответа
+                log.exception("Не удалось собрать итоговый ответ: %s", exc)
+                state["answer"] = ""
         if not state["answer"] and not use_tools:
             # Linux-инструментов нет — обычный ответ модели
             history.append({"role": "user", "content":
@@ -1128,7 +1162,7 @@ def _perform(action, kind, use_tools, state, goal=""):
         try:
             result = mcp_registry.call_tool(server_id, tool_name, arguments)
             text = json.dumps(result, ensure_ascii=False, indent=2)
-            state["notes"].append(f"MCP {server_id}:{tool_name}\n{text[:MAX_NOTE]}")
+            _note(state, f"MCP {server_id}:{tool_name}", text)
             state["research"] += 1
             yield _ndjson({"type": "tool", "name": "mcp_call",
                            "command": f"{server_id}:{tool_name}", "code": 0,
@@ -1222,7 +1256,7 @@ def _perform(action, kind, use_tools, state, goal=""):
                     server_id, tool_name, _exa_arguments(exa_tool, query, limit=3))
                 text = json.dumps(result, ensure_ascii=False, indent=2)
                 state["research"] += 1
-                state["notes"].append(f"MCP Exa {tool_name}\n{text[:MAX_NOTE]}")
+                _note(state, f"MCP Exa {tool_name}", text)
                 try:
                     from routes.search import _exa_mcp_results, _normalize_and_rank
                     _add_sources(state, _normalize_and_rank(_exa_mcp_results(result), query, limit=8))

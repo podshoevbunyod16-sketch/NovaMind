@@ -14,6 +14,7 @@ novamind_chats.db
 node_modules/
 package-lock.json
 .pytest_cache/
+<<<<<<< HEAD
 
 # Секреты и локальные данные: не должны попадать в git
 .ssh/
@@ -21,3 +22,7 @@ uploads/
 *.db
 .env.*
 !.env.example
+=======
+mcp_connections.json
+novamind_chats.db
+>>>>>>> origin/arena/a8ec864d-novamind
