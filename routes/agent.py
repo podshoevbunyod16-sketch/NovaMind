@@ -537,6 +537,10 @@ def agent_stream():
                 state["steps"] += 1
                 if state["tool_steps"] >= MAX_STEPS:
                     limit_reached = True
+            if kind == "search":
+                yield _ndjson({"type": "stage", "scene": "search",
+                               "title": "Поиск в интернете",
+                               "text": "Агент выбрал поиск и подбирает источники…"})
             key = _action_key(action, kind)
             previous = outcomes.get(key)
             can_retry = bool(previous is not None and _retryable_observation(previous))
@@ -682,10 +686,18 @@ def _find_exa_search_tool():
     except Exception:
         return None
     candidates = [item for item in tools
-                  if "exa" in str(item.get("name", "")).lower()
-                  and any(word in str(item.get("name", "")).lower()
+                  if (re.search(r"\bexa\b", str(item.get("name", "")).lower())
+                      or re.search(r"\bexa\b", str(item.get("description", "")).lower()))
+                  and any(word in (str(item.get("name", "")).lower() + " " +
+                                   str(item.get("description", "")).lower())
                           for word in ("search", "find", "research"))]
-    return candidates[0] if candidates else None
+    if candidates:
+        return candidates[0]
+    try:
+        from routes.search import _find_mcp_search_tool
+        return _find_mcp_search_tool()
+    except Exception:
+        return None
 
 
 def _exa_arguments(tool, query, limit=3):
@@ -837,6 +849,11 @@ def _perform(action, kind, use_tools, state, goal=""):
                 text = json.dumps(result, ensure_ascii=False, indent=2)
                 state["research"] += 1
                 state["notes"].append(f"MCP Exa {tool_name}\n{text[:MAX_NOTE]}")
+                try:
+                    from routes.search import _exa_mcp_results, _normalize_and_rank
+                    _add_sources(state, _normalize_and_rank(_exa_mcp_results(result), query, limit=8))
+                except Exception:
+                    pass
                 yield _ndjson({"type": "tool", "name": "mcp_call",
                                "command": f"{server_id}:{tool_name}", "code": 0,
                                "output": clip(text, 1800)})

@@ -99,7 +99,9 @@
     const search = !!options.search && !coding;
     const turn = createAssistantTurn();
     if (coding) turn.beginIdle('Исследую исходный код…');
-    else if (search) turn.beginSearch('Поищу в интернете');
+    // Не показываем «Поищу в интернете» заранее: флаг поиска только
+    // разрешает поиск, а решение должен принять агент. Сцену search
+    // сервер отправит после фактического выбора action=search.
     else turn.beginIdle(options.reasoning ? 'Рассуждаю…' : 'Думаю…');
 
     const controller = new AbortController();

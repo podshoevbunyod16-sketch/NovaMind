@@ -221,6 +221,92 @@ def _normalize_and_rank(results, query="", limit=8):
     return ranked[:max(1, min(int(limit), 20))]
 
 
+def _find_exa_mcp_tool():
+    """Найти Exa search tool среди подключённых MCP-серверов."""
+    try:
+        import mcp_registry
+        tools = mcp_registry.connected_tools()
+    except Exception:
+        return None
+    for tool in tools:
+        name = str(tool.get("name") or "").lower()
+        description = str(tool.get("description") or "").lower()
+        exa_marked = bool(re.search(r"\bexa\b", name) or re.search(r"\bexa\b", description))
+        if exa_marked and any(
+                word in f"{name} {description}" for word in ("search", "find", "research")):
+            return tool
+    return None
+
+
+def _find_mcp_search_tool():
+    """Exa first; otherwise use an explicitly named generic MCP web-search tool."""
+    exa = _find_exa_mcp_tool()
+    if exa:
+        return exa
+    try:
+        import mcp_registry
+        tools = mcp_registry.connected_tools()
+    except Exception:
+        return None
+    preferred = {"web_search", "search_with_contents", "search_web", "search"}
+    candidates = []
+    for tool in tools:
+        name = str(tool.get("name") or "").lower()
+        if name in preferred:
+            candidates.append(tool)
+    return candidates[0] if candidates else None
+
+
+def _exa_mcp_arguments(tool, query, limit):
+    schema = tool.get("inputSchema") or {}
+    props = schema.get("properties") or {}
+    query_key = next((key for key in ("query", "searchQuery", "q") if key in props), "query")
+    args = {query_key: query}
+    limit_key = next((key for key in ("numResults", "limit", "maxResults") if key in props), None)
+    if limit_key:
+        args[limit_key] = int(limit)
+    return args
+
+
+def _exa_mcp_results(value):
+    """Извлечь URL-результаты из разных форматов Exa/MCP content."""
+    found = []
+    if isinstance(value, str):
+        try:
+            return _exa_mcp_results(json.loads(value))
+        except (ValueError, TypeError):
+            return []
+    if isinstance(value, list):
+        for item in value:
+            found.extend(_exa_mcp_results(item))
+        return found
+    if not isinstance(value, dict):
+        return []
+    url = value.get("url") or value.get("link")
+    if url:
+        found.append(_norm_result(value.get("title") or value.get("name") or str(url),
+                                  str(url), value.get("snippet") or value.get("text") or
+                                  value.get("summary") or ""))
+    for key in ("results", "items", "data", "content", "result"):
+        if key in value:
+            found.extend(_exa_mcp_results(value[key]))
+    return found
+
+
+def search_web_exa_mcp(query, num=8, tool=None):
+    tool = tool or _find_mcp_search_tool()
+    if not tool:
+        return [], "MCP search не подключён"
+    import mcp_registry
+    result = mcp_registry.call_tool(
+        str(tool.get("server_id") or ""), str(tool.get("name") or ""),
+        _exa_mcp_arguments(tool, query, num))
+    results = _exa_mcp_results(result)
+    if not results:
+        return [], "Exa MCP: пустая выдача"
+    return _normalize_and_rank(results, query, limit=num), None
+
+
 def search_web_apilayer(query, num=8):
     if not APILAYER_KEY:
         return [], "нет ключа APILAYER_KEY"
@@ -600,6 +686,31 @@ def search_web(query, num=8, backends=None, on_progress=None):
         selected_backends.insert(0, "weather")
     trace = []
     first_results = []
+    # Если подключён Exa через MCP Switchboard, используем его первым для
+    # общего веб-поиска. Погодные запросы остаются у Open-Meteo.
+    mcp_search_tool = (None if any(hint in query.lower() for hint in _WEATHER_HINTS)
+                       else _find_mcp_search_tool())
+    if mcp_search_tool:
+        started = time.time()
+        try:
+            results, error = search_web_exa_mcp(query, num, tool=mcp_search_tool)
+        except Exception as exc:
+            results, error = [], f"{exc.__class__.__name__}: {exc}"
+        is_exa = bool(re.search(r"\bexa\b", str(mcp_search_tool.get("name") or "") + " " +
+                               str(mcp_search_tool.get("description") or ""), re.I))
+        entry = {"backend": "exa_mcp" if is_exa else "mcp_search",
+                 "ok": bool(results), "count": len(results),
+                 "ms": int((time.time() - started) * 1000),
+                 "error": None if results else (error or "пусто")}
+        trace.append(entry)
+        if on_progress:
+            try:
+                on_progress(entry)
+            except Exception:
+                pass
+        if results:
+            first_results = results
+            return _normalize_and_rank(first_results, query, limit=num), trace
     for name in selected_backends:
         handler = BACKENDS.get(name)
         if handler is None:
@@ -626,6 +737,8 @@ def search_web(query, num=8, backends=None, on_progress=None):
                 pass
         if results and not first_results:
             first_results = results
+            if mcp_search_tool and results:
+                break
     return _normalize_and_rank(first_results, query, limit=num), trace
 
 # ══════════════════════════════════════════════════════════════════
