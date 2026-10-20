@@ -53,6 +53,8 @@ def complete_with_mcp(messages: list[dict[str, Any]], *, system: str, provider: 
     prompt = system + _tool_prompt(tools)
     history = list(messages)
     events: list[dict[str, Any]] = []
+    last_action = None
+    last_error = None
     for _ in range(max_calls):
         reply, meta = chat_completion(
             history, system=prompt, provider=provider, model=model,
@@ -63,11 +65,17 @@ def complete_with_mcp(messages: list[dict[str, Any]], *, system: str, provider: 
         action = _extract_action(reply)
         if not action or action.get("action") != "mcp_call":
             return reply, meta, events
+        last_action = action
         server_id = str(action.get("server_id") or "").strip()
         tool = str(action.get("tool") or "").strip()
         arguments = action.get("arguments") or {}
         if not server_id or not tool or not isinstance(arguments, dict):
-            return reply, meta, events
+            last_error = "Модель вернула неполный MCP-вызов."
+            history.append({"role": "assistant", "content": reply[:4000]})
+            history.append({"role": "user", "content":
+                            "MCP ERROR: неполный вызов. Не возвращай JSON пользователю; "
+                            "ответь обычным текстом или сформируй корректный mcp_call."})
+            continue
         events.append({"type": "step", "icon": "🔌", "text": f"MCP: {server_id}:{tool}"})
         try:
             result = mcp_registry.call_tool(server_id, tool, arguments)
@@ -75,8 +83,13 @@ def complete_with_mcp(messages: list[dict[str, Any]], *, system: str, provider: 
             events.append({"type": "tool", "name": "mcp_call", "command": f"{server_id}:{tool}", "code": 0})
         except Exception as exc:
             observation = f"MCP error: {exc}"
+            last_error = str(exc)
             events.append({"type": "tool", "name": "mcp_call", "command": f"{server_id}:{tool}", "code": 1})
         history.append({"role": "assistant", "content": reply[:4000]})
         history.append({"role": "user", "content": "MCP TOOL RESULT:\n" + observation[:12000] +
                        "\nNow answer the original user request. If more MCP data is needed, emit another mcp_call JSON; otherwise answer normally."})
+    if last_action:
+        label = f"{last_action.get('server_id')}:{last_action.get('tool')}"
+        detail = f" Причина: {last_error}." if last_error else ""
+        return f"Не удалось выполнить MCP-инструмент {label}.{detail} Попробуйте повторить запрос или проверить подключение MCP-сервера.", {}, events
     return "Не удалось завершить MCP-действие за допустимое число шагов.", {}, events
