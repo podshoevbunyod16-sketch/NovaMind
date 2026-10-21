@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import os
+import secrets
 import threading
 import time
 from collections import deque
@@ -124,6 +125,16 @@ class RateLimiter(_SlidingWindow):
 
 login_limiter = LoginLimiter()
 agent_limiter = RateLimiter()
+
+# Внутренние запуски агента (планировщик, Telegram-бот) идут в том же
+# процессе и не должны съедать лимит пользователя. Отличаем их секретным
+# заголовком: снаружи такой токен не подделать, он живёт только в памяти.
+INTERNAL_RUN_TOKEN = secrets.token_hex(16)
+
+
+def is_internal_run(request) -> bool:
+    """Запрос сделан нашим же процессом (планировщик, бот), а не браузером."""
+    return (request.headers.get("X-Internal-Token") or "") == INTERNAL_RUN_TOKEN
 
 
 def agent_rate_check(request, signed_in: bool, key_suffix: str = ""):

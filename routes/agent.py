@@ -992,8 +992,14 @@ def agent_stream():
     signed = signed_in()
     rate_key = str(session.get("agent_memory_key") or session.get("nova_user_email")
                    or session.get("user_email") or session.get("username") or "")
-    allowed, retry_after, limit, remaining, scope = security.agent_rate_check(
-        request, signed, rate_key)
+    limit, remaining = 0, 0
+    if security.is_internal_run(request):
+        # Планировщик и Telegram-бот работают внутри процесса — их запросы
+        # не должны упираться в лимит браузерного пользователя.
+        allowed = True
+    else:
+        allowed, retry_after, limit, remaining, scope = security.agent_rate_check(
+            request, signed, rate_key)
     if not allowed:
         response = jsonify({
             "error": "Слишком много запросов к агенту. Попробуйте позже.",

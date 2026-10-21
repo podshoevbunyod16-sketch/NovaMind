@@ -241,8 +241,10 @@ def _run_agent_prompt(job):
     import routes.agent as agent_routes
 
     result = {"reply": "", "error": "", "saved": True}
-    with app.test_request_context("/api/agent/stream", method="POST",
-                                  json={"message": job["prompt"]}):
+    import security
+    with app.test_request_context(
+            "/api/agent/stream", method="POST", json={"message": job["prompt"]},
+            headers={"X-Internal-Token": security.INTERNAL_RUN_TOKEN}):
         session["chat_id"] = job["result_chat_id"]
         if job.get("owner"):
             session["nova_user_nick"] = job["owner"]
