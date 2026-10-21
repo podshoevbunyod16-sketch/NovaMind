@@ -813,6 +813,56 @@ function createAssistantTurn(options = {}) {
       scrollToBottom();
     },
 
+    /** Карточка «Разрешить / Отклонить» для опасного шага агента. */
+    confirm(request) {
+      const box = document.createElement('div');
+      box.className = 'agent-confirm';
+      box.dataset.id = request.id || '';
+      const tool = escapeHtml(request.tool || 'действие');
+      const command = escapeHtml(request.command || '');
+      const args = request.args ? escapeHtml(JSON.stringify(request.args, null, 2)) : '';
+      box.innerHTML = `
+        <div class="agent-confirm-head">⚠️ Нужно разрешение <span class="agent-confirm-risk">${escapeHtml(request.risk || 'danger')}</span></div>
+        <div class="agent-confirm-body">
+          <div class="agent-confirm-tool">${tool}</div>
+          ${command ? `<pre class="agent-confirm-cmd">${command}</pre>` : ''}
+          ${args ? `<details class="agent-confirm-args"><summary>Аргументы</summary><pre>${args}</pre></details>` : ''}
+        </div>
+        <div class="agent-confirm-actions">
+          <button type="button" class="ok" data-confirm="yes">Разрешить</button>
+          <button type="button" class="no" data-confirm="no">Отклонить</button>
+          <span class="agent-confirm-note"></span>
+        </div>`;
+      bubble.appendChild(box);
+      const note = box.querySelector('.agent-confirm-note');
+      const decide = (approve) => {
+        box.querySelectorAll('button').forEach((button) => { button.disabled = true; });
+        box.classList.add(approve ? 'is-approved' : 'is-denied');
+        note.textContent = approve ? 'Разрешено — выполняю' : 'Отклонено';
+        fetch('/api/agent/confirm', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id: request.id, approve }),
+        }).then((response) => {
+          if (!response.ok) note.textContent = 'Решение не принято: возможно, время вышло';
+        }).catch(() => { note.textContent = 'Нет связи с сервером'; });
+      };
+      box.querySelector('[data-confirm="yes"]').addEventListener('click', () => decide(true));
+      box.querySelector('[data-confirm="no"]').addEventListener('click', () => decide(false));
+      scrollToBottom();
+      return box;
+    },
+
+    /** Ответ на подтверждение уже обработан сервером (пришёл confirm_result). */
+    confirmResult(event) {
+      const box = bubble.querySelector(`.agent-confirm[data-id="${event.id}"]`);
+      if (!box) return;
+      box.classList.add(event.approved ? 'is-approved' : 'is-denied');
+      box.querySelectorAll('button').forEach((button) => { button.disabled = true; });
+      const note = box.querySelector('.agent-confirm-note');
+      if (note && !note.textContent) note.textContent = event.approved ? 'Разрешено' : 'Отклонено';
+    },
+
     setSources(sources) {
       sourcesData = Array.isArray(sources) ? sources.filter((s) => s && s.url) : [];
       if (!sourcesData.length) return;
@@ -854,6 +904,7 @@ function createAssistantTurn(options = {}) {
       if (meta.searched) bits.push('с поиском');
       if (meta.agent || meta.linux) bits.push('Linux');
       if (meta.steps) bits.push(`шагов: ${meta.steps}`);
+      if (meta.stopped) bits.push('остановлено');
       if (sourcesData.length) bits.push(`источников: ${sourcesData.length}`);
       bits.push(`${seconds} c`);
       metaEl.innerHTML = `<span>${bits.join(' · ')}</span>`;
@@ -1007,6 +1058,9 @@ function setSendBusy(busy) {
 
 function stopGeneration() {
   if (!isTyping) return;
+  // Агент работает на сервере: без run_id он продолжил бы шаги после
+  // закрытия соединения. Поэтому сначала просим его остановиться.
+  if (window.Linux && typeof window.Linux.stopRun === 'function') window.Linux.stopRun();
   if (activeAbort) {
     activeAbort.abort();
     activeAbort = null;

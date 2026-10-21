@@ -1114,6 +1114,35 @@ button, input, select, textarea, .stage, .sources-head, .msg-actions {
   font: inherit; font-size: 10.5px; padding: 3px 8px; border-radius: 7px; cursor: pointer;
 }
 
+/* Карточка подтверждения опасного действия агента */
+.agent-confirm {
+  margin: 10px 0; padding: 11px 13px; border-radius: 12px;
+  border: 1px solid rgba(255, 196, 92, .45); background: rgba(255, 196, 92, .1);
+  font-size: 12.5px;
+}
+.agent-confirm-head { display: flex; align-items: center; gap: 8px; font-weight: 600; }
+.agent-confirm-risk {
+  font-size: 10px; text-transform: uppercase; letter-spacing: .04em; padding: 1px 6px;
+  border-radius: 6px; background: rgba(255, 196, 92, .25); color: #ffd489;
+}
+.agent-confirm-tool { margin-top: 6px; color: var(--txt-dim); font-size: 11.5px; }
+.agent-confirm-cmd, .agent-confirm-args pre {
+  margin: 6px 0 0; padding: 7px 9px; border-radius: 8px; overflow-x: auto;
+  background: rgba(0, 0, 0, .32); font-family: var(--mono, ui-monospace, monospace);
+  font-size: 11.5px; white-space: pre-wrap; overflow-wrap: anywhere;
+}
+.agent-confirm-args summary { cursor: pointer; margin-top: 6px; color: var(--txt-dim); font-size: 11.5px; }
+.agent-confirm-actions { display: flex; align-items: center; gap: 8px; margin-top: 9px; }
+.agent-confirm-actions button {
+  font: inherit; font-size: 12px; padding: 5px 12px; border-radius: 8px; cursor: pointer;
+  border: 1px solid rgba(255, 255, 255, .2); background: transparent; color: inherit;
+}
+.agent-confirm-actions button.ok { border-color: rgba(93, 214, 154, .5); background: rgba(93, 214, 154, .16); }
+.agent-confirm-actions button.no { border-color: rgba(255, 118, 118, .5); background: rgba(255, 118, 118, .12); }
+.agent-confirm-actions button:disabled { opacity: .55; cursor: default; }
+.agent-confirm-note { font-size: 11px; color: var(--txt-dim); }
+.agent-confirm.is-approved { border-color: rgba(93, 214, 154, .45); background: rgba(93, 214, 154, .08); }
+.agent-confirm.is-denied { border-color: rgba(255, 118, 118, .4); background: rgba(255, 118, 118, .07); }
 
 @media (max-width: 860px) {
   .code-acts button { font-size: 11px; padding: 5px 8px; }

@@ -301,6 +301,216 @@ _UNSUPPORTED_TOOLS_HINTS = (
 )
 
 
+# ── запуски и кнопка «Стоп» ────────────────────────────────────────
+# Каждый ход агента получает run_id. POST /api/agent/stop взводит
+# threading.Event, цикл проверяет его перед каждым шагом, а shell-цепочка
+# снимает свои процессы по этому же флагу.
+_ACTIVE_RUNS: dict = {}
+_RUNS_LOCK = threading.Lock()
+
+
+def register_run(run_id=None):
+    """Регистрирует запуск и возвращает (run_id, cancel_event)."""
+    import uuid
+    run_id = run_id or uuid.uuid4().hex
+    cancel = threading.Event()
+    with _RUNS_LOCK:
+        now = time.time()
+        for stale in [key for key, item in _ACTIVE_RUNS.items()
+                      if now - item["started"] > max(AGENT_TIMEOUT * 2, 600)]:
+            _ACTIVE_RUNS.pop(stale, None)
+        _ACTIVE_RUNS[run_id] = {"cancel": cancel, "started": now}
+    return run_id, cancel
+
+
+def cancel_agent_run(run_id) -> bool:
+    """Просит агента остановиться. False — такого запуска нет."""
+    with _RUNS_LOCK:
+        record = _ACTIVE_RUNS.get(str(run_id or "").strip())
+    if record is None:
+        return False
+    record["cancel"].set()
+    return True
+
+
+def finish_run(run_id):
+    with _RUNS_LOCK:
+        _ACTIVE_RUNS.pop(str(run_id or ""), None)
+
+
+def _partial_answer(state) -> str:
+    """Что уже успели найти — для ответа после остановки."""
+    items = _note_items(state)
+    if not items:
+        return ""
+    label, text = items[-1]
+    return f"Успел собрать ({label}):\n\n{clip(text, 900)}"
+
+
+# ── подтверждение опасных действий ─────────────────────────────────
+# Опасный шаг агент не выполняет сам: он ставит ход на паузу, присылает в
+# поток событие confirm и ждёт POST /api/agent/confirm. Нет ответа за
+# AGENT_CONFIRM_TIMEOUT секунд — считаем отказом.
+CONFIRM_TIMEOUT = float(os.getenv("AGENT_CONFIRM_TIMEOUT", "120"))
+CONFIRM_MODE = os.getenv("AGENT_CONFIRM", "danger")     # danger | write | off
+
+_PENDING_CONFIRMS: dict = {}
+_CONFIRM_LOCK = threading.Lock()
+
+# Команды терминала, которые меняют внешний мир или необратимы.
+DANGER_COMMAND_HINTS = (
+    "git push", "git commit", "git reset", "git clean", "git checkout",
+    "pip install", "pip3 install", "npm install", "npm i ", "apt install",
+    "apt-get install", "pkg install", "rm ", "rmdir", "mv ", "dd ", "chmod ",
+    "chown ", "curl -x post", "wget --post", "> /etc", "sudo ",
+)
+
+# Слова в имени MCP-инструмента, означающие отправку/изменение данных.
+DANGER_MCP_HINTS = ("send", "create", "update", "delete", "remove", "post",
+                    "publish", "commit", "write", "merge", "close", "archive",
+                    "отправ", "созда", "измен", "удал", "опублик")
+
+_DENIED_OBSERVATION = (
+    "ПОЛЬЗОВАТЕЛЬ ОТКЛОНИЛ действие «{kind}». Не выполняй его повторно и не "
+    "пытайся обойти запрет. Объясни, что действие не выполнено, и предложи "
+    "безопасную альтернативу или попроси уточнение."
+)
+
+
+def action_risk(kind, action) -> str:
+    """Фактический риск конкретного действия: safe | write | danger.
+
+    Реестр даёт базовый риск инструмента, но `run` и `mcp_call` зависят от
+    содержимого: `ls` безопасен, `pip install` — нет.
+    """
+    base = native_tool_risk(kind)
+    kind = str(kind or "")
+    if base == "danger" and kind != "mcp_call":
+        return "danger"
+    if kind == "run":
+        command = str(action.get("command") or "").lower()
+        if any(hint in command for hint in DANGER_COMMAND_HINTS):
+            return "danger"
+        return "write"
+    if kind == "mcp_call":
+        tool = str(action.get("tool") or "").lower()
+        server = str(action.get("server_id") or "").lower()
+        text = f"{server} {tool}"
+        if any(hint in text for hint in DANGER_MCP_HINTS):
+            return "danger"
+        # Неизвестный MCP-инструмент считаем изменяющим: лучше спросить.
+        return "danger"
+    return base if base in ("safe", "write", "danger") else "safe"
+
+
+def confirmation_needed(kind, action, state=None) -> bool:
+    """Нужно ли спросить разрешение перед этим действием."""
+    if str(kind) in ("answer", "plan"):
+        return False
+    mode = os.getenv("AGENT_CONFIRM", CONFIRM_MODE)
+    if mode == "off":
+        return False
+    risk = action_risk(kind, action)
+    if risk == "danger":
+        pass
+    elif risk == "write" and mode == "write":
+        pass
+    else:
+        return False
+    if state is not None and _action_key(action, kind) in state.get("approved", set()):
+        return False        # этот шаг уже разрешался в текущем ходе
+    return True
+
+
+def describe_action(kind, action) -> str:
+    """Точная команда/аргументы — их показывает карточка подтверждения."""
+    kind = str(kind or "")
+    if kind == "run":
+        return str(action.get("command") or "")
+    if kind == "git":
+        return "git " + str(action.get("command") or "")
+    if kind == "mcp_call":
+        return f"{action.get('server_id')}:{action.get('tool')} " + json.dumps(
+            action.get("arguments") or {}, ensure_ascii=False)[:400]
+    if kind in ("write", "read"):
+        return str(action.get("path") or "")
+    return json.dumps({k: v for k, v in action.items() if k not in ("action", "thought")},
+                      ensure_ascii=False)[:400]
+
+
+def register_confirmation(kind, action, state=None) -> dict:
+    """Регистрирует ожидание подтверждения и возвращает запись с id."""
+    import uuid
+    confirm_id = uuid.uuid4().hex
+    record = {
+        "id": confirm_id,
+        "tool": str(kind),
+        "risk": action_risk(kind, action),
+        "command": describe_action(kind, action),
+        "args": {k: v for k, v in action.items() if k not in ("action", "thought")},
+        "created_at": time.time(),
+        "event": threading.Event(),
+        "approved": False,
+        "resolved": False,
+    }
+    with _CONFIRM_LOCK:
+        _PENDING_CONFIRMS[confirm_id] = record
+    if state is not None:
+        state.setdefault("confirmations", []).append(record)
+    return record
+
+
+def resolve_confirmation(confirm_id, approve):
+    """Решение пользователя. Возвращает (ok, причина)."""
+    confirm_id = str(confirm_id or "").strip()
+    with _CONFIRM_LOCK:
+        record = _PENDING_CONFIRMS.get(confirm_id)
+        if record is None:
+            return False, "not_found"
+        if record.get("resolved"):
+            return False, "already_resolved"
+        record["resolved"] = True
+        record["approved"] = bool(approve)
+    record["event"].set()
+    return True, ""
+
+
+def confirm_timeout() -> float:
+    """Сколько ждём ответа пользователя (читается в момент вызова)."""
+    try:
+        return float(os.getenv("AGENT_CONFIRM_TIMEOUT", CONFIRM_TIMEOUT))
+    except (TypeError, ValueError):
+        return CONFIRM_TIMEOUT
+
+
+def await_confirmation(record, timeout=None) -> bool:
+    """Ждёт решения пользователя; таймаут = отказ."""
+    if record is None:
+        return False
+    timeout = confirm_timeout() if timeout is None else float(timeout)
+    approved = record["event"].wait(timeout) and bool(record.get("approved"))
+    with _CONFIRM_LOCK:
+        _PENDING_CONFIRMS.pop(record["id"], None)
+    return approved
+
+
+def _perform_guarded(action, kind, use_tools, state, goal="", cancel=None):
+    """Выполняет действие, спрашивая разрешение на опасные шаги."""
+    if action.get("_confirmed") is not True and confirmation_needed(kind, action, state):
+        record = register_confirmation(kind, action, state)
+        yield _ndjson({"type": "confirm", "id": record["id"], "tool": record["tool"],
+                       "risk": record["risk"], "command": record["command"],
+                       "args": record["args"], "timeout": confirm_timeout()})
+        approved = await_confirmation(record)
+        yield _ndjson({"type": "confirm_result", "id": record["id"], "approved": approved})
+        if not approved:
+            yield _ndjson({"type": "step", "icon": "🚫",
+                           "text": f"Действие отклонено: {record['command'][:120]}"})
+            return _DENIED_OBSERVATION.format(kind=kind)
+        state.setdefault("approved", set()).add(_action_key(action, kind))
+    return (yield from _perform(action, kind, use_tools, state, goal=goal, cancel=cancel))
+
+
 def native_tools_available(provider, model, tools) -> bool:
     """Стоит ли пробовать нативный tool calling в этом запросе."""
     if not NATIVE_TOOLS_ENABLED or not tools:
@@ -627,6 +837,42 @@ def agent_status():
     })
 
 
+@agent_bp.route("/api/agent/stop", methods=["POST"])
+def agent_stop():
+    """Кнопка «Стоп»: {run_id}. Цикл прервётся после текущего шага."""
+    data = request.get_json(silent=True) or {}
+    run_id = str(data.get("run_id") or "").strip()
+    if not run_id:
+        return jsonify({"ok": False, "error": "Нужен run_id"}), 400
+    if not cancel_agent_run(run_id):
+        return jsonify({"ok": False, "run_id": run_id,
+                        "error": "Запуск не найден или уже завершён"}), 404
+    return jsonify({"ok": True, "run_id": run_id, "stopped": True})
+
+
+@agent_bp.route("/api/agent/confirm", methods=["POST"])
+def agent_confirm():
+    """Разрешение/отклонение опасного шага агента.
+
+    {"id": "...", "approve": true|false}. Ответ приходит ровно один раз:
+    повторное подтверждение того же id считается ошибкой (409), чтобы
+    одно нажатие не выполняло действие дважды.
+    """
+    data = request.get_json(silent=True) or {}
+    confirm_id = str(data.get("id") or "").strip()
+    approve = data.get("approve")
+    if not confirm_id:
+        return jsonify({"ok": False, "error": "Нужен id подтверждения"}), 400
+    if not isinstance(approve, bool):
+        return jsonify({"ok": False, "error": "Поле approve должно быть true/false"}), 400
+    ok, reason = resolve_confirmation(confirm_id, approve)
+    if not ok:
+        message = ("Подтверждение уже обработано" if reason == "already_resolved"
+                   else "Подтверждение не найдено или истекло")
+        return jsonify({"ok": False, "id": confirm_id, "error": message}), 409
+    return jsonify({"ok": True, "id": confirm_id, "approved": approve})
+
+
 @agent_bp.route("/api/agent/stream", methods=["POST"])
 def agent_stream():
     """Агентный цикл: план → инструменты → ответ. NDJSON."""
@@ -669,6 +915,8 @@ def agent_stream():
         # В этом запросе модель физически не получает web/shell/file schemas.
         available_schemas = [item for item in available_schemas if item.get("name") == "mcp_call"]
 
+    run_id, cancel_run = register_run()
+
     @stream_with_context
     def generate():
         started = time.time()
@@ -677,7 +925,7 @@ def agent_stream():
                  "research": 0, "searched": bool(data.get("search")), "tool_steps": 0,
                  "media_context": [], "media": [], "media_markers": [],
                  "workspace_used": False, "tools_used": [], "media_tried": False,
-                 "media_error": ""}
+                 "media_error": "", "stopped": False, "approved": set(), "run_id": run_id}
 
 
         # 1. Один первый запрос: простой вопрос получает обычный ответ без лишнего plan/stage.
@@ -727,7 +975,7 @@ def agent_stream():
         # обращения к модели, чтобы кнопка работала даже если модель решила
         # ответить по памяти.
         if data.get("search") and not strict_mcp:
-            observation = yield from _forced_search(goal, state, use_tools)
+            observation = yield from _forced_search(goal, state, use_tools, cancel=cancel_run)
             history.append({"role": "user", "content": observation})
 
         pending_raw = None          # ответ быстрого запроса, если это действие/план
@@ -767,8 +1015,9 @@ def agent_stream():
                                "sources": [], "searched": False, "media": [],
                                "linux": False, "tools": [],
                                "offline": provider == "local_demo", "fast": True,
-                               "chat_id": chat_id})
+                               "chat_id": chat_id, "run_id": run_id})
                 yield _ndjson({"type": "done"})
+                finish_run(run_id)
                 return
             # Модель захотела инструмент или прислала план — не выбрасываем
             # этот ответ и не тратим второй запрос: отдаём его циклу как первый шаг.
@@ -803,6 +1052,10 @@ def agent_stream():
         limit_reached = False
         pending_native = []          # остальные tool_calls из одного ответа
         for step in range(1, MAX_STEPS + 4):
+            if cancel_run.is_set():
+                state["stopped"] = True
+                yield _ndjson({"type": "step", "icon": "⏹", "text": "Остановлено пользователем"})
+                break
             if time.time() - started > AGENT_TIMEOUT:
                 yield _ndjson({"type": "step", "icon": "⏱", "text": "Время вышло — собираю ответ"})
                 break
@@ -955,7 +1208,8 @@ def agent_stream():
                 if strict_mcp and kind not in ("mcp_call", "answer", "plan"):
                     observation = "MCP_ONLY: действие запрещено. Используй только mcp_call."
                 else:
-                    observation = yield from _perform(action, kind, use_tools, state, goal=goal)
+                    observation = yield from _perform_guarded(action, kind, use_tools, state,
+                                                               goal=goal, cancel=cancel_run)
             else:
                 seen.add(key)
                 if strict_mcp and kind not in ("mcp_call", "answer", "plan"):
@@ -966,9 +1220,15 @@ def agent_stream():
                     yield _ndjson({"type": "tool", "name": kind, "command": "blocked", "code": 1,
                                    "output": observation})
                 else:
-                    observation = yield from _perform(action, kind, use_tools, state, goal=goal)
+                    observation = yield from _perform_guarded(action, kind, use_tools, state,
+                                                               goal=goal, cancel=cancel_run)
 
             outcomes[key] = observation
+
+            if cancel_run.is_set():
+                state["stopped"] = True
+                yield _ndjson({"type": "step", "icon": "⏹", "text": "Остановлено пользователем"})
+                break
 
             if kind == "answer":
                 state["answer"] = str(action.get("text") or "").strip()
@@ -1000,7 +1260,11 @@ def agent_stream():
             yield _ndjson({"type": "step", "icon": "⏹", "text": "Шаги закончились — готовлю итог"})
 
         # 3. Нет ответа (лимит шагов, таймаут, повторы, сбой) — собираем его по найденному
-        if not state["answer"] and (use_tools or state["notes"]):
+        if state.get("stopped"):
+            # Останавливаться нужно быстро: без нового запроса к модели.
+            partial = _partial_answer(state)
+            state["answer"] = ("⏹ Остановлено пользователем." + (f"\n\n{partial}" if partial else ""))
+        if not state["answer"] and (use_tools or state["notes"]) and not state.get("stopped"):
             yield _ndjson({"type": "step", "icon": "✍️", "text": "Готовлю ответ по найденному"})
             try:
                 state["answer"] = _synthesize(goal, state, provider, model)
@@ -1071,11 +1335,17 @@ def agent_stream():
                        # «окружение включено». Иначе картинка помечалась «Linux».
                        "linux": bool(state["workspace_used"]),
                        "tools": state["tools_used"],
-                       "offline": provider == "local_demo", "chat_id": chat_id})
+                       "offline": provider == "local_demo", "chat_id": chat_id,
+                       "run_id": run_id, "stopped": bool(state.get("stopped")),
+                       "status": "stopped" if state.get("stopped") else "ok"})
         yield _ndjson({"type": "done"})
+        finish_run(run_id)
 
     return Response(generate(), mimetype="application/x-ndjson",
-                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no",
+                             # Кнопка «Стоп» берёт run_id отсюда и присылает его
+                             # в POST /api/agent/stop.
+                             "X-Agent-Run-Id": run_id})
 
 
 def _ndjson(payload):
@@ -1157,7 +1427,7 @@ def _verify_action(kind, observation):
     return {"ok": True, "message": "Результат инструмента получен и принят."}
 
 
-def _forced_search(goal, state, use_tools):
+def _forced_search(goal, state, use_tools, cancel=None):
     """Поиск, который запускает кнопка «Поиск».
 
     Кнопка раньше только добавляла подсказку в промпт: если модель решала
@@ -1167,6 +1437,8 @@ def _forced_search(goal, state, use_tools):
     """
     yield _ndjson({"type": "stage", "scene": "search", "title": "Поиск в интернете",
                    "text": "Ищу источники по запросу…"})
+    if cancel is not None and cancel.is_set():
+        return "Остановлено пользователем: поиск не выполнялся."
     results, meta = nova_search(goal, limit=3)
     results = results or []
     state["searched"] = True
@@ -1188,6 +1460,9 @@ def _forced_search(goal, state, use_tools):
 
     pages = []
     for item in results[:3]:
+        if cancel is not None and cancel.is_set():
+            state["stopped"] = True
+            break
         url = str(item.get("url") or "")
         if not url.startswith(("http://", "https://")):
             continue
@@ -1242,7 +1517,7 @@ def _offline_sources_answer(goal, state):
         lines.append(f"{index}. [{title}]({item['url']})")
     if state["notes"]:
         lines.append("\n**Что удалось прочитать:**")
-        for label, text in state["notes"][-3:]:
+        for label, text in _note_items(state)[-3:]:
             snippet = " ".join(str(text).split())[:400]
             lines.append(f"- _{label}_: {snippet}")
     lines.append("\nЧтобы получить связный ответ, подключите модель (ключ в `.env` "
@@ -1317,13 +1592,19 @@ def _nudge(state, remaining):
     return ""
 
 
-def _perform(action, kind, use_tools, state, goal=""):
+def _perform(action, kind, use_tools, state, goal="", cancel=None):
     """Одно действие агента.
 
     Генератор: отдаёт события потока (шаги, вывод команд, задачи) и
     возвращает наблюдение, которое уходит обратно в модель.
+
+    `cancel` — флаг кнопки «Стоп»: проверяется перед долгими операциями
+    (поиск, shell), а shell снимает свои дочерние процессы.
     """
     import database
+
+    if cancel is not None and cancel.is_set():
+        return "Остановлено пользователем: действие не выполнялось."
 
     if kind == "skill_create":
         import skills_registry
@@ -1459,7 +1740,11 @@ def _perform(action, kind, use_tools, state, goal=""):
         # Use the same function as the terminal/UI search. This keeps one
         # internet-search implementation (httpx + BeautifulSoup4) and makes source
         # collection deterministic for agent actions.
+        if cancel is not None and cancel.is_set():
+            return "Остановлено пользователем: поиск не выполнялся."
         results, search_meta = nova_search(query, limit=3)
+        if cancel is not None and cancel.is_set():
+            return "Остановлено пользователем: поиск прерван."
         results = results or []
         trace = search_meta.get("trace") or []
         text = "\n".join(
@@ -1569,7 +1854,7 @@ def _perform(action, kind, use_tools, state, goal=""):
     else:
         return f"Неизвестное действие: {kind}. Ответь пользователю."
 
-    result = call_tool("shell", command=command, timeout=STEP_TIMEOUT)
+    result = call_tool("shell", command=command, timeout=STEP_TIMEOUT, cancel=cancel)
     raw_code = result.get("exit_code", result.get("code"))
     result["code"] = int(-1 if raw_code is None else raw_code)
     stdout = str(result.get("stdout") or "")

@@ -5,7 +5,7 @@
 (() => {
   'use strict';
 
-  const state = { status: null, ready: null };
+  const state = { status: null, ready: null, runId: '' };
 
   function notify(message, kind) {
     if (typeof window.showNotification === 'function') window.showNotification(message, kind);
@@ -116,6 +116,7 @@
         body: JSON.stringify({ message, search, reasoning: !!options.reasoning }),
         signal: controller.signal,
       });
+      state.runId = response.headers.get('X-Agent-Run-Id') || '';
       if (!response.ok) {
         if ((response.status === 403 || response.status === 404) && !coding) {
           turn.remove();
@@ -137,6 +138,8 @@
           case 'plan': turn.plan(event.text); break;
           case 'step': turn.step(event.icon, event.text); break;
           case 'tool': turn.tool(event); break;
+          case 'confirm': if (turn.confirm) turn.confirm(event); break;
+          case 'confirm_result': if (turn.confirmResult) turn.confirmResult(event); break;
           case 'task': turn.taskChip(event.task); break;
           case 'media': turn.addMedia(event.media || {}); break;
           case 'sources': turn.setSources(event.sources || []); break;
@@ -160,6 +163,7 @@
         offline: result.offline,
         searched: result.searched,
         steps: result.steps,
+        stopped: !!result.stopped,
         linux: coding ? false : (result.linux === undefined ? (result.steps > 0 || result.searched) : !!result.linux),
       });
     } catch (error) {
@@ -167,7 +171,7 @@
       if (error.name === 'AbortError') {
         turn.collapseStage();
         turn.appendText(turn.text || '_Остановлено._');
-        turn.finish({ model: result.model });
+        turn.finish({ model: result.model, stopped: true });
       } else {
         turn.fail(error.message || 'ИИ недоступен');
       }
@@ -207,7 +211,20 @@
     window.sendMessage(`${prompt}\n\n\`\`\`${lang}\n${text}\n\`\`\``);
   }
 
-  window.Linux = { state, init, loadStatus, runTurn, isAvailable, hasLinux };
+  /** Кнопка «Стоп»: сервер прекращает шаги по run_id. */
+  async function stopRun() {
+    const runId = state.runId;
+    if (!runId) return false;
+    state.runId = '';
+    try {
+      await getJson('/api/agent/stop', { method: 'POST', body: JSON.stringify({ run_id: runId }) });
+      return true;
+    } catch (_) {
+      return false;      // запуск уже завершился — это нормально
+    }
+  }
+
+  window.Linux = { state, init, loadStatus, runTurn, isAvailable, hasLinux, stopRun };
 
   function boot() {
     const chat = document.getElementById('chatContainer');

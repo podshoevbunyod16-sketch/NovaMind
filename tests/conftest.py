@@ -23,6 +23,9 @@ def isolated_env(tmp_path, monkeypatch):
     """Каждый тест: чистые ключи, своя папка медиа, свои runtime-настройки."""
     for var in KEY_VARS:
         monkeypatch.delenv(var, raising=False)
+    # Подтверждение опасных действий в тестах не ждёт 120 секунд:
+    # тест, которому нужен таймаут, выставляет своё значение сам.
+    monkeypatch.setenv("AGENT_CONFIRM_TIMEOUT", "0.05")
 
     import media_generation as mg
     media_dir = tmp_path / "generated_media"

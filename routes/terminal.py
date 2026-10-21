@@ -454,12 +454,16 @@ def _sandbox_env():
     }
 
 
-def run_command(command, timeout=None):
+def run_command(command, timeout=None, cancel=None):
     """Выполняет команду в песочнице. Поддерживаются пайпы и «>»/«>>».
 
     Каждый сегмент цепочки проверяется отдельно; пользователь получает
     вывод последней команды, файлы перенаправления создаются только
     внутри workspace.
+
+    `cancel` — threading.Event кнопки «Стоп»: как только он взведён,
+    вся цепочка процессов снимается (SIGKILL по группе), а результат
+    помечается как отменённый.
     """
     prepared, redirects = check_command(command)
     ensure_workspace()
@@ -480,6 +484,19 @@ def run_command(command, timeout=None):
                 os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
             except (ProcessLookupError, PermissionError, OSError):
                 proc.kill()
+
+    cancelled = {"value": False}
+    watcher = None
+    if cancel is not None:
+        def watch_cancel():
+            # Ждём флаг отмены и снимаем цепочку, не дожидаясь таймаута.
+            while not cancel.wait(0.2):
+                if not processes:
+                    continue
+            cancelled["value"] = True
+            kill_all()
+        watcher = threading.Thread(target=watch_cancel, daemon=True)
+        watcher.start()
 
     try:
         # Сначала открываем файлы перенаправления — если путь неверный,
@@ -547,6 +564,8 @@ def run_command(command, timeout=None):
         finally:
             timer.cancel()
     finally:
+        if watcher is not None:
+            watcher.join(timeout=0.5)
         for handle in handles:
             try:
                 handle.close()
@@ -568,15 +587,17 @@ def run_command(command, timeout=None):
         "stderr": decode(stderr),
         "duration_ms": int((time.time() - started) * 1000),
         "timed_out": timed_out,
+        "cancelled": bool(cancelled["value"]),
     }
 
 
-def run_agent(command, timeout=12):
+def run_agent(command, timeout=12, cancel=None):
     """Запуск команды агентом: короче таймаут, всегда с префиксом ошибки."""
     try:
-        return run_command(command, timeout=timeout)
+        return run_command(command, timeout=timeout, cancel=cancel)
     except (ValueError, RuntimeError) as exc:
-        return {"code": 2, "stdout": "", "stderr": str(exc), "duration_ms": 0, "timed_out": False}
+        return {"code": 2, "stdout": "", "stderr": str(exc), "duration_ms": 0,
+                "timed_out": False, "cancelled": False}
 
 
 # ───────────────────────── маршруты ─────────────────────────

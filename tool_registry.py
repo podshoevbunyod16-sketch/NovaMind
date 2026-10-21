@@ -203,8 +203,8 @@ def bootstrap_default_tools():
         register_tool(ToolSpec(
             "shell", "Run a policy-checked command inside the workspace.",
             {"type":"object","properties":{"command":{"type":"string"},"timeout":{"type":"number"}},"required":["command"]},
-            lambda command, timeout=12: _workspace_guard() or _shell_result(
-                run_agent(command, timeout=min(float(timeout),30))),
+            lambda command, timeout=12, cancel=None: _workspace_guard() or _shell_result(
+                run_agent(command, timeout=min(float(timeout),30), cancel=cancel)),
             permissions=("workspace",), timeout=30, risk="write"))
     if get_tool("file_read") is None:
         from routes.terminal import safe_path
