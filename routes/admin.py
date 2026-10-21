@@ -75,15 +75,36 @@ def auth_google_callback():
 
 @admin_bp.route('/api/admin/login', methods=['POST'])
 def admin_login():
+    """Вход в админку с защитой от перебора.
+
+    5 неудачных попыток за 10 минут — блок отдельно по IP и по аккаунту
+    (настраивается ADMIN_LOGIN_MAX_ATTEMPTS / ADMIN_LOGIN_WINDOW).
+    """
+    import security
+
     data = request.get_json() or {}
-    username = data.get('username', 'admin').strip()
+    username = (data.get('username') or 'admin').strip()
     code = data.get('code', '').strip()
+    ip_key = 'login_ip:' + security.client_ip(request)
+    user_key = 'login_user:' + username
 
-    if username not in ADMIN_CREDENTIALS:
-        return jsonify({'success': False, 'error': 'Неверный логин'})
-    if ADMIN_CREDENTIALS[username] != code:
-        return jsonify({'success': False, 'error': 'Неверный код'})
+    allowed, retry_after, _blocked = security.login_limiter.blocked(ip_key, user_key)
+    if not allowed:
+        minutes = max(1, retry_after // 60 + (1 if retry_after % 60 else 0))
+        response = jsonify({
+            'success': False,
+            'error': f'Слишком много попыток входа. Повторите через {minutes} мин.',
+            'retry_after': retry_after,
+        })
+        response.headers['Retry-After'] = str(retry_after)
+        return response, 429
 
+    if username not in ADMIN_CREDENTIALS or ADMIN_CREDENTIALS[username] != code:
+        security.login_limiter.fail(ip_key, user_key)
+        error = 'Неверный логин' if username not in ADMIN_CREDENTIALS else 'Неверный код'
+        return jsonify({'success': False, 'error': error})
+
+    security.login_limiter.succeed(ip_key, user_key)
     session['admin_logged_in'] = True
     session['admin_username'] = username
     return jsonify({'success': True, 'username': username})

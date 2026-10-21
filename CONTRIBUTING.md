@@ -118,11 +118,13 @@ pytest tests/
 # Локально всё тестируем
 python app.py
 
-# Проверяй в браузере
-http://localhost:5000
+# Адрес берётся из SITE_URL (.env), по умолчанию http://localhost:5000
+echo "$SITE_URL"        # → http://localhost:5000
 
 # Тестируй API
-curl -X POST http://localhost:5000/api/chat -d '{"message":"test"}'
+curl -X POST "$SITE_URL/api/chat" \
+  -H "Content-Type: application/json" \
+  -d '{"message":"test"}'
 ```
 
 ### 4️⃣ Комит

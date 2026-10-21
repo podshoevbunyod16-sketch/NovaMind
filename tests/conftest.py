@@ -41,7 +41,15 @@ def isolated_env(tmp_path, monkeypatch):
     import groq_rotation
     monkeypatch.setattr(groq_rotation, "GROQ_KEYS", [], raising=False)
 
+    # Счётчики частоты живут в памяти процесса — каждый тест начинает с нуля.
+    import security
+    security.login_limiter.clear()
+    security.agent_limiter.clear()
+
     yield
+
+    security.login_limiter.clear()
+    security.agent_limiter.clear()
 
     config.save_selected_media_model({})
     mg.reset_catalog_cache()
