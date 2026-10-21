@@ -119,20 +119,24 @@ def split_message(text, limit=MAX_MESSAGE):
 
 def confirm_keyboard(confirm_id: str) -> dict:
     """Кнопки подтверждения опасного шага."""
-    return {"inline_keyboard": [[
-        {"text": "✅ Разрешить", "callback_data": f"confirm:{confirm_id}:yes"},
-        {"text": "🚫 Отклонить", "callback_data": f"confirm:{confirm_id}:no"},
-    ]]}
+    return {"inline_keyboard": [
+        [{"text": "✅ Разрешить", "callback_data": f"confirm:{confirm_id}:yes"},
+         {"text": "✅ Всегда", "callback_data": f"confirm:{confirm_id}:always"}],
+        [{"text": "🚫 Отклонить", "callback_data": f"confirm:{confirm_id}:no"}],
+    ]}
 
 
 def parse_callback(data: str):
-    """'confirm:<id>:yes' → (id, True). Иначе (None, None)."""
+    """'confirm:<id>:yes' → (id, True, False); ':always' → (id, True, True).
+
+    Неизвестное действие → (None, None, None).
+    """
     parts = str(data or "").split(":")
     if len(parts) != 3 or parts[0] != "confirm":
-        return None, None
-    if parts[2] not in ("yes", "no"):
-        return None, None
-    return parts[1], parts[2] == "yes"
+        return None, None, None
+    if parts[2] not in ("yes", "no", "always"):
+        return None, None, None
+    return parts[1], parts[2] in ("yes", "always"), parts[2] == "always"
 
 
 # ══════════════ чат пользователя ══════════════
@@ -262,16 +266,19 @@ class Bridge:
     # ── подтверждения ──
     def handle_callback(self, callback):
         data = callback.get("data") or ""
-        confirm_id, approve = parse_callback(data)
+        confirm_id, approve, always = parse_callback(data)
         callback_id = callback.get("id")
         if not confirm_id:
             self.api("answerCallbackQuery", callback_query_id=callback_id,
                      text="Неизвестное действие")
             return False
         import routes.agent as agent_routes
-        ok, reason = agent_routes.resolve_confirmation(confirm_id, approve)
+        ok, reason = agent_routes.resolve_confirmation(confirm_id, approve, always=always)
         if ok:
-            text = "Разрешено — выполняю" if approve else "Отклонено"
+            if approve and always:
+                text = "Разрешено всегда — выполняю"
+            else:
+                text = "Разрешено — выполняю" if approve else "Отклонено"
         elif reason == "already_resolved":
             text = "Решение уже принято"
         else:

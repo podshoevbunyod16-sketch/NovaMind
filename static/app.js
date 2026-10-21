@@ -507,7 +507,7 @@ async function pollMediaJob(jobId, card) {
 //
 // Жизненный цикл:
 //   beginIdle() / beginSearch() → сцена и шаги
-//   reasoningToken()            → панель рассуждений
+//   reasoningToken()            → рассуждение внутри блока шагов
 //   collapseStage()             → сцена схлопывается при первом токене
 //   appendToken()/appendText()  → печатающийся ответ
 //   setSources()                → источники внизу пузыря
@@ -699,7 +699,7 @@ function createAssistantTurn(options = {}) {
       box.innerHTML = `
         <button type="button" class="agent-term-head" aria-expanded="false">
           <span class="agent-term-ico">⌨️</span>
-          <span class="agent-term-title">${window.Linux && window.Linux.hasLinux && !window.Linux.hasLinux() ? 'Шаги ИИ' : 'Работа в Linux'}</span>
+          <span class="agent-term-title">Шаги ИИ</span>
           <span class="agent-term-meta"></span>
           <span class="caret">▼</span>
         </button>
@@ -730,7 +730,8 @@ function createAssistantTurn(options = {}) {
       if (!meta) return;
       const rows = box.querySelectorAll('.agent-term-row').length;
       const confirms = box.querySelectorAll('.agent-confirm').length;
-      const count = rows + confirms;
+      const reasons = box.querySelectorAll('.agent-term-reason').length;
+      const count = rows + confirms + reasons;
       const failed = box.querySelectorAll('.agent-term-row.is-error').length;
       const pending = box.querySelectorAll('.agent-confirm:not(.is-approved):not(.is-denied)').length;
       const n10 = count % 10, n100 = count % 100;
@@ -753,6 +754,12 @@ function createAssistantTurn(options = {}) {
       const command = event.command || '';
       if (!command) return;
       const box = api.ensureTerm();
+      // Блок появляется ещё на рассуждении; «Работа в Linux» — только когда
+      // реально выполнилась команда в окружении.
+      if (window.Linux && window.Linux.hasLinux && window.Linux.hasLinux()) {
+        const title = box.querySelector('.agent-term-title');
+        if (title) title.textContent = 'Работа в Linux';
+      }
       const failed = Number(event.code) !== 0;
       const row = document.createElement('div');
       row.className = `agent-term-row${failed ? ' is-error' : ''}`;
@@ -828,27 +835,29 @@ function createAssistantTurn(options = {}) {
       scrollToBottom();
     },
 
+    /**
+     * Рассуждение модели — строка внутри блока шагов, а не панель в чате.
+     * Свёрнута: пользователь раскрывает её сам, ответу она не мешает.
+     */
     reasoningToken(token) {
       if (!token) return;
       reasoningText += token;
       if (!reasoningBox) {
-        reasoningBox = document.createElement('div');
-        reasoningBox.className = 'reasoning';          // свёрнуто, пока пользователь сам не откроет
+        const term = api.ensureTerm();
+        api.setTermOpen(term, true);
+        reasoningBox = document.createElement('details');
+        reasoningBox.className = 'agent-term-reason';
         reasoningBox.innerHTML = `
-          <div class="reasoning-head">
-            <svg class="reasoning-brain" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <path d="M9.5 2A2.5 2.5 0 0 0 7 4.5v.5a2.5 2.5 0 0 0-2 4.4A2.5 2.5 0 0 0 6.5 14a2.5 2.5 0 0 0 3 3.9V19a2.5 2.5 0 0 0 5 0v-1.1A2.5 2.5 0 0 0 17.5 14a2.5 2.5 0 0 0 1.5-4.6A2.5 2.5 0 0 0 17 5v-.5A2.5 2.5 0 0 0 14.5 2z"/>
-            </svg>
+          <summary>
+            <span class="agent-term-reason-ico">🧠</span>
             <span>Рассуждение</span>
             <span class="caret">▶</span>
-          </div>
-          <div class="reasoning-body"><div class="reasoning-text"></div></div>`;
-        reasoningBox.querySelector('.reasoning-head').addEventListener('click', () => {
-          reasoningBox.classList.toggle('open');
-        });
-        bubble.insertBefore(reasoningBox, stage);
+          </summary>
+          <div class="agent-term-reason-text"></div>`;
+        term.querySelector('.agent-term-log').appendChild(reasoningBox);
+        api.refreshTermMeta(term);
       }
-      reasoningBox.querySelector('.reasoning-text').textContent = reasoningText;
+      reasoningBox.querySelector('.agent-term-reason-text').textContent = reasoningText;
       scrollToBottom();
     },
 
@@ -899,6 +908,8 @@ function createAssistantTurn(options = {}) {
         </div>
         <div class="agent-confirm-actions">
           <button type="button" class="ok" data-confirm="yes">Разрешить</button>
+          <button type="button" class="always" data-confirm="always"
+                  title="Больше не спрашивать для таких действий до перезапуска сервера">✅ Разрешить всегда</button>
           <button type="button" class="no" data-confirm="no">Отклонить</button>
         </div>`;
       log.appendChild(box);
@@ -922,17 +933,21 @@ function createAssistantTurn(options = {}) {
         note.textContent = text || (approve ? '✔ разрешено' : '✕ отклонено');
         api.refreshTermMeta(term);
       };
-      const decide = (approve) => {
-        settle(approve, approve ? '✔ разрешено' : '✕ отклонено');
+      const decide = (approve, always = false) => {
+        const alwaysOn = Boolean(approve && always);
+        settle(approve, alwaysOn ? '✔ разрешено всегда'
+          : (approve ? '✔ разрешено' : '✕ отклонено'));
+        box.classList.toggle('is-always', alwaysOn);
         fetch('/api/agent/confirm', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ id: request.id, approve }),
+          body: JSON.stringify({ id: request.id, approve, always: alwaysOn }),
         }).then((response) => {
           if (!response.ok) note.textContent = 'решение не принято: время вышло';
         }).catch(() => { note.textContent = 'нет связи с сервером'; });
       };
       box.querySelector('[data-confirm="yes"]').addEventListener('click', () => decide(true));
+      box.querySelector('[data-confirm="always"]').addEventListener('click', () => decide(true, true));
       box.querySelector('[data-confirm="no"]').addEventListener('click', () => decide(false));
       box._settle = settle;
       scrollToBottom();
@@ -944,7 +959,10 @@ function createAssistantTurn(options = {}) {
       const box = bubble.querySelector(`.agent-confirm[data-id="${event.id}"]`);
       if (!box) return;
       if (box._settle) {
-        box._settle(!!event.approved, event.approved ? '✔ разрешено' : '✕ отклонено');
+        box.classList.toggle('is-always', Boolean(event.approved && event.always));
+        box._settle(!!event.approved, event.approved
+          ? (event.always ? '✔ разрешено всегда' : '✔ разрешено')
+          : '✕ отклонено');
       } else {
         box.classList.add(event.approved ? 'is-approved' : 'is-denied');
         box.querySelectorAll('button').forEach((button) => { button.disabled = true; });
@@ -982,8 +1000,8 @@ function createAssistantTurn(options = {}) {
       stopTimer();
       wrap.classList.remove('is-working');
       if (reasoningBox) {
-        reasoningBox.classList.add('done');
-        reasoningBox.classList.remove('open');
+        reasoningBox.classList.add('is-done');
+        reasoningBox.removeAttribute('open');
       }
 
       const seconds = ((Date.now() - startedAt) / 1000).toFixed(1);
@@ -1515,7 +1533,8 @@ function appendMessage(role, content, meta = null) {
   const mediaHtml = savedMedia.length
     ? `<div class="turn-media">${savedMedia.map(turnMediaItemHtml).join('')}</div>` : '';
   const traceSteps = isAI && Array.isArray(meta?.trace) ? meta.trace : [];
-  const traceHtml = traceSteps.length ? agentTraceHtml(traceSteps) : '';
+  const traceHtml = (traceSteps.length || meta?.reasoning)
+    ? agentTraceHtml(traceSteps, meta?.reasoning) : '';
   const sources = Array.isArray(meta?.sources) ? meta.sources.filter((s) => s && s.url) : [];
   const sourcesHtml = sources.length ? `
     <div class="sources min">
@@ -1528,7 +1547,6 @@ function appendMessage(role, content, meta = null) {
     <div class="msg-body">
       <div class="msg-name">${isAI ? 'NovaMind' : 'Вы'}</div>
       <div class="msg-bubble">
-        ${meta?.reasoning ? `<div class="reasoning"><div class="reasoning-head"><span>🧠</span><span>Рассуждение</span><span class="caret">▶</span></div><div class="reasoning-body"><div class="reasoning-text">${escapeHtml(meta.reasoning)}</div></div></div>` : ''}
         ${mediaHtml}
         ${traceHtml}
         <div class="answer">${formatted}${imageHtml}</div>
@@ -1549,9 +1567,8 @@ function appendMessage(role, content, meta = null) {
   wrap.querySelector('.sources-head')?.addEventListener('click', (event) => {
     event.currentTarget.parentElement.classList.toggle('min');
   });
-  wrap.querySelector('.reasoning-head')?.addEventListener('click', (event) => {
-    event.currentTarget.parentElement.classList.toggle('open');
-  });
+  // Рассуждение теперь живёт внутри блока шагов (details), отдельный
+  // обработчик не нужен — раскрытие делает сам <details>.
 
   scrollToBottom();
 
@@ -2157,9 +2174,10 @@ function loadChat(chatId) {
  * Панель «Что делал агент».
  * Раскрытая details-карточка со шагами и командами — без JS-обработчиков.
  */
-function agentTraceHtml(steps) {
-  if (!Array.isArray(steps) || !steps.length) return '';
-  const rows = steps.map((step) => {
+function agentTraceHtml(steps, reasoning) {
+  const list = Array.isArray(steps) ? steps : [];
+  if (!list.length && !reasoning) return '';
+  let rows = list.map((step) => {
     if (step.kind === 'tool') {
       const label = step.command || step.name || 'команда';
       return `<div class="agent-trace-row"><span class="agent-trace-ico">⌨️</span>` +
@@ -2172,8 +2190,15 @@ function agentTraceHtml(steps) {
     return `<div class="agent-trace-row"><span class="agent-trace-ico">${escapeHtml(String(step.icon || '•'))}</span>` +
       `<span>${escapeHtml(String(step.text || ''))}</span></div>`;
   }).join('');
+  if (reasoning) {
+    rows = `<details class="agent-trace-reason">
+        <summary>🧠 Рассуждение</summary>
+        <div class="agent-trace-reason-text">${escapeHtml(String(reasoning))}</div>
+      </details>` + rows;
+  }
+  const count = list.length + (reasoning ? 1 : 0);
   return `<details class="agent-trace">
-      <summary>🧭 Что делал агент · ${steps.length}</summary>
+      <summary>🧭 Что делал агент · ${count}</summary>
       <div class="agent-trace-steps">${rows}</div>
     </details>`;
 }

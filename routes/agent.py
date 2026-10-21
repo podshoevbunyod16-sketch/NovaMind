@@ -103,8 +103,11 @@ AGENT_SYSTEM_PROMPT = """Ты — агент NovaMind внутри «мален�
 
 FINAL_ONLY_SYSTEM = (
     "Ты — NovaMind. Выдай СРАЗУ готовый ответ на русском языке. "
-    "Запрещено: рассуждения, английский язык, черновики, пересказ своих шагов, JSON. "
-    "Первое же слово — часть ответа."
+    "Если это фактический вопрос — сначала суть (названия, цифры, годы), затем "
+    "1–3 предложения пояснения; всего не более 6 предложений. "
+    "Запрещено: рассуждения, английский язык, черновики, пересказ своих шагов, "
+    "JSON и ссылки. Первое же слово — часть ответа. Закончи мысль, не обрывай "
+    "текст на полуслове."
 )
 
 _WORKSPACE_ACTION_RE = re.compile(r'"action"\s*:\s*"(run|read|write|ls|git)"')
@@ -329,11 +332,19 @@ _LEAK_START = re.compile(
     r"^[\s>*#-]*(?:"
     r"(?:we|i)\s+(?:need|should|must|have|will|can|'ll|'d)\b|"
     r"(?:let'?s|let me|need to|i need|i should|i'll|i will|okay|hmm|first|"
+    r"then|next|finally|to answer|the answer|we'll|we are|we can|need answer|let us|"
     r"so we|looking at|given (?:the|that)|probably|maybe|now|thus|therefore|"
     r"alright|actually)(?:\b|,)|"
     r"(?:the user|user)\s+(?:asks|asked|wants|says|provided|supplied)\b|"
     r"(?:thinking|analysis|reasoning|chain[- ]of[- ]thought)\s*[:：]"
     r")", re.I)
+
+_DRAFT_HINT = re.compile(
+    r"(?i)\b(?:then explanation|explanation \d+\s+sentences?|we need answer|"
+    r"need answer|let'?s formulate|they (?:supplied|provided)|"
+    r"the user (?:asks|wants|supplied|provided)|draft answer|"
+    r"черновик|пользователь (?:спрашивает|просит|прислал)|"
+    r"сформулируем ответ|нужно ответить)\b")
 
 _LEAK_START_RU = re.compile(
     r"^[\s>*#-]*(?:"
@@ -347,6 +358,9 @@ _LEAK_START_RU = re.compile(
 
 _FINAL_MARK = re.compile(
     r"(?im)^\s*(?:final answer|answer|итоговый ответ|ответ|итог)\s*[:：]\s*")
+
+_TRANSLATE_GOAL = re.compile(
+    r"(?i)(?:перевед|перевод|на\s+английск|по-английск|\btranslate\b|\bin\s+english\b)")
 
 _CYR = re.compile(r"[А-Яа-яЁё]")
 _LAT = re.compile(r"[A-Za-z]")
@@ -368,12 +382,49 @@ def _split_paragraphs(text):
     return [part.strip() for part in re.split(r"\n\s*\n", text or "") if part.strip()]
 
 
+_BAD_ENDINGS = set(",;:—–-/\\*([{")
+_TRUNCATED_WORDS = {
+    "и", "в", "во", "на", "с", "со", "по", "для", "что", "как", "это", "не",
+    "а", "но", "или", "же", "ли", "при", "из", "от", "до", "к", "о", "об",
+    "the", "and", "of", "to", "in", "on", "with", "for", "is", "are", "was",
+    "were", "a", "an", "that", "which", "as", "by", "at", "from", "or", "but",
+}
+
+
+def _looks_complete_answer(text):
+    """Похож ли текст на законченный ответ, а не на обрезанный черновик.
+
+    Точка в конце не обязательна (модели часто её опускают), а вот запятая,
+    тире, открытая кавычка или служебное слово на конце — признак обрыва.
+    """
+    text = (text or "").strip()
+    if not text:
+        return False
+    if len(text) <= 40:                 # «42», «Готово», короткая реплика
+        return True
+    if text.count('"') % 2:             # открытая кавычка — ответ оборван
+        return False
+    if text.count("«") != text.count("»"):
+        return False
+    if text[-1] in _BAD_ENDINGS:
+        return False
+    last = text.splitlines()[-1].lstrip()
+    if last.startswith(("-", "*", "•", "|")) or re.match(r"^\d+[.)]\s", last):
+        return True
+    words = re.findall(r"[A-Za-zА-Яа-яЁё]+", text)
+    if words and words[-1].lower() in _TRUNCATED_WORDS:
+        return False
+    return True
+
+
 def looks_like_leaked_reasoning(text):
     """True, если текст начинается как рассуждение модели, а не как ответ."""
     text = strip_think(text)
     if not text:
         return False
     if _LEAK_START.match(text) or _LEAK_START_RU.match(text):
+        return True
+    if _DRAFT_HINT.search(text[:800]):
         return True
     # Без явных маркеров смотрим на первый абзац: естественный английский
     # текст с местоимениями/служебными словами — почти наверняка черновик.
@@ -398,26 +449,70 @@ def strip_leaked_reasoning(text, goal=""):
     text = strip_think(text)
     if not text or not _has_cyrillic(goal) or not looks_like_leaked_reasoning(text):
         return text
+    if _TRANSLATE_GOAL.search(goal or ""):
+        return text            # просили перевести — английский текст здесь ответ
+    # В конце готового ответа модель иногда оставила служебную пометку
+    # («Then explanation 2 sentences: …»). Тогда всё, что до неё, — ответ.
+    hint = _DRAFT_HINT.search(text)
+    if hint and hint.start() > 0:
+        prefix = text[:hint.start()].strip()
+        if (len(prefix) >= 40 and _has_cyrillic(prefix)
+                and not looks_like_leaked_reasoning(prefix)
+                and _looks_complete_answer(prefix)):
+            return prefix
     # Иногда модель сама помечает финал: «Ответ: …». Берём последнюю такую метку.
     markers = list(_FINAL_MARK.finditer(text))
     if markers:
         candidate = text[markers[-1].end():].strip()
         if (candidate and _has_cyrillic(candidate)
-                and not looks_like_leaked_reasoning(candidate)):
+                and not looks_like_leaked_reasoning(candidate)
+                and _looks_complete_answer(candidate)):
             return candidate
     # Иначе оставляем непрерывный хвост русских абзацев, похожих на ответ.
     tail = []
     for paragraph in reversed(_split_paragraphs(text)):
         cyr, lat = len(_CYR.findall(paragraph)), len(_LAT.findall(paragraph))
         draft = paragraph[:1] in "\"'«“„" or bool(_LEAK_START.match(paragraph)) \
-            or bool(_LEAK_START_RU.match(paragraph))
+            or bool(_LEAK_START_RU.match(paragraph)) or bool(_DRAFT_HINT.search(paragraph))
         if draft or cyr < 15 or cyr < lat * 1.5:
             break
         tail.append(paragraph)
     answer = "\n\n".join(reversed(tail)).strip()
-    if len(answer) >= 40 and not looks_like_leaked_reasoning(answer):
+    if (len(answer) >= 40 and not looks_like_leaked_reasoning(answer)
+            and _looks_complete_answer(answer)):
         return answer
     return ""
+
+
+_QUOTED_ANSWER = re.compile(r'["“«]([^"”»]{40,700})["”»]', re.S)
+
+
+def salvage_quoted_answer(text, goal=""):
+    """Достаёт готовый русский ответ из кавычек внутри утёкшего рассуждения.
+
+    Бесплатные модели часто пишут черновик, а сам ответ оформляют в кавычках.
+    Это последний шанс не отдать пользователю пустоту. Цитату вопроса
+    пользователя и слишком короткие обрывки не берём.
+    """
+    text = strip_think(text)
+    if not text or not _has_cyrillic(goal):
+        return ""
+    goal_text = " ".join(str(goal or "").lower().split())
+    best = ""
+    for match in _QUOTED_ANSWER.finditer(text):
+        candidate = " ".join(match.group(1).split())
+        low = candidate.lower()
+        if not _has_cyrillic(candidate) or len(candidate) < 40:
+            continue
+        if goal_text and (low in goal_text or goal_text in low):
+            continue                       # это цитата вопроса, а не ответ
+        if looks_like_leaked_reasoning(candidate):
+            continue
+        if candidate.count("?") > candidate.count("."):
+            continue
+        if len(candidate) > len(best):
+            best = candidate
+    return best
 
 
 def final_answer_text(raw, goal=""):
@@ -431,7 +526,10 @@ def final_answer_text(raw, goal=""):
         if not action or str(action.get("action")) != "answer":
             return ""
         text = str(action.get("text") or "").strip()
-    return strip_leaked_reasoning(text, goal)
+    answer = strip_leaked_reasoning(text, goal)
+    if answer and not _looks_complete_answer(answer):
+        return ""
+    return answer
 
 
 def _extract_json_object(text):
@@ -587,15 +685,98 @@ DANGER_COMMAND_HINTS = (
 )
 
 # Слова в имени MCP-инструмента, означающие отправку/изменение данных.
+# Сравниваем по токенам, а не подстрокой: «forget_password» — не get,
+# «postgres_query» — не post, а «createIssue» распознаётся как create+issue.
 DANGER_MCP_HINTS = ("send", "create", "update", "delete", "remove", "post",
                     "publish", "commit", "write", "merge", "close", "archive",
-                    "отправ", "созда", "измен", "удал", "опублик")
+                    "edit", "replace", "insert", "upsert", "patch", "set",
+                    "add", "run", "execute", "deploy", "upload", "install",
+                    "schedule", "revoke", "grant", "move", "rename", "modify",
+                    "destroy", "drop", "truncate", "purge", "clear", "reset",
+                    "restart", "stop", "start", "kill", "terminate", "disable",
+                    "enable", "provision", "apply", "sync", "push", "pull",
+                    "отправ", "созда", "измен", "удал", "опублик", "запис",
+                    "добав", "переимен", "очист", "сброс", "останов", "запуст")
+
+# Поиск/чтение через MCP не меняет внешний мир — спрашивать разрешение на
+# каждый web_search бессмысленно и раздражает.
+READONLY_MCP_HINTS = ("search", "fetch", "read", "get", "list", "find",
+                      "lookup", "resolve", "browse", "crawl", "map",
+                      "inspect", "describe", "читать", "поиск")
+
+
+def _mcp_tokens(value) -> set:
+    """Токены имени MCP-инструмента: snake_case и camelCase в один вид."""
+    text = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", str(value or ""))
+    return set(re.split(r"[^a-zа-я0-9]+", text.lower())) - {""}
+
+
+def _has_mcp_hint(tokens, hints) -> bool:
+    for hint in hints:
+        if re.search(r"[а-я]", hint):
+            if any(hint in token for token in tokens):   # русские основы
+                return True
+        elif hint in tokens:
+            return True
+    return False
 
 _DENIED_OBSERVATION = (
     "ПОЛЬЗОВАТЕЛЬ ОТКЛОНИЛ действие «{kind}». Не выполняй его повторно и не "
     "пытайся обойти запрет. Объясни, что действие не выполнено, и предложи "
     "безопасную альтернативу или попроси уточнение."
 )
+
+# «Разрешить всегда»: правила живут до перезапуска процесса. Храним не
+# конкретный вызов, а класс действия, иначе следующая команда с другими
+# аргументами снова спросит разрешение.
+_ALWAYS_ALLOWED: set = set()
+_ALWAYS_LOCK = threading.Lock()
+
+
+def _always_key(kind, action) -> tuple:
+    """Ключ правила «всегда разрешено» — укрупнённый, без аргументов вызова."""
+    kind = str(kind or "")
+    action = action or {}
+    if kind == "mcp_call":
+        server = str(action.get("server_id") or "").strip().lower()
+        tool = str(action.get("tool") or "").strip().lower()
+        return (kind, f"{server}:{tool}")
+    if kind in ("run", "git", "coding"):
+        command = " ".join(str(action.get("command") or "").lower().split())
+        for hint in DANGER_COMMAND_HINTS:
+            hint = hint.strip()
+            if hint and command.startswith(hint):
+                return (kind, hint)
+        return (kind, command.split(" ")[0] if command else "")
+    if kind in ("write", "read", "edit"):
+        return (kind, str(action.get("path") or "").strip().lower())
+    return (kind, str(_action_key(action, kind)[1]))
+
+
+def always_allowed(kind, action) -> bool:
+    """Разрешено ли это действие навсегда (кнопка «Разрешить всегда»)."""
+    try:
+        key = _always_key(kind, action)
+    except Exception:                    # noqa: BLE001 — правило не должно ронять шаг
+        return False
+    with _ALWAYS_LOCK:
+        return key in _ALWAYS_ALLOWED
+
+
+def forget_always_allowed(kind=None, action=None) -> None:
+    """Сбрасывает правила: всё или только совпадающее с действием."""
+    with _ALWAYS_LOCK:
+        if kind is None:
+            _ALWAYS_ALLOWED.clear()
+        else:
+            _ALWAYS_ALLOWED.discard(_always_key(kind, action))
+
+
+def always_allowed_rules() -> list:
+    """Правила для интерфейса/диагностики: [{"kind": ..., "scope": ...}]."""
+    with _ALWAYS_LOCK:
+        rules = sorted(_ALWAYS_ALLOWED)
+    return [{"kind": kind, "scope": scope} for kind, scope in rules]
 
 
 def action_risk(kind, action) -> str:
@@ -614,11 +795,13 @@ def action_risk(kind, action) -> str:
             return "danger"
         return "write"
     if kind == "mcp_call":
-        tool = str(action.get("tool") or "").lower()
-        server = str(action.get("server_id") or "").lower()
-        text = f"{server} {tool}"
-        if any(hint in text for hint in DANGER_MCP_HINTS):
+        tool = str(action.get("tool") or "")
+        server = str(action.get("server_id") or "")
+        tokens = _mcp_tokens(f"{server}_{tool}")
+        if _has_mcp_hint(tokens, DANGER_MCP_HINTS):
             return "danger"
+        if _has_mcp_hint(tokens, READONLY_MCP_HINTS):
+            return "safe"             # web_search / web_fetch / list_* и т. п.
         # Неизвестный MCP-инструмент считаем изменяющим: лучше спросить.
         return "danger"
     return base if base in ("safe", "write", "danger") else "safe"
@@ -638,6 +821,8 @@ def confirmation_needed(kind, action, state=None) -> bool:
         pass
     else:
         return False
+    if always_allowed(kind, action):
+        return False        # пользователь нажал «Разрешить всегда»
     if state is not None and _action_key(action, kind) in state.get("approved", set()):
         return False        # этот шаг уже разрешался в текущем ходе
     return True
@@ -669,9 +854,11 @@ def register_confirmation(kind, action, state=None) -> dict:
         "risk": action_risk(kind, action),
         "command": describe_action(kind, action),
         "args": {k: v for k, v in action.items() if k not in ("action", "thought")},
+        "always_key": _always_key(kind, action),
         "created_at": time.time(),
         "event": threading.Event(),
         "approved": False,
+        "always": False,
         "resolved": False,
     }
     with _CONFIRM_LOCK:
@@ -681,8 +868,12 @@ def register_confirmation(kind, action, state=None) -> dict:
     return record
 
 
-def resolve_confirmation(confirm_id, approve):
-    """Решение пользователя. Возвращает (ok, причина)."""
+def resolve_confirmation(confirm_id, approve, always=False):
+    """Решение пользователя. Возвращает (ok, причина).
+
+    always=True вместе с approve=True запоминает правило «разрешить всегда»
+    для этого класса действий (например, server:tool или префикс команды).
+    """
     confirm_id = str(confirm_id or "").strip()
     with _CONFIRM_LOCK:
         record = _PENDING_CONFIRMS.get(confirm_id)
@@ -692,6 +883,11 @@ def resolve_confirmation(confirm_id, approve):
             return False, "already_resolved"
         record["resolved"] = True
         record["approved"] = bool(approve)
+        record["always"] = bool(approve and always)
+        key = record.get("always_key")
+    if record["always"] and key:
+        with _ALWAYS_LOCK:
+            _ALWAYS_ALLOWED.add(key)
     record["event"].set()
     return True, ""
 
@@ -943,14 +1139,15 @@ def _synthesize(goal, state, provider, model):
         f"Вопрос пользователя: {goal}\n\n"
         f"Найденные данные:\n{notes or 'ничего не найдено'}\n\n"
         "Ответь пользователю по-русски прямо и по существу, опираясь на эти данные: сначала суть "
-        "(названия, цифры, годы), затем 1–3 предложения пояснения. Если данные неполные или "
-        "противоречивые — скажи об этом честно. Не пиши JSON, не пересказывай свои шаги, "
-        "не показывай команды и не вставляй ссылки."
+        "(названия, цифры, годы), затем 1–3 предложения пояснения. Не более 6 предложений, "
+        "закончи мысль. Если данные неполные или противоречивые — скажи об этом честно. "
+        "Не пиши JSON, не пересказывай свои шаги, не показывай команды и не вставляй ссылки."
     )
     systems = (
         "Ты — NovaMind, ассистент. Отвечай точно и по делу.",
         FINAL_ONLY_SYSTEM,
     )
+    drafts = []
     for attempt, system_text in enumerate(systems):
         text, _meta = chat_completion(
             [{"role": "system", "content": system_text},
@@ -958,7 +1155,13 @@ def _synthesize(goal, state, provider, model):
             provider=provider, model=model, temperature=0.3,
             max_tokens=2000 if attempt == 0 else 1500, timeout=60,
         )
+        drafts.append(text)
         answer = final_answer_text(text, goal)
+        if answer:
+            return answer
+    # Оба ответа оказались рассуждением — достаём готовую цитату, если она есть.
+    for text in reversed(drafts):
+        answer = salvage_quoted_answer(text, goal)
         if answer:
             return answer
     return ""
@@ -1093,23 +1296,42 @@ def agent_stop():
 def agent_confirm():
     """Разрешение/отклонение опасного шага агента.
 
-    {"id": "...", "approve": true|false}. Ответ приходит ровно один раз:
-    повторное подтверждение того же id считается ошибкой (409), чтобы
-    одно нажатие не выполняло действие дважды.
+    {"id": "...", "approve": true|false, "always": true|false}. Ответ
+    приходит ровно один раз: повторное подтверждение того же id считается
+    ошибкой (409), чтобы одно нажатие не выполняло действие дважды.
+    always=true (только вместе с approve) запоминает правило «разрешить
+    всегда» — однотипные действия больше не спрашивают разрешение.
     """
     data = request.get_json(silent=True) or {}
     confirm_id = str(data.get("id") or "").strip()
     approve = data.get("approve")
+    always = data.get("always", False)
     if not confirm_id:
         return jsonify({"ok": False, "error": "Нужен id подтверждения"}), 400
     if not isinstance(approve, bool):
         return jsonify({"ok": False, "error": "Поле approve должно быть true/false"}), 400
-    ok, reason = resolve_confirmation(confirm_id, approve)
+    if not isinstance(always, bool):
+        return jsonify({"ok": False, "error": "Поле always должно быть true/false"}), 400
+    ok, reason = resolve_confirmation(confirm_id, approve, always=always)
     if not ok:
         message = ("Подтверждение уже обработано" if reason == "already_resolved"
                    else "Подтверждение не найдено или истекло")
         return jsonify({"ok": False, "id": confirm_id, "error": message}), 409
-    return jsonify({"ok": True, "id": confirm_id, "approved": approve})
+    return jsonify({"ok": True, "id": confirm_id, "approved": approve,
+                    "always": bool(approve and always)})
+
+
+@agent_bp.route("/api/agent/permissions", methods=["GET"])
+def agent_permissions():
+    """Действующие правила «разрешить всегда»."""
+    return jsonify({"ok": True, "rules": always_allowed_rules()})
+
+
+@agent_bp.route("/api/agent/permissions", methods=["DELETE"])
+def agent_permissions_reset():
+    """Сбрасывает все правила «разрешить всегда»."""
+    forget_always_allowed()
+    return jsonify({"ok": True, "rules": []})
 
 
 @agent_bp.route("/api/agent/stream", methods=["POST"])
@@ -1270,8 +1492,10 @@ def agent_stream():
             # Короткие разговорные/объяснительные вопросы не должны ждать
             # discovery MCP, web-search и планирования из нескольких шагов.
             fast_system = ("Ты NovaMind. Выдай сразу готовый ответ по-русски. "
-                           "Не вызывай инструменты, не пиши JSON, не выводи рассуждения, "
-                           "английские мысли и черновики — только ответ.")
+                           "Если это фактический вопрос — сначала суть (названия, цифры, "
+                           "годы), затем 1–3 предложения пояснения, всего не более 6 "
+                           "предложений. Не вызывай инструменты, не пиши JSON, не выводи "
+                           "рассуждения, английские мысли и черновики — только ответ.")
             memory_hint = str(state.get("memory_key") and memory_module.prompt_block(
                 state["memory_key"], goal) or "")
             if memory_hint:
@@ -1293,12 +1517,15 @@ def agent_stream():
                 or bool(re.match(r"^План\s*:", str(fast_answer or ""), re.I))
             if not wants_tool and str(fast_answer or "").strip():
                 # Бесплатные модели иногда выдают ход мыслей прямо в content.
-                # Не показываем его как ответ: просим один раз готовый текст.
-                cleaned = final_answer_text(fast_answer, goal)
+                # Не показываем его как ответ: просим один раз готовый текст,
+                # а если и повтор утёк — достаём ответ из кавычек черновика.
+                fast_raw = str(fast_answer)
+                cleaned = final_answer_text(fast_raw, goal)
                 if cleaned:
                     fast_answer = cleaned
                 else:
-                    fast_answer = _final_retry(fast_history, goal, provider, model)
+                    fast_answer = (_final_retry(fast_history, goal, provider, model)
+                                   or salvage_quoted_answer(fast_raw, goal))
             if (not wants_tool and str(fast_answer or "").strip()
                     and not (forced_media_kind and provider == "local_demo")):
                 # Исключение: офлайн-контур не должен «заговорить» просьбу
@@ -1653,9 +1880,12 @@ def agent_stream():
         # не должен вывести рассуждение модели в чат.
         if state["answer"]:
             raw_answer = state["answer"]
-            state["answer"] = strip_leaked_reasoning(raw_answer, goal)
+            state["answer"] = (strip_leaked_reasoning(raw_answer, goal)
+                               if state.get("stopped")
+                               else final_answer_text(raw_answer, goal))
             if not state["answer"] and provider != "local_demo" and not state.get("stopped"):
-                state["answer"] = _final_retry(history, goal, provider, model)
+                state["answer"] = (_final_retry(history, goal, provider, model)
+                                   or salvage_quoted_answer(raw_answer, goal))
         if not state["answer"]:
             state["answer"] = _fallback_answer(state)
 

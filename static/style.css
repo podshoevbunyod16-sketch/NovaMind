@@ -1103,6 +1103,26 @@ button, input, select, textarea, .stage, .sources-head, .msg-actions {
   font-family: var(--mono, ui-monospace, monospace); font-size: 10.5px; line-height: 1.5;
   white-space: pre-wrap; color: #cfd6e4; background: rgba(0, 0, 0, .3); border-radius: 8px;
 }
+
+/* Рассуждение модели — сворачиваемая строка внутри блока шагов */
+.agent-term-reason { border-bottom: 1px dashed rgba(255, 255, 255, .05); }
+.agent-term-reason:last-child { border-bottom: none; }
+.agent-term-reason > summary {
+  display: flex; align-items: center; gap: 7px; padding: 5px 3px;
+  cursor: pointer; list-style: none; font-size: 11.5px; color: var(--txt-dim);
+}
+.agent-term-reason > summary::-webkit-details-marker { display: none; }
+.agent-term-reason > summary:hover { color: var(--txt); }
+.agent-term-reason-ico { flex-shrink: 0; }
+.agent-term-reason > summary .caret {
+  margin-left: auto; font-size: 9px; transition: transform .18s ease;
+}
+.agent-term-reason[open] > summary .caret { transform: rotate(180deg); }
+.agent-term-reason-text {
+  margin: 2px 3px 8px 18px; padding: 8px 10px; max-height: 240px; overflow: auto;
+  font-size: 11px; line-height: 1.55; color: var(--txt-dim); white-space: pre-wrap;
+  background: rgba(255, 255, 255, .035); border-radius: 8px;
+}
 .agent-task {
   display: flex; align-items: center; gap: 8px; margin: 10px 0; padding: 7px 11px;
   border: 1px solid rgba(179, 156, 255, .3); border-radius: 11px; background: rgba(179, 156, 255, .1); font-size: 12px;
@@ -1138,10 +1158,15 @@ button, input, select, textarea, .stage, .sources-head, .msg-actions {
   border: 1px solid rgba(255, 255, 255, .2); background: transparent; color: inherit;
 }
 .agent-confirm-actions button.ok { border-color: rgba(93, 214, 154, .5); background: rgba(93, 214, 154, .16); }
+.agent-confirm-actions button.always {
+  border-color: rgba(120, 170, 255, .55);
+  background: rgba(120, 170, 255, .14);
+}
 .agent-confirm-actions button.no { border-color: rgba(255, 118, 118, .5); background: rgba(255, 118, 118, .12); }
 .agent-confirm-actions button:disabled { opacity: .55; cursor: default; }
 .agent-confirm-note { font-size: 11px; color: var(--txt-dim); }
 .agent-confirm.is-approved { border-color: rgba(93, 214, 154, .45); background: rgba(93, 214, 154, .08); }
+.agent-confirm.is-always { border-color: rgba(120, 170, 255, .5); background: rgba(120, 170, 255, .09); }
 .agent-confirm.is-denied { border-color: rgba(255, 118, 118, .4); background: rgba(255, 118, 118, .07); }
 
 /* Разрешение — строка внутри блока шагов, а не отдельная карточка поверх чата */
@@ -1253,6 +1278,22 @@ button, input, select, textarea, .stage, .sources-head, .msg-actions {
   gap: 6px;
   max-height: 260px;
   overflow-y: auto;
+}
+/* Рассуждение в истории — тоже внутри шагов, а не отдельной панелью */
+.agent-trace-reason {
+  border-bottom: 1px dashed rgba(255, 255, 255, .08);
+  padding-bottom: 6px;
+}
+.agent-trace-reason > summary {
+  cursor: pointer; list-style: none; font-size: 11.5px;
+  color: var(--muted, #9aa4b2);
+}
+.agent-trace-reason > summary::-webkit-details-marker { display: none; }
+.agent-trace-reason[open] > summary { margin-bottom: 5px; }
+.agent-trace-reason-text {
+  padding: 7px 9px; max-height: 200px; overflow: auto;
+  white-space: pre-wrap; font-size: 11px; line-height: 1.5;
+  color: var(--muted, #9aa4b2); background: rgba(255, 255, 255, .03); border-radius: 8px;
 }
 .agent-trace-row {
   display: flex;

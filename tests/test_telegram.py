@@ -11,7 +11,9 @@ import telegram_bot
 def no_token(monkeypatch):
     monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
     monkeypatch.delenv("TELEGRAM_ALLOWED_USERS", raising=False)
+    agent_routes.forget_always_allowed()
     yield
+    agent_routes.forget_always_allowed()
 
 
 class FakeApi:
@@ -116,11 +118,13 @@ def test_split_message_cuts_huge_line():
 
 def test_confirm_keyboard_and_parse():
     keyboard = telegram_bot.confirm_keyboard("abc123")
-    buttons = keyboard["inline_keyboard"][0]
+    buttons = [button for row in keyboard["inline_keyboard"] for button in row]
     assert buttons[0]["callback_data"] == "confirm:abc123:yes"
-    assert telegram_bot.parse_callback("confirm:abc123:no") == ("abc123", False)
-    assert telegram_bot.parse_callback("confirm:abc123:maybe") == (None, None)
-    assert telegram_bot.parse_callback("что-то другое") == (None, None)
+    assert any(button["callback_data"] == "confirm:abc123:always" for button in buttons)
+    assert telegram_bot.parse_callback("confirm:abc123:no") == ("abc123", False, False)
+    assert telegram_bot.parse_callback("confirm:abc123:always") == ("abc123", True, True)
+    assert telegram_bot.parse_callback("confirm:abc123:maybe") == (None, None, None)
+    assert telegram_bot.parse_callback("что-то другое") == (None, None, None)
 
 
 # ══════════════ сообщения ══════════════
@@ -183,6 +187,25 @@ def test_run_turn_marks_confirmation(client):
         "message": {"chat": {"id": 10}}})
     assert handled is True
     assert agent_routes.await_confirmation(record, timeout=0.1) is True
+
+
+def test_always_callback_remembers_rule(client):
+    """Кнопка «Всегда» разрешает шаг и запоминает класс действия."""
+    action = {"command": "git push origin main"}
+    record = agent_routes.register_confirmation("run", action)
+    api = FakeApi()
+    bridge = telegram_bot.Bridge(api=api)
+
+    handled = bridge.handle_callback({
+        "id": "cb-always", "data": f"confirm:{record['id']}:always",
+        "message": {"chat": {"id": 10}}})
+
+    assert handled is True
+    assert agent_routes.await_confirmation(record, timeout=0.1) is True
+    assert agent_routes.confirmation_needed("run", {"command": "git push origin dev"}) is False
+    texts = [call["params"].get("text") for call in api.calls
+             if call["method"] == "answerCallbackQuery"]
+    assert any("всегда" in str(text).lower() for text in texts)
 
 
 def test_second_click_is_reported_as_resolved(client):

@@ -169,6 +169,7 @@ const mock = {
   agentStream: AGENT_STREAM,
   agentStatus: 200,
   agentRequests: [],
+  confirmRequests: [],
   sendStreamCalls: 0,
   sessionLogins: [],
 };
@@ -343,6 +344,10 @@ const dom = new JSDOM(html, {
         return json({ url: 'https://docs.python.org/3/library/asyncio.html',
                       text: 'Текст страницы asyncio', elapsed_ms: 120, bytes: 22 });
       }
+      if (path.startsWith('/api/agent/confirm')) {
+        mock.confirmRequests.push(JSON.parse(options.body || '{}'));
+        return json({ ok: true });
+      }
       if (path.startsWith('/api/agent/status')) {
         if (mock.linux === 'media') {
           return json({ enabled: true, tools: false, available: true, max_steps: 8,
@@ -403,10 +408,12 @@ check('первый источник — ссылка на сайт',
   lastBubble.querySelector('.source-item')?.getAttribute('href') === 'https://example.com/a');
 check('ответ напечатан', lastBubble.querySelector('.answer').textContent.includes('12 500'));
 check('жирный текст отформатирован', Boolean(lastBubble.querySelector('.answer strong')));
-check('панель рассуждений заполнена',
-  lastBubble.querySelector('.reasoning-text')?.textContent.includes('Проверю цены') === true);
+check('рассуждение показано внутри шагов, а не отдельной панелью',
+  lastBubble.querySelector('.agent-term-reason-text')?.textContent.includes('Проверю цены') === true
+  && !lastBubble.querySelector('.reasoning'));
 check('рассуждение свёрнуто после ответа',
-  lastBubble.querySelector('.reasoning')?.classList.contains('done') === true);
+  lastBubble.querySelector('.agent-term-reason')?.classList.contains('is-done') === true
+  && !lastBubble.querySelector('.agent-term-reason')?.open);
 
 // Сцена схлопывается при первом токене
 const stage = lastBubble.querySelector('.stage');
@@ -801,14 +808,23 @@ check('блок шагов сам раскрылся на вопрос',
 check('в шагах видно команду, требующую разрешения',
   confirmTerm.textContent.includes('Нужно разрешение')
   && confirmTerm.textContent.includes('git push origin main'));
+check('есть три варианта: разрешить, всегда, отклонить',
+  ['yes', 'always', 'no'].every((kind) =>
+    Boolean(confirmCard.querySelector(`[data-confirm="${kind}"]`)))
+  && confirmCard.querySelector('[data-confirm="always"]').textContent.toLowerCase().includes('всегда'));
 check('шапка шагов говорит, что ждёт решения',
   confirmTerm.querySelector('.agent-term-meta').textContent.includes('ждёт разрешения'),
   confirmTerm.querySelector('.agent-term-meta').textContent);
-confirmCard.querySelector('[data-confirm="yes"]').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+confirmCard.querySelector('[data-confirm="always"]').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
 await settle(30);
-check('после «Разрешить» строка свернулась и помечена',
-  confirmCard.classList.contains('is-approved') && !confirmCard.classList.contains('is-open')
-  && confirmCard.querySelector('.agent-confirm-note').textContent.includes('разрешено'));
+check('кнопка «Разрешить всегда» отправляет always',
+  mock.confirmRequests.length === 1
+  && mock.confirmRequests[0].approve === true && mock.confirmRequests[0].always === true,
+  JSON.stringify(mock.confirmRequests));
+check('после «Разрешить всегда» строка свернулась и помечена',
+  confirmCard.classList.contains('is-approved') && confirmCard.classList.contains('is-always')
+  && !confirmCard.classList.contains('is-open')
+  && confirmCard.querySelector('.agent-confirm-note').textContent.includes('разрешено всегда'));
 check('блок шагов остался раскрытым для выполнения',
   confirmTerm.classList.contains('is-open')
   && !confirmTerm.querySelector('.agent-term-meta').textContent.includes('ждёт'));

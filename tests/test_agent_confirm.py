@@ -40,6 +40,14 @@ def _resolve_later(decision, delay=0.05):
     return thread
 
 
+@pytest.fixture(autouse=True)
+def _clear_always_rules():
+    """Правила «разрешить всегда» — глобальные, тесты не должны влиять друг на друга."""
+    agent_routes.forget_always_allowed()
+    yield
+    agent_routes.forget_always_allowed()
+
+
 @pytest.fixture
 def executed(monkeypatch):
     """Подменяет выполнение шага, чтобы видеть, дошло ли до него дело."""
@@ -180,3 +188,99 @@ def test_confirm_route_approves_and_rejects_repeat(admin_client):
     second = admin_client.post("/api/agent/confirm", json={"id": record["id"], "approve": True})
     assert second.status_code == 409
     assert "обработано" in second.get_json()["error"]
+
+
+# ══════════════ «разрешить всегда» ══════════════
+
+def test_readonly_mcp_tools_do_not_ask(monkeypatch):
+    """web_search/web_fetch — чтение: разрешение на каждый вызов не нужно."""
+    monkeypatch.setenv("AGENT_CONFIRM", "danger")
+    for tool in ("web_search_exa", "web_fetch_exa", "list_issues", "get_page"):
+        action = {"action": "mcp_call", "server_id": "exa", "tool": tool}
+        assert agent_routes.action_risk("mcp_call", action) == "safe", tool
+        assert agent_routes.confirmation_needed("mcp_call", action) is False, tool
+    assert agent_routes.confirmation_needed(
+        "mcp_call", {"server_id": "gh", "tool": "create_issue"}) is True
+    # Похожие по подстроке, но изменяющие инструменты — по-прежнему опасные.
+    for tool in ("forget_password", "createIssue", "search_and_replace",
+                 "postgres_update"):
+        assert agent_routes.action_risk("mcp_call", {"tool": tool}) == "danger", tool
+
+
+def test_always_rule_covers_action_class_but_not_other_tools(monkeypatch):
+    monkeypatch.setenv("AGENT_CONFIRM", "danger")
+    first = {"action": "mcp_call", "server_id": "gh", "tool": "create_issue",
+             "arguments": {"title": "Первый"}}
+    record = agent_routes.register_confirmation("mcp_call", first)
+    assert agent_routes.confirmation_needed("mcp_call", first) is True
+
+    ok, reason = agent_routes.resolve_confirmation(record["id"], True, always=True)
+    assert ok and reason == ""
+    assert agent_routes.await_confirmation(record, timeout=0.1) is True
+
+    # Тот же инструмент с другими аргументами больше не спрашивается...
+    other = {"action": "mcp_call", "server_id": "gh", "tool": "create_issue",
+             "arguments": {"title": "Второй"}}
+    assert agent_routes.confirmation_needed("mcp_call", other) is False
+    # ...а другой инструмент — спрашивается.
+    assert agent_routes.confirmation_needed(
+        "mcp_call", {"server_id": "gh", "tool": "update_issue"}) is True
+
+
+def test_always_rule_for_command_prefix(monkeypatch):
+    monkeypatch.setenv("AGENT_CONFIRM", "danger")
+    record = agent_routes.register_confirmation("run", {"command": "git push origin main"})
+    agent_routes.resolve_confirmation(record["id"], True, always=True)
+    agent_routes.await_confirmation(record, timeout=0.1)
+
+    assert agent_routes.confirmation_needed("run", {"command": "git push origin dev"}) is False
+    assert agent_routes.confirmation_needed("run", {"command": "rm -rf build"}) is True
+
+
+def test_always_rule_is_not_saved_on_deny(monkeypatch):
+    monkeypatch.setenv("AGENT_CONFIRM", "danger")
+    action = {"command": "git push origin main"}
+    record = agent_routes.register_confirmation("run", action)
+    agent_routes.resolve_confirmation(record["id"], False, always=True)
+    agent_routes.await_confirmation(record, timeout=0.1)
+
+    assert agent_routes.confirmation_needed("run", action) is True
+
+
+def test_always_rule_can_be_revoked(monkeypatch):
+    monkeypatch.setenv("AGENT_CONFIRM", "danger")
+    action = {"command": "pip install requests"}
+    record = agent_routes.register_confirmation("run", action)
+    agent_routes.resolve_confirmation(record["id"], True, always=True)
+    agent_routes.await_confirmation(record, timeout=0.1)
+    assert agent_routes.always_allowed("run", action) is True
+
+    agent_routes.forget_always_allowed()
+    assert agent_routes.always_allowed("run", action) is False
+
+
+def test_confirm_route_stores_always(admin_client):
+    action = {"action": "run", "command": "npm install left-pad"}
+    record = agent_routes.register_confirmation("run", action)
+
+    response = admin_client.post("/api/agent/confirm",
+                                 json={"id": record["id"], "approve": True, "always": True})
+    assert response.status_code == 200
+    assert response.get_json()["always"] is True
+    assert agent_routes.confirmation_needed("run", action) is False
+
+
+def test_perform_guarded_skips_confirm_after_always(monkeypatch, executed):
+    monkeypatch.setenv("AGENT_CONFIRM", "danger")
+    action = {"action": "run", "command": "git push origin main"}
+    record = agent_routes.register_confirmation("run", action)
+    agent_routes.resolve_confirmation(record["id"], True, always=True)
+    agent_routes.await_confirmation(record, timeout=0.1)
+
+    state = {"notes": [], "sources": [], "tool_steps": 0}
+    events, observation = _drive(agent_routes._perform_guarded(
+        action, "run", True, state))
+
+    assert not [event for event in events if event["type"] == "confirm"]
+    assert observation == "ВЫПОЛНЕНО"
+    assert [call["kind"] for call in executed] == ["run"]
