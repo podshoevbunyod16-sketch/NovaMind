@@ -135,7 +135,7 @@
       await consumeNdjson(response, (event) => {
         switch (event.type) {
           case 'stage': turn.setStage(event.scene || 'agent', event.title, event.text); break;
-          case 'plan': turn.plan(event.text); break;
+          case 'plan': turn.plan(event); break;
           case 'step': turn.step(event.icon, event.text); break;
           case 'tool': turn.tool(event); break;
           case 'confirm': if (turn.confirm) turn.confirm(event); break;

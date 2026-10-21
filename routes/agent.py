@@ -192,6 +192,77 @@ def requested_skill_creation(text: str) -> bool:
     return bool(re.search(r"(создай|создать|сделай|напиши|добавь)\s+(?:мне\s+)?(?:skill|скилл|навык)", value))
 
 
+# Признаки многошаговой задачи: несколько действий, явная просьба
+# «по шагам», сравнение источников и т.п.
+_COMPLEX_MARKERS = (
+    "по шагам", "пошагово", "план", "сначала", "потом", "затем", "после этого",
+    "сравни", "исследуй", "проанализируй", "собери", "подготовь", "разработай",
+    "напиши и ", "найди и ", "проверь и ", "сделай и ", "step by step",
+)
+
+
+def is_complex_request(text: str) -> bool:
+    """Нужен ли явный план: несколько действий или составная задача."""
+    value = str(text or "").strip().lower()
+    if len(value) < 40 and not any(marker in value for marker in _COMPLEX_MARKERS):
+        return False
+    if any(marker in value for marker in _COMPLEX_MARKERS):
+        return True
+    return value.count(" и ") >= 2 and len(value) > 80
+
+
+def plan_status_text(state) -> str:
+    """Компактный статус плана для промпта: что сделано, что дальше."""
+    plan = state.get("plan") or []
+    if not plan:
+        return ""
+    done = [item for item in plan if item.get("status") == "done"]
+    next_item = next((item for item in plan if item.get("status") != "done"), None)
+    lines = [f"ПЛАН: выполнено {len(done)} из {len(plan)}."]
+    if done:
+        lines.append("Сделано: " + "; ".join(item["text"][:80] for item in done[-3:]))
+    if next_item:
+        lines.append("Дальше: " + str(next_item["text"])[:160])
+    else:
+        lines.append("Все пункты выполнены — проверь результат и отвечай.")
+    return "\n".join(lines)
+
+
+def set_plan(state, steps):
+    """Сохраняет план в state и возвращает нормализованный список шагов."""
+    items = []
+    for step in steps or []:
+        text = str(step.get("text") if isinstance(step, dict) else step).strip()
+        if not text:
+            continue
+        status = str(step.get("status") if isinstance(step, dict) else "todo") or "todo"
+        items.append({"text": text[:300], "status": status if status in ("todo", "done", "doing") else "todo"})
+    state["plan"] = items
+    state["plan_done"] = 0
+    return items
+
+
+def advance_plan(state):
+    """Отмечает очередной пункт плана выполненным (после успешного шага)."""
+    plan = state.get("plan") or []
+    for item in plan:
+        if item.get("status") != "done":
+            item["status"] = "done"
+            state["plan_done"] = sum(1 for entry in plan if entry.get("status") == "done")
+            return item
+    return None
+
+
+def plan_event(state):
+    plan = state.get("plan") or []
+    if not plan:
+        return None
+    return {"type": "plan", "steps": [dict(item) for item in plan],
+            "done": sum(1 for item in plan if item.get("status") == "done"),
+            "total": len(plan),
+            "text": plan_status_text(state)}
+
+
 def is_simple_chat_request(text: str) -> bool:
     """Определяет короткие вопросы, которым не нужны внешние инструменты."""
     value = str(text or "").strip().lower()
@@ -929,7 +1000,9 @@ def agent_stream():
                  "research": 0, "searched": bool(data.get("search")), "tool_steps": 0,
                  "media_context": [], "media": [], "media_markers": [],
                  "workspace_used": False, "tools_used": [], "media_tried": False,
-                 "media_error": "", "stopped": False, "approved": set(), "run_id": run_id}
+                 "media_error": "", "stopped": False, "approved": set(), "run_id": run_id,
+                 "plan": [], "plan_done": 0, "verify_requests": 0, "verified": False,
+                 "verify_pending": False, "memory_key": ""}
 
 
         # 1. Один первый запрос: простой вопрос получает обычный ответ без лишнего plan/stage.
@@ -975,6 +1048,12 @@ def agent_stream():
             system_content += (
                 "\n\nMCP SEARCH PREFERENCE: if AVAILABLE TOOL REGISTRY contains an Exa search tool, "
                 "use mcp_call to that Exa tool for web research before the built-in web_search."
+            )
+        if is_complex_request(goal):
+            system_content += (
+                "\n\nСЛОЖНЫЙ ЗАПРОС: сначала вызови инструмент plan со списком конкретных шагов "
+                "(2–6 пунктов), затем выполняй их по порядку и отмечай прогресс. Перед финальным "
+                "ответом сверь результат с целью и планом."
             )
         if requested_skill_creation(goal):
             system_content += (
@@ -1095,6 +1174,9 @@ def agent_stream():
                 )
             if data.get("search") and not strict_mcp:
                 notes.append("ПОИСК ВКЛЮЧЁН. Используй найденные данные и указывай источники [1], [2], [3].")
+            plan_note = plan_status_text(state)
+            if plan_note:
+                notes.append(plan_note)
             base_system = history[0]["content"] if history and history[0].get("role") == "system" else ""
             ask_kwargs = {"provider": provider, "model": model,
                           "temperature": 0.1, "max_tokens": 1200, "timeout": 60,
@@ -1186,15 +1268,17 @@ def agent_stream():
             if kind == "plan":
                 state["steps"] += 1
                 steps = action.get("steps") or action.get("plan") or action.get("text") or []
-                if isinstance(steps, list):
-                    plan_text = "\n".join(f"{i}. {str(item)}" for i, item in enumerate(steps, 1))
-                else:
-                    plan_text = str(steps)
+                if not isinstance(steps, list):
+                    steps = [line for line in str(steps).splitlines() if line.strip()]
+                items = set_plan(state, steps)
+                plan_text = "\n".join(f"{i}. {item['text']}" for i, item in enumerate(items, 1))
                 yield _ndjson({"type": "stage", "scene": "agent", "title": "Планирую",
                                "text": "Разбираю задачу по шагам…"})
-                yield _ndjson({"type": "plan", "text": clip(plan_text, 900)})
+                yield _ndjson({"type": "plan", "text": clip(plan_text, 900),
+                               "steps": items, "done": 0, "total": len(items)})
                 history.append({"role": "assistant", "content": json.dumps(action, ensure_ascii=False)[:2000]})
-                history.append({"role": "user", "content": "План принят. Выполни первый пункт и продолжай работу."})
+                history.append({"role": "user", "content":
+                                "План принят. Выполняй пункты по порядку и продолжай до готового ответа."})
                 continue
             if action.get("thought"):
                 yield _ndjson({"type": "step", "icon": "🧠", "text": str(action.get("thought"))[:900]})
@@ -1250,7 +1334,42 @@ def agent_stream():
                 break
 
             if kind == "answer":
-                state["answer"] = str(action.get("text") or "").strip()
+                answer_text = str(action.get("text") or "").strip()
+                # Уже просили сверить результат и с тех пор новых шагов не было —
+                # значит повторный ответ модели и есть подтверждённый финал.
+                already_checked = (state.get("verify_pending")
+                                   and state["tool_steps"] <= state.get("tool_steps_at_verify", -1))
+                needs_verify = (not state.get("verified")
+                                and not already_checked
+                                and state["tool_steps"] > 0
+                                and state["verify_requests"] < 2)
+                if needs_verify:
+                    # Перед финалом модель сверяет результат с целью и планом.
+                    # Если чего-то не хватает — продолжит работу инструментами.
+                    state["verify_requests"] += 1
+                    state["verify_pending"] = True
+                    state["tool_steps_at_verify"] = state["tool_steps"]
+                    yield _ndjson({"type": "step", "icon": "🔍",
+                                   "text": "Проверяю, всё ли сделано по плану"})
+                    prompt = ("ПРОВЕРКА ПЕРЕД ОТВЕТОМ. Цель: " + goal
+                              + "\n" + (plan_status_text(state) or "План не задан.")
+                              + "\nСверь сделанное с целью. Если чего-то не хватает — продолжай "
+                              "работу инструментами. Если всё готово — снова дай action=answer "
+                              "(или ответь обычным текстом).")
+                    if native_call is not None:
+                        history.append(_native_assistant_message(native_call))
+                        history.append({"role": "tool", "tool_call_id": native_call.get("id") or "call_0",
+                                        "content": "ответ принят предварительно"})
+                        history.append({"role": "user", "content": prompt})
+                    else:
+                        history.append({"role": "assistant",
+                                        "content": json.dumps(action, ensure_ascii=False)[:2000]})
+                        history.append({"role": "user", "content": prompt})
+                    pending_native = []
+                    continue
+                state["verified"] = True
+                state["verify_pending"] = False
+                state["answer"] = answer_text
                 break
 
             if native_call is not None:
@@ -1259,6 +1378,10 @@ def agent_stream():
                 history.append({"role": "assistant", "content": json.dumps(action, ensure_ascii=False)[:2000]})
             observation = clip(observation)
             verification = _verify_action(kind, observation)
+            if verification["ok"] and state.get("plan"):
+                marked = advance_plan(state)
+                if marked:
+                    yield _ndjson({**plan_event(state), "marked": marked["text"]})
             yield _ndjson({"type": "verify", "ok": verification["ok"], "tool": kind,
                            "text": verification["message"]})
             if native_call is not None:

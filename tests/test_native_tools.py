@@ -207,6 +207,8 @@ def test_agent_uses_native_tool_call_and_answers(admin_client, sandbox, fake_sea
     _stub_native(monkeypatch, [
         {"tool_calls": [_normalized("call_1", "search", {"query": "asyncio"})]},
         {"tool_calls": [_normalized("call_2", "answer", {"text": "asyncio — библиотека Python"})]},
+        # ответ на обязательную самопроверку (этап 5)
+        {"tool_calls": [_normalized("call_3", "answer", {"text": "asyncio — библиотека Python"})]},
     ], seen)
 
     events = _ndjson(admin_client.post("/api/agent/stream", json={"message": "найди документацию asyncio"}))
@@ -235,6 +237,7 @@ def test_agent_executes_every_native_call_from_one_response(admin_client, sandbo
             _normalized("call_2", "open", {"url": "https://docs.python.org/asyncio"}),
         ]},
         {"tool_calls": [_normalized("call_3", "answer", {"text": "готово: два инструмента"})]},
+        {"tool_calls": [_normalized("call_4", "answer", {"text": "готово: два инструмента"})]},
     ], seen)
 
     events = _ndjson(admin_client.post("/api/agent/stream", json={"message": "найди и изучи asyncio по шагам"}))

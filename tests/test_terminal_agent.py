@@ -445,6 +445,8 @@ def test_agent_skips_repeated_action(admin_client, monkeypatch, sandbox):
         '{"action":"search","query":"вопрос"}',
         '{"action":"search","query":"вопрос"}',
         '{"action":"answer","text":"Ответ по найденному"}',
+        # самопроверка перед финалом (этап 5) — модель подтверждает ответ
+        '{"action":"answer","text":"Ответ по найденному"}',
     ])
     events = _ndjson(admin_client.post("/api/agent/stream", json={"message": "вопрос"}))
     assert sum(1 for event in events if event["type"] == "tool") == 1

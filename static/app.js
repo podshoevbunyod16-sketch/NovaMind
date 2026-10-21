@@ -651,8 +651,13 @@ function createAssistantTurn(options = {}) {
     },
 
     /** План агента: короткий блок над шагами. */
-    plan(text) {
-      if (!text) return;
+    /**
+     * План и галочки выполнения.
+     * Принимает строку (старый формат) или событие {text, steps:[{text,status}], done, total}.
+     */
+    plan(payload) {
+      const event = payload && typeof payload === 'object' ? payload : { text: payload };
+      if (!event.text && !(event.steps && event.steps.length)) return;
       ensureStage(null, '');
       let box = stage.querySelector('.stage-plan');
       if (!box) {
@@ -660,7 +665,22 @@ function createAssistantTurn(options = {}) {
         box.className = 'stage-plan';
         stage.insertBefore(box, stepsEl);
       }
-      box.innerHTML = `<span class="stage-plan-label">План</span><span class="stage-plan-text">${escapeHtml(text)}</span>`;
+      if (Array.isArray(event.steps) && event.steps.length) {
+        const done = Number.isFinite(event.done) ? event.done
+          : event.steps.filter((step) => step.status === 'done').length;
+        const total = event.total || event.steps.length;
+        box.innerHTML = `
+          <span class="stage-plan-label">План · ${done}/${total}</span>
+          <ul class="stage-plan-steps">
+            ${event.steps.map((step) => `
+              <li class="is-${escapeHtml(step.status || 'todo')}">
+                <span class="stage-plan-check">${step.status === 'done' ? '✔' : '•'}</span>
+                ${escapeHtml(step.text || '')}
+              </li>`).join('')}
+          </ul>`;
+      } else {
+        box.innerHTML = `<span class="stage-plan-label">План</span><span class="stage-plan-text">${escapeHtml(event.text || '')}</span>`;
+      }
       scrollToBottom();
     },
 
