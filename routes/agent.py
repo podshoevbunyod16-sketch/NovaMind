@@ -28,8 +28,10 @@ import re
 import threading
 import time
 
-from ai_providers import chat_completion, chat_stream, resolve_target  # noqa: F401 (chat_stream — для тестов)
-from tool_registry import bootstrap_default_tools, call_tool, tool_schemas
+from ai_providers import (chat_completion, chat_stream, resolve_target,  # noqa: F401 (chat_stream — для тестов)
+                          supports_native_tools)
+from tool_registry import (bootstrap_default_tools, call_tool, tool_schemas,
+                           native_tool_schemas, native_tool_risk)
 from routes.terminal import (run_agent as run_terminal, safe_path, relative_to_workspace,
                              ensure_workspace, nova_search, nova_read, _save_research,  # noqa: F401
                              can_use_workspace, signed_in, _format_results as _format_search_results)
@@ -284,6 +286,121 @@ def looks_like_action(raw):
 def clip(text, limit=MAX_OBSERVATION):
     text = (text or "").strip()
     return text if len(text) <= limit else text[:limit] + "\n… обрезано"
+
+
+# Провайдеры/модели, у которых нативный tool calling уже не сработал:
+# второй раз в том же процессе не пробуем, сразу идём JSON-протоколом.
+_NATIVE_TOOL_BLOCKED: set = set()
+
+NATIVE_TOOLS_ENABLED = os.getenv("AGENT_NATIVE_TOOLS", "1") == "1"
+
+# Признаки того, что провайдер не принял массив tools (нужен откат).
+_UNSUPPORTED_TOOLS_HINTS = (
+    "tool", "function", "unsupported", "not supported", "invalid_request",
+    "bad request", "400",
+)
+
+
+def native_tools_available(provider, model, tools) -> bool:
+    """Стоит ли пробовать нативный tool calling в этом запросе."""
+    if not NATIVE_TOOLS_ENABLED or not tools:
+        return False
+    if (provider, model) in _NATIVE_TOOL_BLOCKED:
+        return False
+    return supports_native_tools(provider, model)
+
+
+def tools_unsupported_error(error) -> bool:
+    """Похоже ли сообщение об ошибке на «tools не поддерживаются»."""
+    text = str(error or "").lower()
+    if not text:
+        return False
+    if "tools" in text or "function" in text or "tool_" in text:
+        return True
+    return any(hint in text for hint in _UNSUPPORTED_TOOLS_HINTS if hint != "tool")
+
+
+def _ask_native(messages, tools, **kwargs):
+    """Запрос с нативными инструментами.
+
+    Возвращает (text, tool_calls, error). Пустой текст при наличии
+    tool_calls — нормальная ситуация, а не ошибка.
+    """
+    try:
+        text, meta = chat_completion(messages, tools=tools, **kwargs)
+    except TypeError as exc:            # старый провайдерский слой без tools
+        return "", [], f"tools не поддержаны: {exc}"
+    except Exception as exc:            # noqa: BLE001 — цикл не должен падать
+        return "", [], f"{exc.__class__.__name__}: {exc}"
+    if text is None:
+        return "", [], str(meta or "модель не ответила")
+    calls = []
+    if isinstance(meta, dict):
+        calls = meta.get("tool_calls") or []
+    return str(text or ""), list(calls), ""
+
+
+def _native_assistant_message(call) -> dict:
+    """Сообщение assistant с tool_calls — как его ждёт OpenAI-совместимый API."""
+    return {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [{
+            "id": call.get("id") or "call_0",
+            "type": "function",
+            "function": {"name": call.get("name") or "",
+                         "arguments": call.get("raw_arguments") or "{}"},
+        }],
+    }
+
+
+def _action_from_tool_call(call, state=None) -> dict:
+    """tool_call модели → обычное действие агента {"action": name, ...}."""
+    name = str(call.get("name") or "").strip()
+    args = call.get("arguments") or {}
+    if not isinstance(args, dict):
+        args = {}
+    action = {"action": name}
+    action.update(args)
+    if call.get("arguments_error"):
+        action["_arguments_error"] = str(call["arguments_error"])
+    if name == "task_done" and state is not None and action.get("task_id"):
+        state["task_id"] = str(action["task_id"])
+    return action
+
+
+def _request_step(dialogue, ask_kwargs, native_mode, native_tools, provider, model, state):
+    """Один запрос к модели.
+
+    Возвращает dict: raw, action, call (текущий tool_call), pending (остальные
+    tool_calls из того же ответа), error, native_mode, fallback.
+    """
+    result = {"raw": "", "action": None, "call": None, "pending": [],
+              "error": "", "native_mode": native_mode, "fallback": False}
+    if not native_mode:
+        raw, error = _ask(dialogue, **ask_kwargs)
+        result.update(raw=raw, error=error)
+        return result
+
+    text, calls, error = _ask_native(dialogue, native_tools, **ask_kwargs)
+    if error:
+        if tools_unsupported_error(error):
+            # Провайдер/модель не умеет tools — молча возвращаемся к JSON.
+            result["fallback"] = True
+            result["native_mode"] = False
+            raw, fallback_error = _ask(dialogue, **ask_kwargs)
+            result.update(raw=raw, error=fallback_error)
+            return result
+        result["error"] = error
+        return result
+    if calls:
+        result["raw"] = text
+        result["call"] = calls[0]
+        result["pending"] = calls[1:]
+        result["action"] = _action_from_tool_call(calls[0], state)
+        return result
+    result["raw"] = text
+    return result
 
 
 def _ask(messages, **kwargs):
@@ -658,14 +775,33 @@ def agent_stream():
             if wants_tool and str(fast_answer or "").strip():
                 pending_raw = str(fast_answer).strip()
 
-        # Раньше флаг search автоматически запускал DuckDuckGo до первого
-        # решения модели. Теперь он только передаёт агенту подсказку: агент
-        # сам выбирает MCP, web_search, web_open или локальный инструмент.
+        # Нативный tool calling: модели отдаём настоящие функции, а не
+        # инструкцию «ответь JSON-ом». Если провайдер их не принимает,
+        # на лету откатываемся на старый JSON-протокол (см. _request_step).
+        native_tools = native_tool_schemas(workspace=use_tools) if available_schemas else []
+        if strict_mcp:
+            native_tools = [t for t in native_tools
+                            if t.get("function", {}).get("name") == "mcp_call"]
+        if forced_media_kind:
+            wanted = str(forced_media_kind)
+            native_tools = [t for t in native_tools
+                            if t.get("function", {}).get("name") in (wanted, "answer")]
+            native_tools = native_tools or native_tool_schemas(workspace=use_tools)
+        native_mode = native_tools_available(provider, model, native_tools)
+        if native_mode:
+            history[0]["content"] = history[0]["content"] + (
+                "\n\nРЕЖИМ НАТИВНОГО TOOL CALLING: инструменты доступны как функции. "
+                "Не пиши JSON-действия текстом — вызывай функцию. Когда данных достаточно, "
+                "вызови функцию answer с готовым ответом."
+            )
+        else:
+            native_tools = []
 
         # 2. Цикл действий
         seen, duplicates, parse_fails = set(), 0, 0
         outcomes, retries = {}, {}
         limit_reached = False
+        pending_native = []          # остальные tool_calls из одного ответа
         for step in range(1, MAX_STEPS + 4):
             if time.time() - started > AGENT_TIMEOUT:
                 yield _ndjson({"type": "step", "icon": "⏱", "text": "Время вышло — собираю ответ"})
@@ -692,16 +828,52 @@ def agent_stream():
                           "temperature": 0.1, "max_tokens": 1200, "timeout": 60,
                           "system": (base_system + ("\n\n" + "\n".join(notes) if notes else "")).strip()}
             dialogue = history[1:] if history and history[0].get("role") == "system" else history
-            if pending_raw is not None:
+            native_call = None
+            if pending_native:
+                # Модель вернула несколько вызовов — выполняем их по очереди.
+                native_call = pending_native.pop(0)
+                action, raw, error = _action_from_tool_call(native_call, state), "", ""
+            elif pending_raw is not None:
                 raw, error = pending_raw, ""
                 pending_raw = None
+                action = None
             else:
-                raw, error = _ask(dialogue, **ask_kwargs)
+                step_result = _request_step(dialogue, ask_kwargs, native_mode,
+                                            native_tools, provider, model, state)
+                if step_result["fallback"]:
+                    _NATIVE_TOOL_BLOCKED.add((provider, model))
+                    native_mode = False
+                    yield _ndjson({"type": "step", "icon": "🧩",
+                                   "text": "Провайдер не принял инструменты — работаю по JSON-протоколу"})
+                native_mode = step_result["native_mode"] if step_result["fallback"] else native_mode
+                raw, error = step_result["raw"], step_result["error"]
+                action, native_call = step_result["action"], step_result["call"]
+                pending_native = step_result["pending"]
+                if native_call is not None and str(raw or "").strip():
+                    yield _ndjson({"type": "step", "icon": "🧠", "text": clip(str(raw), 600)})
             if error:
                 yield _ndjson({"type": "error", "text": error})
                 break                                   # ответ соберём из найденного
 
-            action = parse_action(raw)
+            if action is not None and action.get("_arguments_error"):
+                # Битый JSON в аргументах: не выполняем инструмент, просим повторить.
+                parse_fails += 1
+                yield _ndjson({"type": "step", "icon": "⚠️",
+                               "text": "Не разобрал аргументы инструмента — прошу повторить"})
+                if native_call is not None:
+                    history.append(_native_assistant_message(native_call))
+                    history.append({"role": "tool", "tool_call_id": native_call.get("id") or "call_0",
+                                    "content": "ОШИБКА: аргументы не являются корректным JSON-объектом. "
+                                               "Повтори вызов с корректными аргументами."})
+                else:
+                    history.append({"role": "user", "content":
+                                    "Аргументы не разобрались как JSON. Повтори вызов корректно."})
+                if parse_fails >= 3:
+                    break
+                continue
+
+            if action is None:
+                action = parse_action(raw)
             extracted = _extract_json_object(strip_think(raw)) if raw else None
             if action and extracted and strip_think(raw).strip() != extracted.strip():
                 yield _ndjson({"type": "retract", "count": len(strip_think(raw))})
@@ -716,6 +888,7 @@ def agent_stream():
                 # отказа провайдера только засоряет чат.
                 state["media_tried"] = True
                 action = {"action": forced_media_kind, "prompt": media_prompt(goal)}
+                native_call = None
             if not action and re.match(r"^План\s*:", strip_think(raw), re.I):
                 plan_text = strip_think(raw).split(":", 1)[1].strip()
                 yield _ndjson({"type": "stage", "scene": "agent", "title": "Планирую",
@@ -801,18 +974,27 @@ def agent_stream():
                 state["answer"] = str(action.get("text") or "").strip()
                 break
 
-            history.append({"role": "assistant", "content": json.dumps(action, ensure_ascii=False)[:2000]})
+            if native_call is not None:
+                history.append(_native_assistant_message(native_call))
+            else:
+                history.append({"role": "assistant", "content": json.dumps(action, ensure_ascii=False)[:2000]})
             observation = clip(observation)
             verification = _verify_action(kind, observation)
             yield _ndjson({"type": "verify", "ok": verification["ok"], "tool": kind,
                            "text": verification["message"]})
+            if native_call is not None:
+                history.append({"role": "tool", "tool_call_id": native_call.get("id") or "call_0",
+                                "content": observation or "инструмент ничего не вернул"})
             if not verification["ok"]:
                 history.append({"role": "user", "content":
                                 "VERIFY: действие не подтверждено. Не повторяй вслепую; "
                                 "исправь параметры или выбери другой инструмент."})
             nudge = _nudge(state, MAX_STEPS - state["tool_steps"])
-            history.append({"role": "user", "content":
-                            f"Результат действия:\n{observation}" + (f"\n\n{nudge}" if nudge else "")})
+            if native_call is None:
+                history.append({"role": "user", "content":
+                                f"Результат действия:\n{observation}" + (f"\n\n{nudge}" if nudge else "")})
+            elif nudge:
+                history.append({"role": "user", "content": nudge})
 
         if limit_reached or (state["tool_steps"] >= MAX_STEPS and not state["answer"]):
             yield _ndjson({"type": "step", "icon": "⏹", "text": "Шаги закончились — готовлю итог"})

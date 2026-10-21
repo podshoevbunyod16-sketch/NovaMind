@@ -6,6 +6,9 @@ import logging, time
 
 log = logging.getLogger("novamind.agent")
 
+RISK_LEVELS = ("safe", "write", "danger")
+
+
 @dataclass(frozen=True)
 class ToolSpec:
     name: str
@@ -14,6 +17,9 @@ class ToolSpec:
     execute: Callable[..., dict]
     permissions: tuple[str, ...] = ()
     timeout: float = 30.0
+    # risk: safe — только чтение; write — меняет данные; danger — необратимые
+    # или внешние действия (публикация, отправка, установка пакетов).
+    risk: str = "safe"
 
     def call(self, **kwargs) -> dict:
         started = time.monotonic()
@@ -59,21 +65,25 @@ def tool_schemas(workspace: bool | None = None) -> list[dict]:
     if workspace is not None:
         specs = [t for t in specs if workspace or t.name not in WORKSPACE_TOOLS]
     schemas = [{"name": t.name, "description": t.description, "schema": dict(t.schema),
-                "permissions": list(t.permissions), "timeout": t.timeout} for t in specs]
+                "permissions": list(t.permissions), "timeout": t.timeout,
+                "risk": t.risk} for t in specs]
     try:
         import mcp_registry
         connected = mcp_registry.connected_tools()
         if connected:
             available = ", ".join(f"{x['server_id']}:{x['name']}" for x in connected)
+            # Если mcp_call уже зарегистрирован, не дублируем его, а дополняем
+            # каталогом реально подключённых инструментов.
+            existing = next((item for item in schemas if item["name"] == "mcp_call"), None)
             catalog = [{
                 "server_id": x["server_id"],
                 "name": x["name"],
                 "description": str(x.get("description") or "")[:500],
                 "inputSchema": x.get("inputSchema") or {"type": "object"},
             } for x in connected]
-            schemas.append({
+            entry = existing or {
                 "name": "mcp_call",
-                "description": "Вызвать инструмент подключённого MCP-сервера. Доступные инструменты: " + available,
+                "description": "Вызвать инструмент подключённого MCP-сервера.",
                 "schema": {
                     "type": "object",
                     "properties": {
@@ -83,13 +93,91 @@ def tool_schemas(workspace: bool | None = None) -> list[dict]:
                     },
                     "required": ["server_id", "tool"],
                 },
-                "mcp_tools": catalog,
                 "permissions": ["network", "external_service"],
                 "timeout": 30,
-            })
+                "risk": "danger",
+            }
+            entry["description"] = entry["description"].split(". Доступные")[0] + ". Доступные инструменты: " + available
+            entry["mcp_tools"] = catalog
+            if existing is None:
+                schemas.append(entry)
     except Exception:
         pass
     return schemas
+
+# Действия агента (JSON-протокол) и инструменты реестра, которые за ними стоят.
+ACTION_TO_TOOL = {
+    "search": "web_search", "open": "web_open", "run": "shell",
+    "read": "file_read", "write": "file_write", "git": "git",
+    "mcp_call": "mcp_call", "image": "image", "audio": "audio", "video": "video",
+    "skill_create": "skill_create", "task": "task", "task_done": "task_done",
+}
+
+# Действия, которым нужна рабочая папка и вход пользователя.
+WORKSPACE_ACTIONS = {"run", "read", "write", "ls", "git"}
+
+# Описания действий агента для нативного tool calling: имя → (описание, risk).
+AGENT_ACTION_META = {
+    "search": ("Поиск в интернете: заголовки, ссылки и выдержки по запросу.", "safe"),
+    "open": ("Прочитать страницу по полному URL (http/https) и вернуть текст.", "safe"),
+    "run": ("Выполнить одну команду в рабочей папке пользователя.", "write"),
+    "read": ("Прочитать текстовый файл рабочей папки.", "safe"),
+    "write": ("Создать или перезаписать текстовый файл рабочей папки.", "write"),
+    "ls": ("Показать файлы и папки рабочей директории.", "safe"),
+    "git": ("Выполнить git-команду в рабочей папке.", "write"),
+    "mcp_call": ("Вызвать инструмент подключённого MCP-сервера (server_id, tool, arguments).", "danger"),
+    "image": ("Сгенерировать изображение по текстовому описанию.", "write"),
+    "audio": ("Озвучить текст (text-to-speech).", "write"),
+    "video": ("Сгенерировать видео по описанию.", "write"),
+    "skill_create": ("Создать skill из готового SKILL.md (name, content).", "write"),
+    "task": ("Завести задачу с подпунктами (title, detail, steps).", "write"),
+    "task_done": ("Закрыть задачу с пометкой о результате (task_id, note).", "write"),
+    "answer": ("Финальный ответ пользователю. Вызывай, когда данных достаточно.", "safe"),
+}
+
+# Схемы действий, у которых нет ToolSpec в реестре.
+_EXTRA_ACTION_SCHEMAS = {
+    "ls": {"type": "object", "properties": {}},
+    "answer": {"type": "object",
+               "properties": {"text": {"type": "string", "description": "ответ пользователю"}},
+               "required": ["text"]},
+}
+
+
+def native_tool_schemas(workspace: bool | None = None, only=None) -> list[dict]:
+    """OpenAI-совместимые tools для нативного tool calling.
+
+    Имена инструментов совпадают с действиями JSON-протокола (search, open,
+    run, …), поэтому вызов модели превращается в обычный action без
+    переходников. Схемы аргументов берутся из реестра ToolSpec.
+    """
+    specs = {spec.name: spec for spec in list_tools()}
+    tools = []
+    for action, (description, risk) in AGENT_ACTION_META.items():
+        if only is not None and action not in only:
+            continue
+        if workspace is False and action in WORKSPACE_ACTIONS:
+            continue
+        spec = specs.get(ACTION_TO_TOOL.get(action, action))
+        parameters = dict(spec.schema) if spec and spec.schema else dict(_EXTRA_ACTION_SCHEMAS.get(action) or {})
+        if not parameters:
+            parameters = {"type": "object", "properties": {}}
+        tools.append({"type": "function", "function": {
+            "name": action,
+            "description": str(description)[:500],
+            "parameters": parameters,
+        }})
+    return tools
+
+
+def native_tool_risk(name: str) -> str:
+    """Уровень риска действия агента: safe | write | danger."""
+    action = str(name or "")
+    spec = get_tool(ACTION_TO_TOOL.get(action, action))
+    if spec is not None:
+        return spec.risk
+    return AGENT_ACTION_META.get(action, ("", "safe"))[1]
+
 
 def call_tool(name: str, **kwargs) -> dict:
     spec = get_tool(name)
@@ -98,6 +186,7 @@ def call_tool(name: str, **kwargs) -> dict:
     return spec.call(**kwargs)
 
 def bootstrap_default_tools():
+    _register_agent_tools()
     if get_tool("web_search") is None:
         register_tool(ToolSpec(
             "web_search", "Search the public web and return normalized ranked sources.",
@@ -116,7 +205,7 @@ def bootstrap_default_tools():
             {"type":"object","properties":{"command":{"type":"string"},"timeout":{"type":"number"}},"required":["command"]},
             lambda command, timeout=12: _workspace_guard() or _shell_result(
                 run_agent(command, timeout=min(float(timeout),30))),
-            permissions=("workspace",), timeout=30))
+            permissions=("workspace",), timeout=30, risk="write"))
     if get_tool("file_read") is None:
         from routes.terminal import safe_path
         def read_file(path, max_chars=60000):
@@ -151,7 +240,7 @@ def bootstrap_default_tools():
         register_tool(ToolSpec(
             "file_write", "Write a UTF-8 text file inside workspace.",
             {"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}},"required":["path","content"]},
-            write_file, permissions=("workspace",), timeout=5))
+            write_file, permissions=("workspace",), timeout=5, risk="write"))
 
     if get_tool("git") is None:
         from routes.terminal import run_agent
@@ -166,7 +255,110 @@ def bootstrap_default_tools():
         register_tool(ToolSpec(
             "git", "Run a Git command inside the workspace.",
             {"type":"object","properties":{"command":{"type":"string"},"timeout":{"type":"number"}},"required":["command"]},
-            git, permissions=("workspace",), timeout=30))
+            git, permissions=("workspace",), timeout=30, risk="write"))
+
+def _register_agent_tools():
+    """Инструменты уровня агента, доступные и нативному tool calling.
+
+    Раньше image/audio/video/skill_create/task/task_done/mcp_call жили
+    только внутри routes/agent.py и не попадали в реестр, поэтому модель
+    в нативном режиме о них не знала.
+    """
+    if get_tool("mcp_call") is None:
+        def mcp_call(server_id, tool, arguments=None):
+            import mcp_registry
+            if not str(server_id or "").strip() or not str(tool or "").strip():
+                return {"ok": False, "error": {"type": "bad_arguments",
+                                               "message": "нужны server_id и tool",
+                                               "retryable": False}}
+            result = mcp_registry.call_tool(str(server_id), str(tool), arguments or {})
+            if isinstance(result, dict) and result.get("error"):
+                return {"ok": False, "result": result,
+                        "error": {"type": "mcp_error", "message": str(result.get("error"))[:500],
+                                  "retryable": True}}
+            return {"ok": True, "result": result}
+        register_tool(ToolSpec(
+            "mcp_call", "Вызвать инструмент подключённого MCP-сервера.",
+            {"type": "object",
+             "properties": {"server_id": {"type": "string"},
+                            "tool": {"type": "string"},
+                            "arguments": {"type": "object"}},
+             "required": ["server_id", "tool"]},
+            mcp_call, permissions=("network", "external_service"), timeout=30,
+            risk="danger"))
+
+    for kind, title in (("image", "изображение"), ("audio", "аудио"), ("video", "видео")):
+        name = kind
+        if get_tool(name) is not None:
+            continue
+
+        def media(kind=kind, prompt="", model="", size="", voice=""):
+            import media_agent
+            action = {"prompt": str(prompt), "model": model, "size": size, "voice": voice}
+            options = media_agent.build_options(kind, action)
+            result, used_model, errors = media_agent.generate(
+                kind, str(prompt), options=options, wanted_model=str(model or ""))
+            if not result:
+                return {"ok": False, "kind": kind,
+                        "error": {"type": "media_failed",
+                                  "message": "; ".join(str(e) for e in (errors or []))[:500] or "модель не ответила",
+                                  "retryable": True}}
+            return {"ok": True, "kind": kind, "model": used_model, "result": result}
+        register_tool(ToolSpec(
+            name, f"Сгенерировать {title} по текстовому описанию.",
+            {"type": "object",
+             "properties": {"prompt": {"type": "string"}, "model": {"type": "string"},
+                            "size": {"type": "string"}, "voice": {"type": "string"}},
+             "required": ["prompt"]},
+            media, permissions=("network",), timeout=180, risk="write"))
+
+    if get_tool("skill_create") is None:
+        def skill_create(name, content):
+            import skills_registry
+            try:
+                item = skills_registry.save_text(str(name), str(content or ""))
+            except ValueError as exc:
+                return {"ok": False, "error": {"type": "invalid_skill", "message": str(exc),
+                                               "retryable": False}}
+            return {"ok": True, "skill": item}
+        register_tool(ToolSpec(
+            "skill_create", "Создать skill (SKILL.md) из готового текста.",
+            {"type": "object",
+             "properties": {"name": {"type": "string"}, "content": {"type": "string"}},
+             "required": ["name", "content"]},
+            skill_create, permissions=("workspace",), timeout=5, risk="write"))
+
+    if get_tool("task") is None:
+        def task(title, detail="", steps=None):
+            import database
+            created = database.create_task(str(title), detail=str(detail or ""),
+                                           source="agent", steps=steps)
+            return {"ok": bool(created), "task": created}
+        register_tool(ToolSpec(
+            "task", "Завести задачу с подпунктами в detail.",
+            {"type": "object",
+             "properties": {"title": {"type": "string"}, "detail": {"type": "string"},
+                            "steps": {"type": "array", "items": {"type": "string"}}},
+             "required": ["title"]},
+            task, permissions=("database",), timeout=5, risk="write"))
+
+    if get_tool("task_done") is None:
+        def task_done(task_id, note=""):
+            import database
+            updated = database.update_task(str(task_id), status="done")
+            if not updated:
+                return {"ok": False, "error": {"type": "not_found", "message": "задача не найдена",
+                                               "retryable": False}}
+            database.append_task_step(str(task_id), str(note or "Готово"), status="done",
+                                      log=str(note or "")[:1000])
+            return {"ok": True, "task": database.get_task(str(task_id))}
+        register_tool(ToolSpec(
+            "task_done", "Закрыть задачу с пометкой о результате.",
+            {"type": "object",
+             "properties": {"task_id": {"type": "string"}, "note": {"type": "string"}},
+             "required": ["task_id"]},
+            task_done, permissions=("database",), timeout=5, risk="write"))
+
 
 def _workspace_guard():
     """Единая проверка доступа к песочнице для инструментов реестра.

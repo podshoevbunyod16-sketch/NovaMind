@@ -113,16 +113,56 @@ def _format_gemini_error(status_code, response):
 
 
 def gemini_messages_from_openai(messages):
-    contents_out=[]; system_text=""
+    """OpenAI-сообщения → (systemInstruction, contents) для Gemini.
+
+    Поддерживает нативный tool calling: assistant.tool_calls превращается
+    в functionCall, а role="tool" — в functionResponse (иначе Gemini
+    отверг бы второй запрос цикла агента).
+    """
+    contents_out=[]; system_text=""; call_names={}
     for message in messages or []:
+        if not isinstance(message, dict):
+            continue
         role=message.get("role","user"); content=message.get("content","")
         if isinstance(content,list):
             content="\n".join(str(p.get("text","")) for p in content if isinstance(p,dict) and p.get("text"))
         content=str(content or "")
-        if not content: continue
+        calls = message.get("tool_calls") if role == "assistant" else None
+        if not content and not calls: continue
         if role=="system": system_text=(system_text+"\n\n"+content).strip()
-        else: contents_out.append({"role":"model" if role=="assistant" else "user","parts":[{"text":content}]})
+        elif role=="assistant":
+            parts=[]
+            if content: parts.append({"text":content})
+            for call in calls or []:
+                if not isinstance(call, dict): continue
+                function = call.get("function") if isinstance(call.get("function"), dict) else {}
+                name = str(function.get("name") or "")
+                if not name: continue
+                args, _err = _parse_tool_arguments(function.get("arguments"))
+                call_names[str(call.get("id") or name)] = name
+                parts.append({"functionCall": {"name": name, "args": args}})
+            if parts: contents_out.append({"role":"model","parts":parts})
+        elif role=="tool":
+            name = call_names.get(str(message.get("tool_call_id") or "")) or str(message.get("name") or "tool")
+            contents_out.append({"role":"user","parts":[{"functionResponse":{
+                "name": name, "response": {"result": content}}}]})
+        else: contents_out.append({"role":"user","parts":[{"text":content}]})
     return system_text,contents_out
+
+
+def gemini_tools_payload(tools):
+    """OpenAI-совместимые tools → Gemini functionDeclarations."""
+    declarations = []
+    for tool in openai_tools_payload(tools):
+        function = tool["function"]
+        parameters = function.get("parameters") or {"type": "object", "properties": {}}
+        if isinstance(parameters, dict):
+            parameters = {k: v for k, v in parameters.items()
+                          if k not in ("additionalProperties", "$schema")}
+        declarations.append({"name": function["name"],
+                             "description": function.get("description", ""),
+                             "parameters": parameters})
+    return [{"functionDeclarations": declarations}] if declarations else []
 
 def gemini_request(model,payload,timeout=90,max_retries=2):
     key=(os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_AI_STUDIO_KEY") or "").strip()
@@ -132,6 +172,10 @@ def gemini_request(model,payload,timeout=90,max_retries=2):
     if not contents_out: return None,"Google AI Studio: отсутствует сообщение"
     body={"contents":contents_out,"generationConfig":{"temperature":float(payload.get("temperature",0.7)),"maxOutputTokens":min(int(payload.get("max_tokens",65536)),65536)}}
     if system_text: body["systemInstruction"]={"parts":[{"text":system_text}]}
+    gemini_tools=gemini_tools_payload(payload.get("tools"))
+    if gemini_tools:
+        body["tools"]=gemini_tools
+        body["toolConfig"]={"functionCallingConfig":{"mode":"AUTO"}}
     url=f"https://generativelanguage.googleapis.com/v1beta/models/{model_id}:generateContent"
     headers={"Content-Type":"application/json","x-goog-api-key":key}
     for attempt in range(max_retries):
@@ -145,12 +189,19 @@ def gemini_request(model,payload,timeout=90,max_retries=2):
             data = r.json()
             if not isinstance(data, dict):
                 return None, "Google AI Studio вернул ответ неожиданной структуры"
-            parts=[]
+            parts=[]; tool_calls=[]
             for candidate in data.get("candidates",[]):
                 for part in (candidate.get("content") or {}).get("parts",[]):
                     if part.get("text"): parts.append(part["text"])
-            if not parts: return None,"Google AI Studio не вернул текст"
-            return {"choices":[{"message":{"role":"assistant","content":"".join(parts)}}]},None
+                    call = part.get("functionCall") if isinstance(part, dict) else None
+                    if isinstance(call, dict) and call.get("name"):
+                        tool_calls.append({"id": f"call_{len(tool_calls)}", "type": "function",
+                                           "function": {"name": call["name"],
+                                                        "arguments": json.dumps(call.get("args") or {}, ensure_ascii=False)}})
+            if not parts and not tool_calls: return None,"Google AI Studio не вернул текст"
+            message={"role":"assistant","content":"".join(parts)}
+            if tool_calls: message["tool_calls"]=tool_calls
+            return {"choices":[{"message":message}]},None
         except requests.exceptions.Timeout:
             if attempt<max_retries-1: continue
             return None,"Google AI Studio: таймаут"
@@ -287,6 +338,89 @@ def groq_request_with_rotation(url, payload, headers, timeout=90, max_retries=3)
 
 REASONING_MODELS_HINT = ("gpt-oss", "deepseek-r1", "qwen-3", "glm-4.5", "o1", "o3")
 
+# ── Нативный tool calling ────────────────────────────────────────────
+# Провайдеры, которые принимают OpenAI-совместимый массив `tools` и
+# возвращают `message.tool_calls`. Для Gemini (google_ai_studio) аргументы
+# конвертируются в functionDeclarations внутри gemini_request.
+NATIVE_TOOL_PROVIDERS = {"groq", "cerebras", "openrouter", "pollinations",
+                         "openai_compatible", "google_ai_studio"}
+
+
+def supports_native_tools(provider: str | None = None, model: str | None = None) -> bool:
+    """Умеет ли провайдер/модель нативный tool calling.
+
+    Отключается переменной окружения AI_NATIVE_TOOLS=0 (аварийный откат
+    на старый JSON-протокол без правки кода).
+    """
+    if os.getenv("AI_NATIVE_TOOLS", "1") != "1":
+        return False
+    if not provider:
+        provider = resolve_target()[0]
+    if provider == "local_demo":
+        return False
+    return provider in NATIVE_TOOL_PROVIDERS
+
+
+def _parse_tool_arguments(raw):
+    """Аргументы tool_call → (dict, ошибка). Битый JSON не роняет запрос."""
+    if raw is None or raw == "":
+        return {}, ""
+    if isinstance(raw, dict):
+        return raw, ""
+    text = str(raw).strip()
+    try:
+        data = json.loads(text)
+    except (ValueError, TypeError) as exc:
+        return {}, f"аргументы инструмента не являются корректным JSON: {exc}"
+    if isinstance(data, dict):
+        return data, ""
+    return {"value": data}, ""
+
+
+def normalize_tool_calls(raw_calls):
+    """Приводит tool_calls провайдера к единому виду.
+
+    Возвращает список словарей:
+        {"id", "name", "arguments", "raw_arguments", "arguments_error"}
+    Ошибка разбора аргументов не выбрасывается наружу: агент сообщает
+    модели, что аргументы битые, и просит повторить вызов.
+    """
+    calls = []
+    for index, call in enumerate(raw_calls or []):
+        if not isinstance(call, dict):
+            continue
+        function = call.get("function") if isinstance(call.get("function"), dict) else {}
+        name = str(function.get("name") or call.get("name") or "").strip()
+        if not name:
+            continue
+        raw_args = function.get("arguments", call.get("arguments", {}))
+        arguments, arguments_error = _parse_tool_arguments(raw_args)
+        calls.append({
+            "id": str(call.get("id") or f"call_{index}"),
+            "name": name,
+            "arguments": arguments,
+            "raw_arguments": raw_args if isinstance(raw_args, str)
+            else json.dumps(raw_args, ensure_ascii=False),
+            "arguments_error": arguments_error,
+        })
+    return calls
+
+
+def openai_tools_payload(tools):
+    """Оставляет только корректные OpenAI-совместимые описания инструментов."""
+    payload = []
+    for tool in tools or []:
+        if isinstance(tool, dict) and tool.get("type") == "function" and isinstance(tool.get("function"), dict):
+            payload.append(tool)
+        elif isinstance(tool, dict) and tool.get("name"):
+            # Разрешаем «плоский» формат: {name, description, parameters}.
+            payload.append({"type": "function", "function": {
+                "name": tool["name"],
+                "description": tool.get("description", ""),
+                "parameters": tool.get("parameters") or {"type": "object", "properties": {}},
+            }})
+    return payload
+
 
 def _clean_reasoning_tail(value):
     """Удаляет распространённые служебные маркеры, сохраняя обычный текст."""
@@ -333,19 +467,26 @@ def resolve_target(provider: str = None, model: str = None):
 
 
 def chat_completion(messages, provider=None, model=None, system=None,
-                    temperature=0.7, max_tokens=None, timeout=90, extra=None):
+                    temperature=0.7, max_tokens=None, timeout=90, extra=None,
+                    tools=None, tool_choice=None):
     """
     Синхронный запрос к текущей модели.
     Возвращает (text, meta) или (None, error_string).
+
+    `tools` — OpenAI-совместимый список инструментов. Если провайдер их
+    поддерживает, ответ может не содержать текста, но содержать tool_calls:
+    тогда meta["tool_calls"] — разобранные вызовы (см. normalize_tool_calls).
     """
     provider, model, cfg = resolve_target(provider, model)
+    tools_payload = openai_tools_payload(tools) if (tools and supports_native_tools(provider, model)) else []
 
     if provider == "local_demo":
         import local_llm
         payload_messages = ([{"role": "system", "content": system}] if system else []) + list(messages or [])
         text = local_llm.complete(payload_messages)
         return text, {"provider": provider, "model": local_llm.MODEL_ID,
-                      "model_name": local_llm.MODEL_NAME, "offline": True}
+                      "model_name": local_llm.MODEL_NAME, "offline": True,
+                      "tool_calls": [], "native_tools": False}
 
     payload = {
         "model": model,
@@ -353,6 +494,9 @@ def chat_completion(messages, provider=None, model=None, system=None,
         "temperature": temperature,
         "max_tokens": int(max_tokens or cfg.get("max_tokens", 8192)),
     }
+    if tools_payload:
+        payload["tools"] = tools_payload
+        payload["tool_choice"] = tool_choice or "auto"
     if extra:
         payload.update(extra)
 
@@ -373,17 +517,22 @@ def chat_completion(messages, provider=None, model=None, system=None,
         if isinstance(text, list):
             text = "".join(str(p.get("text", "")) for p in text if isinstance(p, dict))
         text = str(text)
+        tool_calls = normalize_tool_calls(message.get("tool_calls"))
         thought = message.get("reasoning") or message.get("reasoning_content") or ""
         thought = thought if isinstance(thought, str) else ""
-        if not text.strip() and thought.strip():
+        if not text.strip() and thought.strip() and not tool_calls:
             text = thought
     except (AttributeError, IndexError, TypeError):
         logger.warning("Неожиданный формат ответа (provider=%s, model=%s)", provider, model, exc_info=True)
         return None, "Провайдер вернул ответ в неожиданном формате"
-    if not text.strip():
+    if not text.strip() and not tool_calls:
         logger.warning("Пустые content и reasoning (provider=%s, model=%s)", provider, model)
         return None, "Провайдер вернул пустой ответ (content и reasoning отсутствуют)"
-    return text, {"provider": provider, "model": model, "offline": False}
+    return text, {"provider": provider, "model": model, "offline": False,
+                  "tool_calls": tool_calls,
+                  "native_tools": bool(tools_payload),
+                  # usage пригодится на этапе счётчика токенов
+                  "usage": data.get("usage") if isinstance(data, dict) else None}
 
 
 def chat_stream(messages, provider=None, model=None, system=None, temperature=0.7,
