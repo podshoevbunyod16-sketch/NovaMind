@@ -12,6 +12,7 @@ from .terminal import terminal_bp, tasks_bp
 from .agent import agent_bp
 from .coding_agent import coding_agent_bp
 from .diagnostics import diagnostics_bp
+from .memory import memory_bp
 
 ALL_BLUEPRINTS = [
     chat_bp,
@@ -26,4 +27,5 @@ ALL_BLUEPRINTS = [
     agent_bp,
     coding_agent_bp,
     diagnostics_bp,
+    memory_bp,
 ]

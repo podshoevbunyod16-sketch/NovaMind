@@ -6,6 +6,7 @@ import time
 import json
 import uuid
 import sqlite3
+import re
 import threading
 from flask import session
 
@@ -131,6 +132,182 @@ def trim_messages(chat_id, max_messages=100):
                 """, (chat_id, chat_id, max_messages))
 
 # ---------- Админ ----------
+
+# ══════════════════════════════════════════════════════════════
+# ПАМЯТЬ (этап 4)
+# Долгосрочные факты о пользователе: SQLite + FTS5, если он есть.
+# В Termux FTS5 обычно собран в stdlib sqlite3; если нет — тот же поиск
+# работает через LIKE, и ничего не падает.
+# ══════════════════════════════════════════════════════════════
+
+_memory_ready = set()
+_fts_ready = {}
+
+
+def _fts5_available(conn) -> bool:
+    """Есть ли FTS5 в этом sqlite3 (проверяем один раз на базу)."""
+    try:
+        conn.execute("CREATE VIRTUAL TABLE IF NOT EXISTS _fts_probe USING fts5(x)")
+        conn.execute("DROP TABLE IF EXISTS _fts_probe")
+        return True
+    except sqlite3.Error:
+        return False
+
+
+def init_memory():
+    """Таблица памяти создаётся лениво, как и задачи."""
+    if DB_PATH in _memory_ready:
+        return
+    with get_db() as conn:
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS memory (
+                id TEXT PRIMARY KEY,
+                user_key TEXT NOT NULL,
+                kind TEXT NOT NULL DEFAULT 'fact',
+                text TEXT NOT NULL,
+                tags TEXT DEFAULT '',
+                importance INTEGER NOT NULL DEFAULT 1,
+                created_at REAL NOT NULL,
+                last_used_at REAL
+            );
+            CREATE INDEX IF NOT EXISTS idx_memory_user ON memory(user_key, created_at DESC);
+        """)
+        _fts_ready[DB_PATH] = _fts5_available(conn)
+        if _fts_ready[DB_PATH]:
+            conn.executescript("""
+                CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
+                    id UNINDEXED, user_key UNINDEXED, text, tags, tokenize='unicode61'
+                );
+            """)
+    _memory_ready.add(DB_PATH)
+
+
+def memory_fts5() -> bool:
+    """Доступен ли полнотекстовый поиск (для /api/memory/status)."""
+    init_memory()
+    return bool(_fts_ready.get(DB_PATH))
+
+
+def _memory_row(row):
+    return {"id": row["id"], "kind": row["kind"], "text": row["text"],
+            "tags": row["tags"] or "", "importance": int(row["importance"] or 1),
+            "created_at": row["created_at"], "last_used_at": row["last_used_at"]}
+
+
+def add_memory(user_key, text, kind="fact", tags="", importance=1):
+    init_memory()
+    memory_id = str(uuid.uuid4())
+    now = time.time()
+    with _db_lock:
+        with get_db() as conn:
+            conn.execute(
+                "INSERT INTO memory (id, user_key, kind, text, tags, importance,"
+                " created_at, last_used_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (memory_id, user_key, kind, text, tags, importance, now, None),
+            )
+            if _fts_ready.get(DB_PATH):
+                try:
+                    conn.execute("INSERT INTO memory_fts (id, user_key, text, tags)"
+                                 " VALUES (?, ?, ?, ?)", (memory_id, user_key, text, tags))
+                except sqlite3.Error:
+                    pass
+    return {"id": memory_id, "kind": kind, "text": text, "tags": tags or "",
+            "importance": importance, "created_at": now, "last_used_at": None}
+
+
+def _word_stems(word):
+    """Основы слова для поиска по-русски: рыба → рыб, кофе → коф."""
+    word = str(word or "")
+    stems = {word}
+    if len(word) >= 5:
+        stems.add(word[:-1])
+        stems.add(word[:-2])
+    elif len(word) == 4:
+        stems.add(word[:-1])
+    return {stem for stem in stems if len(stem) >= 3} or {word}
+
+
+def search_memory(user_key, query="", limit=5):
+    """Поиск по памяти пользователя.
+
+    Сначала — LIKE-подстроки (работает по-русски без морфологии: «рыба»
+    находит «рыбу»), затем, если доступен FTS5, результаты дополняются
+    полнотекстовыми совпадениями. Сортировка: релевантность, важность, свежесть.
+    """
+    init_memory()
+    words = [w for w in re.findall(r"[\wёЁ-]+", str(query or "").lower()) if len(w) > 2][:8]
+    with get_db() as conn:
+        rows = conn.execute("SELECT * FROM memory WHERE user_key=?", (user_key,)).fetchall()
+        fts_ids = set()
+        if words and _fts_ready.get(DB_PATH):
+            try:
+                match = " OR ".join(f'"{w}"*' for w in words)
+                for fts_row in conn.execute(
+                        "SELECT id FROM memory_fts WHERE memory_fts MATCH ? AND user_key=?",
+                        (match, user_key)):
+                    fts_ids.add(fts_row["id"])
+            except sqlite3.Error:
+                fts_ids = set()
+
+    scored = []
+    for row in rows:
+        text = (row["text"] or "").lower()
+        tags = (row["tags"] or "").lower()
+        score = 0
+        for word in words:
+            # Русская морфология без стеммера: «рыба» должна находить «рыбу»,
+            # поэтому кроме слова проверяем его укороченные основы.
+            stems = _word_stems(word)
+            if any(stem in text for stem in stems):
+                score += 3
+            if any(stem in tags for stem in stems):
+                score += 2
+        if row["id"] in fts_ids:
+            score += 4
+        if words and score == 0:
+            continue
+        scored.append((score, int(row["importance"] or 1), row["created_at"], row))
+
+    if words and not scored:
+        return []
+    scored.sort(key=lambda item: (-item[0], -item[1], -item[2]))
+    return [_memory_row(item[3]) for item in scored[:max(1, int(limit or 5))]]
+
+
+def touch_memory(ids):
+    """Отмечает, что воспоминания пригодились (last_used_at)."""
+    if not ids:
+        return
+    init_memory()
+    now = time.time()
+    with _db_lock:
+        with get_db() as conn:
+            conn.executemany("UPDATE memory SET last_used_at=? WHERE id=?",
+                             [(now, str(memory_id)) for memory_id in ids])
+
+
+def delete_memory(user_key, memory_id):
+    init_memory()
+    with _db_lock:
+        with get_db() as conn:
+            cursor = conn.execute("DELETE FROM memory WHERE id=? AND user_key=?",
+                                  (str(memory_id), user_key))
+            removed = cursor.rowcount > 0
+            if removed and _fts_ready.get(DB_PATH):
+                try:
+                    conn.execute("DELETE FROM memory_fts WHERE id=?", (str(memory_id),))
+                except sqlite3.Error:
+                    pass
+    return removed
+
+
+def count_memory(user_key):
+    init_memory()
+    with get_db() as conn:
+        row = conn.execute("SELECT COUNT(*) AS n FROM memory WHERE user_key=?",
+                           (user_key,)).fetchone()
+    return int(row["n"] if row else 0)
+
 
 # ══════════════════════════════════════════════════════════════
 # ЗАДАЧИ

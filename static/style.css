@@ -1149,3 +1149,43 @@ button, input, select, textarea, .stage, .sources-head, .msg-actions {
   .agent-term-head { padding: 10px 12px; font-size: 12.5px; }
   .agent-term-out { margin-left: 0; max-height: 160px; }
 }
+
+/* Панель «Память» */
+.memory-modal {
+  position: fixed; inset: 0; z-index: 260; display: none; align-items: center;
+  justify-content: center; padding: 18px; background: rgba(6, 8, 16, .62);
+  backdrop-filter: blur(6px);
+}
+.memory-modal.open { display: flex; }
+.memory-panel {
+  width: min(640px, 100%); max-height: 82vh; display: flex; flex-direction: column;
+  gap: 10px; padding: 16px 16px 12px; border-radius: 18px; overflow: hidden;
+  border: 1px solid var(--glass-border, rgba(255, 255, 255, .14));
+  background: var(--glass-bg, rgba(18, 21, 34, .96)); color: inherit;
+}
+.memory-head { display: flex; align-items: center; justify-content: space-between; font-weight: 700; font-size: 15px; }
+.memory-close { border: none; background: transparent; color: inherit; font-size: 16px; cursor: pointer; opacity: .7; }
+.memory-hint { margin: 0; font-size: 11.5px; line-height: 1.5; color: var(--txt-dim); }
+.memory-search input, .memory-add input, .memory-add select {
+  font: inherit; font-size: 12.5px; padding: 8px 10px; border-radius: 9px; color: inherit;
+  border: 1px solid rgba(255, 255, 255, .16); background: rgba(0, 0, 0, .22);
+}
+.memory-search input { width: 100%; }
+.memory-add { display: flex; flex-wrap: wrap; gap: 6px; }
+.memory-add input#memoryText { flex: 1 1 220px; }
+.memory-add input#memoryTags { flex: 1 1 120px; }
+.memory-add button, .memory-del {
+  font: inherit; font-size: 12px; padding: 7px 12px; border-radius: 9px; cursor: pointer;
+  border: 1px solid rgba(179, 156, 255, .45); background: rgba(179, 156, 255, .18); color: inherit;
+}
+.memory-list { overflow-y: auto; display: flex; flex-direction: column; gap: 7px; }
+.memory-item { padding: 9px 11px; border-radius: 11px; background: rgba(255, 255, 255, .05); }
+.memory-item-top { display: flex; align-items: center; gap: 8px; font-size: 10.5px; color: var(--txt-dim); }
+.memory-kind {
+  text-transform: uppercase; letter-spacing: .04em; padding: 1px 6px; border-radius: 6px;
+  background: rgba(179, 156, 255, .22); color: #cbb8ff;
+}
+.memory-tags { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.memory-del { margin-left: auto; padding: 3px 9px; font-size: 11px; border-color: rgba(255, 118, 118, .4); background: rgba(255, 118, 118, .12); }
+.memory-text { margin-top: 5px; font-size: 12.5px; line-height: 1.45; overflow-wrap: anywhere; }
+.memory-empty { font-size: 12px; color: var(--txt-dim); padding: 8px 2px; }

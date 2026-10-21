@@ -132,12 +132,29 @@ AGENT_ACTION_META = {
     "skill_create": ("Создать skill из готового SKILL.md (name, content).", "write"),
     "task": ("Завести задачу с подпунктами (title, detail, steps).", "write"),
     "task_done": ("Закрыть задачу с пометкой о результате (task_id, note).", "write"),
+    "remember": ("Сохранить устойчивый факт о пользователе (text, kind, tags). "
+                 "Пароли и ключи не сохраняются.", "write"),
+    "recall": ("Найти в долгосрочной памяти пользователя (query, limit).", "safe"),
+    "forget": ("Удалить воспоминание по id (id).", "write"),
     "answer": ("Финальный ответ пользователю. Вызывай, когда данных достаточно.", "safe"),
 }
 
 # Схемы действий, у которых нет ToolSpec в реестре.
 _EXTRA_ACTION_SCHEMAS = {
     "ls": {"type": "object", "properties": {}},
+    "remember": {"type": "object",
+                 "properties": {"text": {"type": "string"},
+                                "kind": {"type": "string",
+                                         "enum": ["fact", "preference", "project", "decision"]},
+                                "tags": {"type": "string"}},
+                 "required": ["text"]},
+    "recall": {"type": "object",
+               "properties": {"query": {"type": "string"},
+                              "limit": {"type": "integer"}},
+               "required": ["query"]},
+    "forget": {"type": "object",
+               "properties": {"id": {"type": "string"}},
+               "required": ["id"]},
     "answer": {"type": "object",
                "properties": {"text": {"type": "string", "description": "ответ пользователю"}},
                "required": ["text"]},
@@ -327,6 +344,69 @@ def _register_agent_tools():
              "properties": {"name": {"type": "string"}, "content": {"type": "string"}},
              "required": ["name", "content"]},
             skill_create, permissions=("workspace",), timeout=5, risk="write"))
+
+    if get_tool("remember") is None:
+        def _memory_key():
+            try:
+                from flask import has_request_context, session
+                from routes.terminal import signed_in
+                import memory as memory_module
+                if not has_request_context():
+                    return ""
+                return memory_module.user_key(session, signed_in())
+            except Exception:                      # noqa: BLE001
+                return ""
+
+        def remember(text, kind="fact", tags=""):
+            import memory as memory_module
+            key = _memory_key()
+            if not key:
+                return {"ok": False, "error": {"type": "unauthorized",
+                                               "message": "Память доступна только после входа",
+                                               "retryable": False}}
+            try:
+                return {"ok": True, "item": memory_module.remember(key, text, kind, tags)}
+            except ValueError as exc:
+                return {"ok": False, "error": {"type": "rejected", "message": str(exc),
+                                               "retryable": False}}
+
+        def recall(query="", limit=5):
+            import memory as memory_module
+            key = _memory_key()
+            if not key:
+                return {"ok": False, "error": {"type": "unauthorized",
+                                               "message": "Память недоступна", "retryable": False}}
+            items = memory_module.recall(key, query, limit=int(limit or 5))
+            return {"ok": True, "items": items, "count": len(items)}
+
+        def forget(id):                            # noqa: A002 — имя из задачи
+            import memory as memory_module
+            key = _memory_key()
+            if not key:
+                return {"ok": False, "error": {"type": "unauthorized",
+                                               "message": "Память недоступна", "retryable": False}}
+            removed = memory_module.forget(key, id)
+            return {"ok": removed, "id": id}
+
+        register_tool(ToolSpec(
+            "remember", "Сохранить устойчивый факт в долгосрочную память.",
+            {"type": "object",
+             "properties": {"text": {"type": "string"},
+                            "kind": {"type": "string",
+                                     "enum": ["fact", "preference", "project", "decision"]},
+                            "tags": {"type": "string"}},
+             "required": ["text"]},
+            remember, permissions=("database",), timeout=5, risk="write"))
+        register_tool(ToolSpec(
+            "recall", "Найти воспоминания по запросу.",
+            {"type": "object", "properties": {"query": {"type": "string"},
+                                              "limit": {"type": "integer"}},
+             "required": ["query"]},
+            recall, permissions=("database",), timeout=5, risk="safe"))
+        register_tool(ToolSpec(
+            "forget", "Удалить воспоминание по id.",
+            {"type": "object", "properties": {"id": {"type": "string"}}, "required": ["id"]},
+            forget, permissions=("database",), timeout=5, risk="write"))
 
     if get_tool("task") is None:
         def task(title, detail="", steps=None):

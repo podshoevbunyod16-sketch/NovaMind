@@ -64,6 +64,11 @@
         Создать skill
       </div>
 
+      <div class="nav-item" onclick="openMemory(); closeSidebar();" role="button" tabindex="0">
+        <span style="font-size:16px;">🧠</span>
+        Память
+      </div>
+
       <div class="nav-label">Сервисы</div>
 
       <div class="nav-item" onclick="activateMode({prefix: '/services weather ', label: '🌤 Погода', placeholder: 'Введите город для погоды...'}); closeSidebar();">
@@ -223,6 +228,37 @@
 
 
 
+  <!-- ═══════════ ПАНЕЛЬ «ПАМЯТЬ» ═══════════ -->
+  <div class="memory-modal" id="memoryPanel" aria-hidden="true" onclick="if (event.target === this) closeMemory()">
+    <div class="memory-panel" role="dialog" aria-modal="true" aria-label="Долгосрочная память">
+      <div class="memory-head">
+        <span>🧠 Память</span>
+        <button type="button" class="memory-close" onclick="closeMemory()" aria-label="Закрыть">✕</button>
+      </div>
+      <p class="memory-hint">
+        Агент запоминает устойчивые факты и явные просьбы «запомни». Пароли, токены и ключи
+        не сохраняются. Память видна только вам.
+      </p>
+      <div class="memory-search">
+        <input id="memoryQuery" type="search" placeholder="Поиск по памяти…"
+               autocomplete="off" oninput="filterMemory()">
+      </div>
+      <form class="memory-add" onsubmit="addMemory(event)">
+        <input id="memoryText" placeholder="Что запомнить? Например: предпочитаю краткие ответы" required>
+        <select id="memoryKind" aria-label="Тип записи">
+          <option value="fact">факт</option>
+          <option value="preference">предпочтение</option>
+          <option value="project">проект</option>
+          <option value="decision">решение</option>
+        </select>
+        <input id="memoryTags" placeholder="теги через запятую">
+        <button type="submit">Запомнить</button>
+      </form>
+      <div class="memory-list" id="memoryList"></div>
+      <div class="memory-empty" id="memoryEmpty" hidden>Пока ничего не запомнено.</div>
+    </div>
+  </div>
+
   <!-- Командная панель (Ctrl+K) -->
   <div class="cmdk" id="cmdk" aria-hidden="true">
     <div class="cmdk-panel" role="dialog" aria-modal="true" aria-label="Командная панель">
@@ -238,5 +274,6 @@
   <script src="/static/i18n.js"></script>
   <script src="/static/app.js"></script>
   <script src="/static/linux.js"></script>
+  <script src="/static/memory.js"></script>
 </body>
 </html>

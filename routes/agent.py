@@ -80,7 +80,11 @@ AGENT_SYSTEM_PROMPT = """Ты — агент NovaMind внутри «мален�
    сначала используй mcp_call с точным server_id и tool, затем проверь результат.
 9. Используй SKILL CONTEXT, если запрос соответствует сохранённому skill. Для создания skill
    сформируй полный SKILL.md с frontmatter name и description и используй skill_create.
-10. В answer дай ПРЯМОЙ ответ на вопрос пользователя по-русски: сначала суть (названия, цифры, годы),
+10. ПАМЯТЬ: устойчивые факты о пользователе и явные просьбы «запомни …» сохраняй действием
+   remember (kind: fact | preference | project | decision, tags — через запятую). Никогда не
+   запоминай пароли, токены, ключи, номера карт и другие секреты. Блок MEMORY в запросе — это
+   твои прошлые воспоминания: используй их, но не пересказывай пользователю списком.
+11. В answer дай ПРЯМОЙ ответ на вопрос пользователя по-русски: сначала суть (названия, цифры, годы),
    потом 1–3 предложения пояснения. Не пересказывай свои шаги и не вставляй JSON.
    Ссылки на источники писать не нужно — интерфейс покажет их сам."""
 
@@ -949,6 +953,19 @@ def agent_stream():
                 system_content += "\n\nSKILL CONTEXT (используй подходящие инструкции):\n" + skill_context
         except Exception:
             pass
+        # Память: до 5 релевантных воспоминаний и не больше 1200 символов.
+        import memory as memory_module
+        memory_key = memory_module.user_key(session, signed_in())
+        state["memory_key"] = memory_key
+        if memory_key:
+            try:
+                memory_block = memory_module.prompt_block(memory_key, goal)
+            except Exception as exc:                 # noqa: BLE001 — память не должна ломать ход
+                log.warning("Память недоступна: %s", exc)
+                memory_block = ""
+            if memory_block:
+                system_content += ("\n\nMEMORY (долгосрочная память пользователя, "
+                                   "используй как контекст):\n" + memory_block)
         if data.get("search") and not strict_mcp:
             system_content += (
                 "\n\nSEARCH HINT: web search is allowed, but do not run it automatically. "
@@ -983,11 +1000,13 @@ def agent_stream():
         if is_simple_chat_request(goal) and not strict_mcp and not data.get("search"):
             # Короткие разговорные/объяснительные вопросы не должны ждать
             # discovery MCP, web-search и планирования из нескольких шагов.
-            fast_history = [{
-                "role": "system",
-                "content": "Ты NovaMind. Ответь прямо и кратко по-русски. "
-                           "Не вызывай инструменты, не пиши JSON и не описывай внутренние шаги.",
-            }]
+            fast_system = ("Ты NovaMind. Ответь прямо и кратко по-русски. "
+                           "Не вызывай инструменты, не пиши JSON и не описывай внутренние шаги.")
+            memory_hint = str(state.get("memory_key") and memory_module.prompt_block(
+                state["memory_key"], goal) or "")
+            if memory_hint:
+                fast_system += "\n\nMEMORY (что ты знаешь о пользователе):\n" + memory_hint
+            fast_history = [{"role": "system", "content": fast_system}]
             fast_history.extend(history[-5:])
             fast_answer, fast_error = _ask(
                 fast_history, provider=provider, model=model,
@@ -1695,6 +1714,51 @@ def _perform(action, kind, use_tools, state, goal="", cancel=None):
                                       status="done", log=str(action.get("note") or "")[:1000])
             yield _ndjson({"type": "task", "task": database.get_task(state["task_id"])})
         return "Задача закрыта. Теперь ответь пользователю."
+
+    if kind == "remember":
+        import memory as memory_module
+        key = state.get("memory_key") or ""
+        if not key:
+            return "Память доступна только вошедшим пользователям — ничего не сохранил."
+        try:
+            item = memory_module.remember(key, action.get("text") or "",
+                                          kind=action.get("kind") or "fact",
+                                          tags=action.get("tags") or "",
+                                          importance=action.get("importance") or 1)
+        except ValueError as exc:
+            yield _ndjson({"type": "step", "icon": "🔒", "text": f"Не сохранил в память: {exc}"})
+            return f"В память не сохранено: {exc}"
+        yield _ndjson({"type": "step", "icon": "🧠", "text": f"Запомнил: {item['text'][:140]}"})
+        yield _ndjson({"type": "memory", "item": item, "action": "remember"})
+        return f"Запомнено ({item['kind']}): {item['text']}"
+
+    if kind == "recall":
+        import memory as memory_module
+        key = state.get("memory_key") or ""
+        if not key:
+            return "Память доступна только вошедшим пользователям — вспоминать нечего."
+        query = str(action.get("query") or action.get("text") or "").strip()
+        limit = action.get("limit") or 5
+        try:
+            items = memory_module.recall(key, query, limit=max(1, min(int(limit), 20)))
+        except (TypeError, ValueError):
+            items = memory_module.recall(key, query, limit=5)
+        yield _ndjson({"type": "step", "icon": "🧠",
+                       "text": f"Вспомнил {len(items)} записей по запросу «{query or 'всё'}»"})
+        return json.dumps({"memories": items}, ensure_ascii=False) if items else "В памяти ничего не нашлось."
+
+    if kind == "forget":
+        import memory as memory_module
+        key = state.get("memory_key") or ""
+        if not key:
+            return "Память доступна только вошедшим пользователям."
+        memory_id = str(action.get("id") or action.get("memory_id") or "").strip()
+        if not memory_id:
+            return "Нужен id воспоминания (его видно в панели «Память»)."
+        removed = memory_module.forget(key, memory_id)
+        yield _ndjson({"type": "step", "icon": "🗑",
+                       "text": "Удалил из памяти" if removed else "Такой записи нет"})
+        return ("Воспоминание удалено." if removed else "Запись с таким id не найдена.")
 
     if kind == "answer":
         return ""  # цикл прервётся сам
