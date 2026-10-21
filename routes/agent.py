@@ -746,8 +746,10 @@ def _always_key(kind, action) -> tuple:
         for hint in DANGER_COMMAND_HINTS:
             hint = hint.strip()
             if hint and command.startswith(hint):
-                return (kind, hint)
-        return (kind, command.split(" ")[0] if command else "")
+                return (kind, hint)      # git push … → одно правило на все push
+        # Опасность внутри составной команды (bash -c "rm …") не расширяем
+        # до первого слова: иначе «всегда» разрешило бы любой bash.
+        return (kind, command)
     if kind in ("write", "read", "edit"):
         return (kind, str(action.get("path") or "").strip().lower())
     return (kind, str(_action_key(action, kind)[1]))
