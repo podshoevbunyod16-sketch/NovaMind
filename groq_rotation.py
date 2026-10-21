@@ -28,6 +28,12 @@ if not GROQ_KEYS:
 groq_key_index = 0
 _groq_lock = threading.Lock()
 
+# Последние известные лимиты, которые Groq присылает в заголовках ответа.
+# Нужны, чтобы предупредить пользователя ДО того, как ключ уйдёт в кулдаун.
+_limits = {}
+LIMIT_REQUEST_WARN = 3
+LIMIT_TOKEN_WARN = 2000
+
 
 def _refresh_expired_keys(now):
     for item in GROQ_KEYS:
@@ -117,3 +123,78 @@ def get_groq_key_status():
                     "status": "active",
                 })
     return status
+
+
+# ══════════════════════════════════════════════════════════════
+# ОСТАТОК ЛИМИТОВ (бонус Б3)
+# ══════════════════════════════════════════════════════════════
+
+def record_limits(headers, key=None):
+    """Запоминает x-ratelimit-* из ответа Groq. Заголовки необязательны."""
+    if not headers:
+        return None
+    def number(name):
+        try:
+            value = headers.get(name)
+        except AttributeError:
+            return None
+        if value is None:
+            return None
+        try:
+            return int(float(value))
+        except (TypeError, ValueError):
+            return None
+
+    snapshot = {
+        "remaining_requests": number("x-ratelimit-remaining-requests"),
+        "limit_requests": number("x-ratelimit-limit-requests"),
+        "remaining_tokens": number("x-ratelimit-remaining-tokens"),
+        "limit_tokens": number("x-ratelimit-limit-tokens"),
+        "updated_at": time.time(),
+    }
+    if all(snapshot[name] is None for name in
+           ("remaining_requests", "remaining_tokens")):
+        return None
+    with _groq_lock:
+        _limits[key or "__all__"] = snapshot
+    return snapshot
+
+
+def limits_status():
+    """Остаток лимитов по всем видимым ключам (без самих ключей)."""
+    with _groq_lock:
+        items = [dict(snapshot, key=("" if name == "__all__" else "ключ"))
+                 for name, snapshot in _limits.items()]
+    status = get_groq_key_status()
+    active = sum(1 for item in status if item.get("active"))
+    available = sum(1 for item in status if item.get("status") == "active")
+    return {
+        "keys_total": len(status),
+        "keys_available": available,
+        "active_key": active > 0,
+        "limits": items,
+        "remaining_tokens": min((item["remaining_tokens"] for item in items
+                                 if item["remaining_tokens"] is not None), default=None),
+        "remaining_requests": min((item["remaining_requests"] for item in items
+                                   if item["remaining_requests"] is not None), default=None),
+    }
+
+
+def limits_warning(status=None):
+    """Текст предупреждения для интерфейса или пустая строка."""
+    data = status if status is not None else limits_status()
+    if data.get("keys_total") and not data.get("keys_available"):
+        return "Все ключи Groq исчерпаны — переключитесь на другого провайдера."
+    tokens = data.get("remaining_tokens")
+    requests = data.get("remaining_requests")
+    if tokens is not None and tokens <= LIMIT_TOKEN_WARN:
+        return f"У ключа Groq осталось ~{tokens} токенов — скоро лимит."
+    if requests is not None and requests <= LIMIT_REQUEST_WARN:
+        return f"У ключа Groq осталось {requests} запросов — скоро лимит."
+    return ""
+
+
+def reset_limits():
+    """Сброс состояния (тесты)."""
+    with _groq_lock:
+        _limits.clear()

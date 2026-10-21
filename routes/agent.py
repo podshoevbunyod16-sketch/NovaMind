@@ -32,6 +32,7 @@ from ai_providers import (chat_completion, chat_stream, resolve_target,  # noqa:
                           supports_native_tools)
 from tool_registry import (bootstrap_default_tools, call_tool, tool_schemas,
                            native_tool_schemas, native_tool_risk)
+import usage_stats
 from routes.terminal import (run_agent as run_terminal, safe_path, relative_to_workspace,
                              ensure_workspace, nova_search, nova_read, _save_research,  # noqa: F401
                              can_use_workspace, signed_in, _format_results as _format_search_results)
@@ -1145,12 +1146,16 @@ def agent_stream():
                 # нарисовать/озвучить — её выполняет цикл действий ниже.
                 state["answer"] = str(fast_answer).strip()
                 _save_turn(chat_id, history_key, goal, state["answer"])
+                usage = usage_stats.record_turn(
+                    chat_id, provider, model, prompt_text=_history_text(fast_history),
+                    answer_text=state["answer"])
+                yield _ndjson({"type": "usage", "usage": usage})
                 for chunk in _chunks(state["answer"]):
                     yield _ndjson({"type": "token", "token": chunk})
                 yield _ndjson({"type": "result", "reply": state["answer"], "steps": 0,
                                "task_id": None, "model": model, "provider": provider,
                                "sources": [], "searched": False, "media": [],
-                               "linux": False, "tools": [],
+                               "linux": False, "tools": [], "usage": usage,
                                "offline": provider == "local_demo", "fast": True,
                                "chat_id": chat_id, "run_id": run_id})
                 yield _ndjson({"type": "done"})
@@ -1509,7 +1514,12 @@ def agent_stream():
         # аудио или видео, когда историю загрузят из БД.
         _save_turn(chat_id, history_key, goal, historical_answer,
                    extra_messages=state["media_markers"])
+        usage = usage_stats.record_turn(
+            chat_id, provider, model, prompt_text=_history_text(history),
+            answer_text=state["answer"], usage=state.get("usage"))
+        yield _ndjson({"type": "usage", "usage": usage})
         yield _ndjson({"type": "result", "reply": state["answer"], "steps": state["steps"],
+                       "usage": usage,
                        "task_id": state["task_id"], "model": model, "provider": provider,
                        "sources": state["sources"], "searched": state["searched"],
                        "media": state["media"],
@@ -1552,6 +1562,31 @@ def agent_stream():
 
 def _ndjson(payload):
     return json.dumps(payload, ensure_ascii=False) + "\n"
+
+
+def _history_text(history):
+    """Текст промпта для оценки токенов, если провайдер не прислал usage."""
+    parts = []
+    for item in history or []:
+        if isinstance(item, dict):
+            parts.append(str(item.get("content") or ""))
+    return "\n".join(parts)
+
+
+@agent_bp.route("/api/usage", methods=["GET"])
+def agent_usage():
+    """Счётчик токенов и остаток лимитов Groq (Б3)."""
+    chat_id = session.get("chat_id")
+    totals = usage_stats.chat_summary(chat_id) if chat_id else {
+        "turns": 0, "total_tokens": 0, "cost_usd": 0.0,
+        "tokens_label": "0", "cost_label": "бесплатно"}
+    limits = usage_stats.groq_limits()
+    return jsonify({"chat": totals,
+                    "groq": {"keys_total": limits["keys"]["keys_total"],
+                             "keys_available": limits["keys"]["keys_available"],
+                             "remaining_tokens": limits["keys"]["remaining_tokens"],
+                             "remaining_requests": limits["keys"]["remaining_requests"],
+                             "warning": limits["warning"]}})
 
 
 def _trace_entries(chunk):

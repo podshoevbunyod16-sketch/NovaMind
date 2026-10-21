@@ -931,6 +931,10 @@ function createAssistantTurn(options = {}) {
       if (meta.searched) bits.push('с поиском');
       if (meta.agent || meta.linux) bits.push('Linux');
       if (meta.steps) bits.push(`шагов: ${meta.steps}`);
+      if (meta.usage && meta.usage.total_tokens) {
+        bits.push(`токенов: ${formatTokens(meta.usage.total_tokens)}`
+          + ` (${formatCost(meta.usage.cost_known === false ? null : meta.usage.cost_usd)})`);
+      }
       if (meta.stopped) bits.push('остановлено');
       if (sourcesData.length) bits.push(`источников: ${sourcesData.length}`);
       bits.push(`${seconds} c`);
@@ -956,6 +960,11 @@ function createAssistantTurn(options = {}) {
           elapsed_ms: Date.now() - startedAt,
           reasoning: reasoningText || null,
           trace: traceData.length ? traceData.slice(0, 60) : undefined,
+          usage: meta.usage ? {
+            total_tokens: meta.usage.total_tokens,
+            cost_usd: meta.usage.cost_usd,
+            cost_known: meta.usage.cost_known,
+          } : undefined,
           server_chat_id: meta.serverChatId || null,
         });
       }
@@ -1487,6 +1496,51 @@ function appendMessage(role, content, meta = null) {
     historyAddMessage(role, content, meta);
   }
 }
+
+// ── Счётчик токенов и стоимости (Б3) ─────────────────────────────
+function formatTokens(count) {
+  const value = Number(count) || 0;
+  if (value >= 1_000_000) return (value / 1_000_000).toFixed(1) + ' млн';
+  if (value >= 1_000) return (value / 1_000).toFixed(1) + ' тыс.';
+  return String(value);
+}
+
+function formatCost(cost) {
+  if (cost === null || cost === undefined) return 'цена неизвестна';
+  if (cost <= 0) return 'бесплатно';
+  if (cost < 0.01) return '< $0.01';
+  return '$' + cost.toFixed(2);
+}
+
+let usageWarned = false;
+
+/** Итоги чата в шапке: токены, деньги и предупреждение о лимите Groq. */
+async function refreshUsage(showWarning = false) {
+  const chip = document.getElementById('usageChip');
+  try {
+    const response = await fetch('/api/usage');
+    if (!response.ok) return null;
+    const data = await response.json();
+    const chat = data.chat || {};
+    if (chip) {
+      chip.textContent = `≈ ${formatTokens(chat.total_tokens)} ток.`;
+      chip.title = `За чат: ${chat.total_tokens || 0} токенов · ${formatCost(chat.cost_usd)}`
+        + `\nХодов: ${chat.turns || 0}`
+        + (data.groq && data.groq.keys_total
+          ? `\nGroq: осталось ${data.groq.remaining_tokens ?? '—'} токенов,`
+            + ` ${data.groq.remaining_requests ?? '—'} запросов`
+          : '');
+    }
+    if (showWarning && data.groq && data.groq.warning && !usageWarned) {
+      usageWarned = true;
+      showNotification(data.groq.warning, 'warn');
+    }
+    return data;
+  } catch (_) {
+    return null;               // счётчик — не критичная часть интерфейса
+  }
+}
+window.refreshUsage = refreshUsage;
 
 function formatContent(text) {
   let html = escapeHtml(String(text ?? ''));

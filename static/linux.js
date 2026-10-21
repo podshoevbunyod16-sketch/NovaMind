@@ -157,12 +157,14 @@
       });
       activeAbort = null;
       if (!turn.text) throw new Error(failure || 'ИИ не вернул ответ');
+      if (typeof window.refreshUsage === 'function') window.refreshUsage(true);
       turn.finish({
         model: result.model,
         provider: result.provider,
         // Серверный id чата: по нему после перезагрузки подтягивается
         // панель «Что делал агент» из базы.
         serverChatId: result.chat_id,
+        usage: result.usage,
         offline: result.offline,
         searched: result.searched,
         steps: result.steps,

@@ -216,6 +216,77 @@ def clear_traces(chat_id):
             return cursor.rowcount
 
 
+# ══════════════════════════════════════════════════════════════
+# РАСХОД ТОКЕНОВ (бонус Б3)
+# Одна строка — один ход агента: сколько ушло на промпт и на ответ.
+# ══════════════════════════════════════════════════════════════
+
+_usage_ready = set()
+
+
+def init_usage():
+    """Таблица расхода создаётся лениво — старые базы её не знают."""
+    if DB_PATH in _usage_ready:
+        return
+    with get_db() as conn:
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS token_usage (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id TEXT DEFAULT '',
+                provider TEXT DEFAULT '',
+                model TEXT DEFAULT '',
+                prompt_tokens INTEGER NOT NULL DEFAULT 0,
+                completion_tokens INTEGER NOT NULL DEFAULT 0,
+                total_tokens INTEGER NOT NULL DEFAULT 0,
+                cost_usd REAL NOT NULL DEFAULT 0,
+                created_at REAL NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_usage_chat ON token_usage(chat_id, created_at DESC);
+        """)
+    _usage_ready.add(DB_PATH)
+
+
+def add_usage(chat_id, provider, model, prompt_tokens, completion_tokens, cost_usd=0.0):
+    """Записывает расход одного хода и возвращает строку."""
+    init_usage()
+    prompt_tokens = max(0, int(prompt_tokens or 0))
+    completion_tokens = max(0, int(completion_tokens or 0))
+    total = prompt_tokens + completion_tokens
+    now = time.time()
+    with _db_lock:
+        with get_db() as conn:
+            conn.execute(
+                "INSERT INTO token_usage (chat_id, provider, model, prompt_tokens, "
+                "completion_tokens, total_tokens, cost_usd, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (chat_id or "", provider or "", model or "", prompt_tokens,
+                 completion_tokens, total, float(cost_usd or 0.0), now)
+            )
+    return {"prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens,
+            "total_tokens": total, "cost_usd": round(float(cost_usd or 0.0), 6),
+            "provider": provider or "", "model": model or "", "created_at": now}
+
+
+def usage_totals(chat_id=None):
+    """Сумма по чату (или по всей базе, если chat_id не задан)."""
+    init_usage()
+    query = ("SELECT COUNT(*) AS turns, COALESCE(SUM(prompt_tokens), 0) AS prompt_tokens, "
+             "COALESCE(SUM(completion_tokens), 0) AS completion_tokens, "
+             "COALESCE(SUM(total_tokens), 0) AS total_tokens, "
+             "COALESCE(SUM(cost_usd), 0) AS cost_usd FROM token_usage")
+    params = ()
+    if chat_id:
+        query += " WHERE chat_id=?"
+        params = (chat_id,)
+    with get_db() as conn:
+        row = conn.execute(query, params).fetchone()
+    return {"turns": int(row["turns"] or 0),
+            "prompt_tokens": int(row["prompt_tokens"] or 0),
+            "completion_tokens": int(row["completion_tokens"] or 0),
+            "total_tokens": int(row["total_tokens"] or 0),
+            "cost_usd": round(float(row["cost_usd"] or 0), 6)}
+
+
 # ---------- Админ ----------
 
 # ══════════════════════════════════════════════════════════════

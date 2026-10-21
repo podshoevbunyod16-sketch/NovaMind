@@ -322,6 +322,13 @@ def groq_request_with_rotation(url, payload, headers, timeout=90, max_retries=3)
         try:
             data = resp.json()
             mark_groq_key_success(current_key)
+            # Остаток лимитов приходит в заголовках — запоминаем, чтобы
+            # предупредить пользователя заранее (Б3).
+            try:
+                from groq_rotation import record_limits
+                record_limits(getattr(resp, "headers", None), current_key)
+            except Exception:
+                pass
             return data, None
         except ValueError:
             return None, "Groq вернул некорректный JSON"
