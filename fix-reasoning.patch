@@ -1,0 +1,249 @@
+diff --git a/routes/agent.py b/routes/agent.py
+--- a/routes/agent.py
++++ b/routes/agent.py
+@@ -315,0 +316,52 @@ def strip_think(text):
++# ── «Рассуждения» без тегов ──────────────────────────────────────────────
++# Некоторые бесплатные модели (minimax, qwen и др.) пишут ход мыслей прямо в
++# content по-английски («We need answer Russian…») и без <think>. strip_think
++# такое не видит, и рассуждение попадало в чат вместо ответа.
++_LEAK_START = re.compile(
++    r"^\W*(?:we need|we should|we must|we have|let'?s|let me|the user|user (?:asks|asked|wants|says)|"
++    r"need to|i need|i should|i'll|i will|okay|ok,|hmm|first,|so we|they (?:supplied|provided|ask)|"
++    r"looking at|given (?:the|that)|probably|maybe|now,|thus|therefore|alright|actually)\b", re.I)
++_CYR = re.compile(r"[А-Яа-яЁё]")
++_LAT = re.compile(r"[A-Za-z]")
++
++
++def _has_cyrillic(text):
++    return bool(_CYR.search(text or ""))
++
++
++def _split_paragraphs(text):
++    return [p.strip() for p in re.split(r"\n\s*\n", text or "") if p.strip()]
++
++
++def looks_like_leaked_reasoning(text):
++    """True, если текст начинается как английское рассуждение модели."""
++    text = strip_think(text)
++    if not text:
++        return False
++    if _LEAK_START.match(text):
++        return True
++    first = _split_paragraphs(text)[0]
++    cyr, lat = len(_CYR.findall(first)), len(_LAT.findall(first))
++    return lat > 40 and lat > cyr * 2
++
++
++def strip_leaked_reasoning(text, goal=""):
++    """Убирает из ответа утёкшее рассуждение; если ответа под ним нет — пустая строка.
++
++    Работает только для русскоязычных запросов: английский ответ на английский
++    вопрос («Let me explain…») — это не утечка.
++    """
++    text = strip_think(text)
++    if not text or not _has_cyrillic(goal) or not looks_like_leaked_reasoning(text):
++        return text
++    tail = []
++    for para in reversed(_split_paragraphs(text)):
++        cyr, lat = len(_CYR.findall(para)), len(_LAT.findall(para))
++        is_draft = para[:1] in "\"'«“„" or bool(_LEAK_START.match(para))
++        if is_draft or cyr < 15 or cyr < lat * 1.5:
++            break
++        tail.append(para)
++    answer = "\n\n".join(reversed(tail)).strip()
++    return answer if len(answer) >= 40 else ""
++
++
+@@ -814 +866,6 @@ def _synthesize(goal, state, provider, model):
+-    """Финальный запрос: модель отвечает обычным текстом по собранным данным."""
++    """Финальный запрос: модель отвечает обычным текстом по собранным данным.
++
++    Если модель вместо ответа выдала рассуждение (или потратила на него весь
++    лимит токенов), текст чистится, а при пустом остатке запрос повторяется
++    один раз со строгой инструкцией «только готовый ответ».
++    """
+@@ -824,4 +881,4 @@ def _synthesize(goal, state, provider, model):
+-    text, meta = chat_completion(
+-        [{"role": "system", "content": "Ты — NovaMind, ассистент. Отвечай точно и по делу."},
+-         {"role": "user", "content": prompt}],
+-        provider=provider, model=model, temperature=0.3, max_tokens=1200, timeout=60,
++    systems = (
++        "Ты — NovaMind, ассистент. Отвечай точно и по делу.",
++        "Ты — NovaMind. Выдай СРАЗУ готовый ответ на русском языке. Запрещено: рассуждения, "
++        "английский язык, черновики, пересказ своих шагов. Первое же слово — часть ответа.",
+@@ -829,6 +886,15 @@ def _synthesize(goal, state, provider, model):
+-    if text is None:
+-        text = ""
+-    action = parse_action(text)
+-    if action:                                   # модель всё равно ответила JSON-ом
+-        text = str(action.get("text") or "").strip() if action.get("action") == "answer" else ""
+-    return text
++    for attempt, system_text in enumerate(systems):
++        text, _meta = chat_completion(
++            [{"role": "system", "content": system_text},
++             {"role": "user", "content": prompt}],
++            provider=provider, model=model, temperature=0.3,
++            max_tokens=2000 if attempt == 0 else 1500, timeout=60,
++        )
++        text = text or ""
++        action = parse_action(text)
++        if action:                               # модель всё равно ответила JSON-ом
++            text = str(action.get("text") or "").strip() if action.get("action") == "answer" else ""
++        text = strip_leaked_reasoning(text, goal)
++        if text:
++            return text
++    return ""
+@@ -1480,0 +1547 @@ def agent_stream():
++        state["answer"] = strip_leaked_reasoning(state["answer"], goal)
+diff --git a/static/app.js b/static/app.js
+--- a/static/app.js
++++ b/static/app.js
+@@ -695,0 +696,37 @@ function createAssistantTurn(options = {}) {
++    /** Блок «Шаги»: один на ответ. В нём и команды, и запросы разрешений. */
++    ensureTerm() {
++      let box = bubble.querySelector('.agent-term');
++      if (box) return box;
++      box = document.createElement('div');
++      box.className = 'agent-term';
++      box.innerHTML = `
++        <button type="button" class="agent-term-head">
++          <span class="agent-term-ico">⌨️</span>
++          <span class="agent-term-title">${window.Linux && window.Linux.hasLinux && !window.Linux.hasLinux() ? 'Шаги ИИ' : 'Работа в Linux'}</span>
++          <span class="agent-term-meta"></span>
++          <span class="caret">▼</span>
++        </button>
++        <div class="agent-term-log"></div>`;
++      box.querySelector('.agent-term-head').addEventListener('click', () => {
++        // Свёрнут по умолчанию, раскрывается только по нажатию
++        box.classList.toggle('is-open');
++      });
++      bubble.insertBefore(box, answerEl);
++      return box;
++    },
++
++    /** Подпись в шапке блока: число шагов, ошибки или «ждёт разрешения». */
++    refreshTermMeta(box) {
++      const meta = box.querySelector('.agent-term-meta');
++      const pending = box.querySelectorAll('.agent-confirm:not(.is-approved):not(.is-denied)').length;
++      if (pending) { meta.textContent = '⏳ ждёт разрешения'; return; }
++      const count = box.querySelectorAll('.agent-term-row').length;
++      const failed = box.querySelectorAll('.agent-term-row.is-error').length;
++      const n10 = count % 10, n100 = count % 100;
++      const word = (n10 === 1 && n100 !== 11) ? 'шаг'
++        : (n10 >= 2 && n10 <= 4 && (n100 < 12 || n100 > 14)) ? 'шага' : 'шагов';
++      meta.textContent = count
++        ? `${count} ${word}${failed ? ` · ошибок: ${failed}` : ''}`
++        : '';
++    },
++
+@@ -699,18 +736 @@ function createAssistantTurn(options = {}) {
+-      let box = bubble.querySelector('.agent-term');
+-      if (!box) {
+-        box = document.createElement('div');
+-        box.className = 'agent-term';
+-        box.innerHTML = `
+-          <button type="button" class="agent-term-head">
+-            <span class="agent-term-ico">⌨️</span>
+-            <span class="agent-term-title">${window.Linux && window.Linux.hasLinux && !window.Linux.hasLinux() ? 'Шаги ИИ' : 'Работа в Linux'}</span>
+-            <span class="agent-term-meta"></span>
+-            <span class="caret">▼</span>
+-          </button>
+-          <div class="agent-term-log"></div>`;
+-        box.querySelector('.agent-term-head').addEventListener('click', () => {
+-          // Свёрнут по умолчанию, раскрывается только по нажатию
+-          box.classList.toggle('is-open');
+-        });
+-        bubble.insertBefore(box, answerEl);
+-      }
++      const box = api.ensureTerm();
+@@ -731,7 +751 @@ function createAssistantTurn(options = {}) {
+-      const count = box.querySelectorAll('.agent-term-row').length;
+-      const done = box.querySelectorAll('.agent-term-row.is-error').length;
+-      const n10 = count % 10, n100 = count % 100;
+-      const word = (n10 === 1 && n100 !== 11) ? 'шаг'
+-        : (n10 >= 2 && n10 <= 4 && (n100 < 12 || n100 > 14)) ? 'шага' : 'шагов';
+-      box.querySelector('.agent-term-meta').textContent =
+-        `${count} ${word}${done ? ` · ошибок: ${done}` : ''}`;
++      api.refreshTermMeta(box);
+@@ -844,0 +859,2 @@ function createAssistantTurn(options = {}) {
++      const term = api.ensureTerm();
++      const log = term.querySelector('.agent-term-log');
+@@ -846 +862 @@ function createAssistantTurn(options = {}) {
+-      box.className = 'agent-confirm';
++      box.className = 'agent-confirm is-open';        // пока ждём ответа — раскрыто
+@@ -852 +868,7 @@ function createAssistantTurn(options = {}) {
+-        <div class="agent-confirm-head">⚠️ Нужно разрешение <span class="agent-confirm-risk">${escapeHtml(request.risk || 'danger')}</span></div>
++        <button type="button" class="agent-confirm-head">
++          <span class="agent-confirm-ico">⚠️</span>
++          <span class="agent-confirm-title">Нужно разрешение · ${tool}</span>
++          <span class="agent-confirm-risk">${escapeHtml(request.risk || 'danger')}</span>
++          <span class="agent-confirm-note"></span>
++          <span class="caret">▼</span>
++        </button>
+@@ -854 +875,0 @@ function createAssistantTurn(options = {}) {
+-          <div class="agent-confirm-tool">${tool}</div>
+@@ -861 +881,0 @@ function createAssistantTurn(options = {}) {
+-          <span class="agent-confirm-note"></span>
+@@ -863 +883,3 @@ function createAssistantTurn(options = {}) {
+-      bubble.appendChild(box);
++      log.appendChild(box);
++      term.classList.add('is-open');                   // блок раскрыт, пока есть вопрос
++      api.refreshTermMeta(term);
+@@ -865,2 +887,6 @@ function createAssistantTurn(options = {}) {
+-      const decide = (approve) => {
+-        box.querySelectorAll('button').forEach((button) => { button.disabled = true; });
++      box.querySelector('.agent-confirm-head').addEventListener('click', () => {
++        box.classList.toggle('is-open');
++      });
++      const settle = (approve, text) => {
++        box.querySelectorAll('[data-confirm]').forEach((button) => { button.disabled = true; });
++        box.classList.remove('is-open');               // решение принято — строка сворачивается
+@@ -868 +894,7 @@ function createAssistantTurn(options = {}) {
+-        note.textContent = approve ? 'Разрешено — выполняю' : 'Отклонено';
++        if (!note.textContent) note.textContent = text;
++        const waiting = term.querySelector('.agent-confirm:not(.is-approved):not(.is-denied)');
++        if (!waiting) term.classList.remove('is-open'); // вопросов больше нет — блок сворачивается
++        api.refreshTermMeta(term);
++      };
++      const decide = (approve) => {
++        settle(approve, approve ? '✔ разрешено' : '✕ отклонено');
+@@ -874,2 +906,2 @@ function createAssistantTurn(options = {}) {
+-          if (!response.ok) note.textContent = 'Решение не принято: возможно, время вышло';
+-        }).catch(() => { note.textContent = 'Нет связи с сервером'; });
++          if (!response.ok) note.textContent = 'решение не принято: время вышло';
++        }).catch(() => { note.textContent = 'нет связи с сервером'; });
+@@ -878,0 +911 @@ function createAssistantTurn(options = {}) {
++      box._settle = settle;
+@@ -883 +916 @@ function createAssistantTurn(options = {}) {
+-    /** Ответ на подтверждение уже обработан сервером (пришёл confirm_result). */
++    /** Сервер уже обработал ответ (или вышло время) — закрываем строку. */
+@@ -886,5 +919,2 @@ function createAssistantTurn(options = {}) {
+-      if (!box) return;
+-      box.classList.add(event.approved ? 'is-approved' : 'is-denied');
+-      box.querySelectorAll('button').forEach((button) => { button.disabled = true; });
+-      const note = box.querySelector('.agent-confirm-note');
+-      if (note && !note.textContent) note.textContent = event.approved ? 'Разрешено' : 'Отклонено';
++      if (!box || box.classList.contains('is-approved') || box.classList.contains('is-denied')) return;
++      if (box._settle) box._settle(!!event.approved, event.approved ? '✔ разрешено' : '✕ отклонено');
+diff --git a/static/style.css b/static/style.css
+--- a/static/style.css
++++ b/static/style.css
+@@ -1259,0 +1260,18 @@ button, input, select, textarea, .stage, .sources-head, .msg-actions {
++
++/* Разрешения внутри блока «Шаги»: строка-аккордеон, а не отдельная карточка */
++.agent-term-log .agent-confirm {
++  margin: 6px 0; padding: 0; overflow: hidden;
++}
++.agent-term-log .agent-confirm-head {
++  width: 100%; padding: 8px 11px; font: inherit; font-size: 12px; font-weight: 600;
++  color: inherit; background: transparent; border: 0; text-align: left; cursor: pointer;
++}
++.agent-confirm-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
++.agent-confirm-head .caret { font-size: 9px; color: var(--txt-dim); transition: transform .18s ease; }
++.agent-confirm.is-open .agent-confirm-head .caret { transform: rotate(180deg); }
++.agent-confirm-body, .agent-confirm-actions { display: none; padding: 0 11px; }
++.agent-confirm.is-open .agent-confirm-body { display: block; }
++.agent-confirm.is-open .agent-confirm-actions { display: flex; padding-bottom: 10px; }
++.agent-confirm.is-approved { border-color: rgba(93, 214, 154, .4); background: rgba(93, 214, 154, .07); }
++.agent-confirm.is-denied { border-color: rgba(255, 118, 118, .4); background: rgba(255, 118, 118, .07); }
++.agent-term.is-done .agent-confirm { opacity: 1; }
