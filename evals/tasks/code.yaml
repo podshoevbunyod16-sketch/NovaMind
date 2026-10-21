@@ -1,0 +1,31 @@
+# Работа с кодом: точечная правка вместо перезаписи файла.
+id: code-01
+category: code
+prompt: Прочитай файл app.py и скажи, на каком порту запускается сервер.
+tools: read
+max_steps: 6
+---
+id: code-02
+category: code
+prompt: Создай файл calc.py с функцией add(a, b) и покажи его содержимое.
+tools: write, read
+expect: add
+max_steps: 8
+---
+id: code-03
+category: code
+prompt: В файле calc.py замени return a + b на return a + b + 0 и покажи diff.
+tools: edit
+max_steps: 8
+---
+id: code-04
+category: code
+prompt: Найди в файлах проекта все def-функции с именем, содержащим agent.
+tools: grep
+max_steps: 8
+---
+id: code-05
+category: code
+prompt: Запусти калькулятор тестов на файле tests/test_evals.py и скажи результат.
+tools: run
+max_steps: 8

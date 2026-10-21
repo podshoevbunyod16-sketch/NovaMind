@@ -1,0 +1,35 @@
+# Поиск и чтение страниц: агент обязан опираться на источники.
+id: search-01
+category: search
+prompt: Найди, какую погоду обещают завтра в Душанбе, и ответь по-русски.
+tools: search, open
+expect: Душанбе
+max_steps: 8
+---
+id: search-02
+category: search
+prompt: Найди курс биткоина к доллару сегодня и назови число.
+tools: search
+expect: биткоин
+max_steps: 8
+---
+id: search-03
+category: search
+prompt: Найди и прочитай страницу https://example.com и перескажи одним предложением.
+tools: open
+expect: example
+max_steps: 6
+---
+id: search-04
+category: search
+prompt: Найди в интернете, кто изобрёл язык Python, и назови фамилию.
+tools: search
+expect: Гвидо
+max_steps: 8
+---
+id: search-05
+category: search
+prompt: Найди официальную документацию Flask и процитируй название текущей версии.
+tools: search, open
+expect: Flask
+max_steps: 10

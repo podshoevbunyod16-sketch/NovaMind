@@ -1,0 +1,31 @@
+# Память: агент запоминает и вспоминает факты о пользователе.
+id: memory-01
+category: memory
+prompt: Запомни, что меня зовут Бунёд и я работаю над NovaMind.
+tools: remember
+max_steps: 6
+---
+id: memory-02
+category: memory
+prompt: Что ты помнишь обо мне? Напомни моё имя.
+tools: recall
+max_steps: 6
+---
+id: memory-03
+category: memory
+prompt: Запомни, что я предпочитаю короткие ответы без воды.
+tools: remember
+max_steps: 6
+---
+id: memory-04
+category: memory
+prompt: Забудь всё, что знаешь о моих предпочтениях.
+tools: forget
+max_steps: 6
+---
+id: memory-05
+category: memory
+prompt: Вспомни, какой проект мы обсуждали, и назови его.
+tools: recall
+expect: NovaMind
+max_steps: 6

@@ -1,0 +1,33 @@
+# Рабочая папка и терминал: агент выполняет команды и опирается на вывод.
+id: terminal-01
+category: terminal
+prompt: Покажи, какие файлы лежат в рабочей папке, и назови один из них.
+tools: ls
+max_steps: 6
+---
+id: terminal-02
+category: terminal
+prompt: Создай файл hello.txt с текстом «привет» и покажи его содержимое.
+tools: write, read
+max_steps: 8
+---
+id: terminal-03
+category: terminal
+prompt: Выполни команду pwd и скажи, в какой папке ты работаешь.
+tools: run
+expect: /
+max_steps: 6
+---
+id: terminal-04
+category: terminal
+prompt: Найди в проекте все упоминания Flask с помощью grep и назови файл.
+tools: grep
+expect: Flask
+max_steps: 8
+---
+id: terminal-05
+category: terminal
+prompt: Покажи структуру проекта на два уровня вглубь и назови папку routes.
+tools: tree
+expect: routes
+max_steps: 8
