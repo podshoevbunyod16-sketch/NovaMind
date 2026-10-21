@@ -287,6 +287,119 @@ def usage_totals(chat_id=None):
             "cost_usd": round(float(row["cost_usd"] or 0), 6)}
 
 
+# ══════════════════════════════════════════════════════════════
+# ЗАДАЧИ ПО РАСПИСАНИЮ (бонус Б4)
+# ══════════════════════════════════════════════════════════════
+
+_schedule_ready = set()
+
+
+def init_schedule():
+    """Таблица расписания создаётся лениво."""
+    if DB_PATH in _schedule_ready:
+        return
+    with get_db() as conn:
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS scheduled_jobs (
+                id TEXT PRIMARY KEY,
+                owner TEXT DEFAULT '',
+                owner_admin INTEGER NOT NULL DEFAULT 0,
+                prompt TEXT NOT NULL,
+                kind TEXT NOT NULL DEFAULT 'every',      -- cron | every
+                expr TEXT NOT NULL,
+                chat_id TEXT DEFAULT '',
+                result_chat_id TEXT DEFAULT '',
+                next_run_at REAL NOT NULL,
+                last_run_at REAL,
+                runs INTEGER NOT NULL DEFAULT 0,
+                status TEXT NOT NULL DEFAULT 'active',   -- active | paused | error
+                last_result TEXT DEFAULT '',
+                created_at REAL NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_jobs_due ON scheduled_jobs(status, next_run_at);
+        """)
+    _schedule_ready.add(DB_PATH)
+
+
+def add_job(job):
+    """Сохраняет задание по расписанию."""
+    init_schedule()
+    with _db_lock:
+        with get_db() as conn:
+            conn.execute(
+                "INSERT INTO scheduled_jobs (id, owner, owner_admin, prompt, kind, expr, "
+                "chat_id, result_chat_id, next_run_at, status, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (job["id"], job.get("owner", ""), 1 if job.get("owner_admin") else 0,
+                 job["prompt"], job.get("kind", "every"), job["expr"],
+                 job.get("chat_id", ""), job.get("result_chat_id", ""),
+                 job["next_run_at"], job.get("status", "active"), time.time())
+            )
+    return get_job(job["id"])
+
+
+def get_job(job_id):
+    init_schedule()
+    with get_db() as conn:
+        row = conn.execute("SELECT * FROM scheduled_jobs WHERE id=?", (job_id,)).fetchone()
+    return _job_dict(row) if row else None
+
+
+def list_jobs(owner=None):
+    init_schedule()
+    with get_db() as conn:
+        if owner:
+            rows = conn.execute(
+                "SELECT * FROM scheduled_jobs WHERE owner=? ORDER BY created_at DESC",
+                (owner,)).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM scheduled_jobs ORDER BY created_at DESC").fetchall()
+    return [_job_dict(row) for row in rows]
+
+
+def due_jobs(now, limit=5):
+    """Задания, которым пора выполняться."""
+    init_schedule()
+    with get_db() as conn:
+        rows = conn.execute(
+            "SELECT * FROM scheduled_jobs WHERE status='active' AND next_run_at<=? "
+            "ORDER BY next_run_at LIMIT ?", (now, limit)).fetchall()
+    return [_job_dict(row) for row in rows]
+
+
+def update_job(job_id, **fields):
+    """Обновляет поля задания (next_run_at, runs, status, last_result…)."""
+    if not fields:
+        return get_job(job_id)
+    init_schedule()
+    allowed = {"prompt", "kind", "expr", "next_run_at", "last_run_at", "runs",
+               "status", "last_result", "result_chat_id", "chat_id"}
+    columns = [key for key in fields if key in allowed]
+    if not columns:
+        return get_job(job_id)
+    assignments = ", ".join(f"{column}=?" for column in columns)
+    values = [fields[column] for column in columns] + [job_id]
+    with _db_lock:
+        with get_db() as conn:
+            conn.execute(f"UPDATE scheduled_jobs SET {assignments} WHERE id=?", values)
+    return get_job(job_id)
+
+
+def delete_job(job_id):
+    init_schedule()
+    with _db_lock:
+        with get_db() as conn:
+            cursor = conn.execute("DELETE FROM scheduled_jobs WHERE id=?", (job_id,))
+            return cursor.rowcount
+
+
+def _job_dict(row):
+    job = dict(row)
+    job["owner_admin"] = bool(job.get("owner_admin"))
+    return job
+
+
 # ---------- Админ ----------
 
 # ══════════════════════════════════════════════════════════════

@@ -134,6 +134,8 @@ AGENT_ACTION_META = {
     "audio": ("Озвучить текст (text-to-speech).", "write"),
     "video": ("Сгенерировать видео по описанию.", "write"),
     "skill_create": ("Создать skill из готового SKILL.md (name, content).", "write"),
+    "schedule": ("Поставить задачу по расписанию: prompt + cron или every "
+                 "(например «0 9 * * *» или «1d»). Результат придёт в отдельный чат.", "write"),
     "task": ("Завести задачу с подпунктами (title, detail, steps).", "write"),
     "task_done": ("Закрыть задачу с пометкой о результате (task_id, note).", "write"),
     "remember": ("Сохранить устойчивый факт о пользователе (text, kind, tags). "
@@ -159,6 +161,14 @@ _EXTRA_ACTION_SCHEMAS = {
     "forget": {"type": "object",
                "properties": {"id": {"type": "string"}},
                "required": ["id"]},
+    "schedule": {"type": "object",
+                 "properties": {"prompt": {"type": "string",
+                                           "description": "что делать при запуске"},
+                                "cron": {"type": "string",
+                                         "description": "5 полей: минута час день месяц день_недели"},
+                                "every": {"type": "string",
+                                          "description": "интервал: 30m, 2h, 1d"}},
+                 "required": ["prompt"]},
     "answer": {"type": "object",
                "properties": {"text": {"type": "string", "description": "ответ пользователю"}},
                "required": ["text"]},

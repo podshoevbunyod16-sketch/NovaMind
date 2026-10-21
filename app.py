@@ -35,6 +35,25 @@ for bp in ALL_BLUEPRINTS:
 init_db()
 load_plugins()
 
+# ---------- Планировщик (Б4) ----------
+# В тестах и при SCHEDULER_ENABLED=0 поток не поднимается: он не должен
+# влиять ни на прогон pytest, ни на отладку.
+def _start_scheduler():
+    import sys
+    if os.getenv("SCHEDULER_ENABLED", "1") != "1":
+        return False
+    if "pytest" in sys.modules or os.getenv("PYTEST_CURRENT_TEST"):
+        return False
+    try:
+        import scheduler
+        return scheduler.start(app)
+    except Exception:
+        logging.getLogger(__name__).warning("Планировщик не запустился", exc_info=True)
+        return False
+
+
+_start_scheduler()
+
 # ---------- Статика ----------
 @app.route('/static/<path:filename>')
 def static_files(filename):

@@ -1070,6 +1070,11 @@ def agent_stream():
         import memory as memory_module
         memory_key = memory_module.user_key(session, signed_in())
         state["memory_key"] = memory_key
+        # Владелец задания по расписанию — не то же самое, что ключ памяти:
+        # расписание работает и при выключенной памяти.
+        state["owner"] = (str(session.get("admin_username") or session.get("nova_user_nick")
+                              or session.get("nova_user_email") or "").lower()[:180]
+                          if signed_in() else "")
         if memory_key:
             try:
                 memory_block = memory_module.prompt_block(memory_key, goal)
@@ -2002,6 +2007,34 @@ def _perform(action, kind, use_tools, state, goal="", cancel=None):
         yield _ndjson({"type": "step", "icon": "🗑",
                        "text": "Удалил из памяти" if removed else "Такой записи нет"})
         return ("Воспоминание удалено." if removed else "Запись с таким id не найдена.")
+
+    if kind == "schedule":
+        import scheduler
+        prompt = str(action.get("prompt") or action.get("text") or "").strip()
+        if not prompt:
+            return "Нужно поле prompt — что именно делать при запуске."
+        cron = str(action.get("cron") or "").strip()
+        every = str(action.get("every") or "").strip()
+        if not cron and not every:
+            return "Нужно расписание: cron (5 полей) или every (30m, 2h, 1d)."
+        kind_name = "cron" if cron else "every"
+        expr = cron or every
+        owner = state.get("owner") or ""
+        if not owner:
+            return "Расписание доступно только вошедшим пользователям."
+        try:
+            job = scheduler.create_job(owner, prompt, kind_name, expr,
+                                       chat_id=str(session.get("chat_id") or ""),
+                                       owner_admin=bool(session.get("admin_logged_in")))
+        except ValueError as exc:
+            yield _ndjson({"type": "step", "icon": "⏰", "text": f"Не поставил: {exc}"})
+            return f"Расписание не создано: {exc}"
+        when = time.strftime("%d.%m %H:%M", time.localtime(job["next_run_at"]))
+        yield _ndjson({"type": "step", "icon": "⏰",
+                       "text": f"Поставил задание: {scheduler.describe(job)}, первый запуск {when}"})
+        yield _ndjson({"type": "schedule", "job": job})
+        return (f"Задание создано ({scheduler.describe(job)}), первый запуск {when}. "
+                f"Результаты появятся в отдельном чате «⏰ Расписание».")
 
     if kind == "answer":
         return ""  # цикл прервётся сам
