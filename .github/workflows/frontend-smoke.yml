@@ -17,7 +17,8 @@ jobs:
           python-version: "3.11"
       - uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          # jsdom 30 требует Node ^22.22.2 || ^24.15 || >=26
+          node-version: "22"
       - name: Install dependencies
         run: |
           pip install -r requirements-dev.txt
