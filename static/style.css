@@ -1144,6 +1144,34 @@ button, input, select, textarea, .stage, .sources-head, .msg-actions {
 .agent-confirm.is-approved { border-color: rgba(93, 214, 154, .45); background: rgba(93, 214, 154, .08); }
 .agent-confirm.is-denied { border-color: rgba(255, 118, 118, .4); background: rgba(255, 118, 118, .07); }
 
+/* Разрешение — строка внутри блока шагов, а не отдельная карточка поверх чата */
+.agent-term-log .agent-confirm {
+  margin: 6px 0; padding: 0; border-radius: 10px; overflow: hidden;
+}
+.agent-term-log .agent-confirm-head {
+  display: flex; align-items: center; gap: 8px;
+  width: 100%; padding: 8px 10px; border: 0; text-align: left; cursor: pointer;
+  font: inherit; font-size: 12px; font-weight: 600; color: inherit; background: transparent;
+}
+.agent-term-log .agent-confirm-head:hover { background: rgba(255, 255, 255, .05); }
+.agent-term-log .agent-confirm-ico { flex-shrink: 0; }
+.agent-term-log .agent-confirm-title {
+  flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.agent-term-log .agent-confirm-head .agent-confirm-note {
+  margin-left: auto; white-space: nowrap; font-weight: 400;
+}
+.agent-term-log .agent-confirm-head .caret {
+  font-size: 9px; color: var(--txt-dim); transition: transform .18s ease;
+}
+.agent-term-log .agent-confirm.is-open .agent-confirm-head .caret { transform: rotate(180deg); }
+.agent-term-log .agent-confirm-body,
+.agent-term-log .agent-confirm-actions { display: none; padding: 0 10px; }
+.agent-term-log .agent-confirm.is-open .agent-confirm-body { display: block; }
+.agent-term-log .agent-confirm.is-open .agent-confirm-actions { display: flex; padding-bottom: 10px; }
+.agent-term-log .agent-confirm-body .agent-confirm-cmd { margin-top: 0; }
+.agent-term-log .agent-confirm .agent-confirm-actions { margin-top: 8px; }
+
 @media (max-width: 860px) {
   .code-acts button { font-size: 11px; padding: 5px 8px; }
   .agent-term-head { padding: 10px 12px; font-size: 12.5px; }

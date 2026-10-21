@@ -688,6 +688,62 @@ function createAssistantTurn(options = {}) {
     },
 
     /**
+     * Один блок шагов на ответ: команды и запросы разрешений живут вместе.
+     * Создаётся лениво — при первом инструменте или подтверждении.
+     */
+    ensureTerm() {
+      let box = bubble.querySelector('.agent-term');
+      if (box) return box;
+      box = document.createElement('div');
+      box.className = 'agent-term';
+      box.innerHTML = `
+        <button type="button" class="agent-term-head" aria-expanded="false">
+          <span class="agent-term-ico">⌨️</span>
+          <span class="agent-term-title">${window.Linux && window.Linux.hasLinux && !window.Linux.hasLinux() ? 'Шаги ИИ' : 'Работа в Linux'}</span>
+          <span class="agent-term-meta"></span>
+          <span class="caret">▼</span>
+        </button>
+        <div class="agent-term-log"></div>`;
+      box.querySelector('.agent-term-head').addEventListener('click', () => {
+        // Пока висит вопрос, не даём спрятать разрешение вместе с блоком.
+        if (box.querySelector('.agent-confirm:not(.is-approved):not(.is-denied)')) {
+          api.setTermOpen(box, true);
+          return;
+        }
+        api.setTermOpen(box, !box.classList.contains('is-open'));
+      });
+      bubble.insertBefore(box, answerEl);
+      return box;
+    },
+
+    setTermOpen(box, open) {
+      if (!box) return;
+      box.classList.toggle('is-open', !!open);
+      const head = box.querySelector('.agent-term-head');
+      if (head) head.setAttribute('aria-expanded', open ? 'true' : 'false');
+    },
+
+    /** Подпись в шапке: число шагов, ошибки или «ждёт разрешения». */
+    refreshTermMeta(box) {
+      if (!box) return;
+      const meta = box.querySelector('.agent-term-meta');
+      if (!meta) return;
+      const rows = box.querySelectorAll('.agent-term-row').length;
+      const confirms = box.querySelectorAll('.agent-confirm').length;
+      const count = rows + confirms;
+      const failed = box.querySelectorAll('.agent-term-row.is-error').length;
+      const pending = box.querySelectorAll('.agent-confirm:not(.is-approved):not(.is-denied)').length;
+      const n10 = count % 10, n100 = count % 100;
+      const word = (n10 === 1 && n100 !== 11) ? 'шаг'
+        : (n10 >= 2 && n10 <= 4 && (n100 < 12 || n100 > 14)) ? 'шага' : 'шагов';
+      if (pending) {
+        meta.textContent = `⏳ ждёт разрешения${count ? ` · ${count} ${word}` : ''}`;
+      } else {
+        meta.textContent = count ? `${count} ${word}${failed ? ` · ошибок: ${failed}` : ''}` : '';
+      }
+    },
+
+    /**
      * Команды, которые ИИ выполняет в песочнице.
      *
      * Отдельного терминала в чате нет: во время работы блок раскрыт,
@@ -696,24 +752,7 @@ function createAssistantTurn(options = {}) {
     tool(event = {}) {
       const command = event.command || '';
       if (!command) return;
-      let box = bubble.querySelector('.agent-term');
-      if (!box) {
-        box = document.createElement('div');
-        box.className = 'agent-term';
-        box.innerHTML = `
-          <button type="button" class="agent-term-head">
-            <span class="agent-term-ico">⌨️</span>
-            <span class="agent-term-title">${window.Linux && window.Linux.hasLinux && !window.Linux.hasLinux() ? 'Шаги ИИ' : 'Работа в Linux'}</span>
-            <span class="agent-term-meta"></span>
-            <span class="caret">▼</span>
-          </button>
-          <div class="agent-term-log"></div>`;
-        box.querySelector('.agent-term-head').addEventListener('click', () => {
-          // Свёрнут по умолчанию, раскрывается только по нажатию
-          box.classList.toggle('is-open');
-        });
-        bubble.insertBefore(box, answerEl);
-      }
+      const box = api.ensureTerm();
       const failed = Number(event.code) !== 0;
       const row = document.createElement('div');
       row.className = `agent-term-row${failed ? ' is-error' : ''}`;
@@ -728,13 +767,7 @@ function createAssistantTurn(options = {}) {
         row.appendChild(out);
       }
       box.querySelector('.agent-term-log').appendChild(row);
-      const count = box.querySelectorAll('.agent-term-row').length;
-      const done = box.querySelectorAll('.agent-term-row.is-error').length;
-      const n10 = count % 10, n100 = count % 100;
-      const word = (n10 === 1 && n100 !== 11) ? 'шаг'
-        : (n10 >= 2 && n10 <= 4 && (n100 < 12 || n100 > 14)) ? 'шага' : 'шагов';
-      box.querySelector('.agent-term-meta').textContent =
-        `${count} ${word}${done ? ` · ошибок: ${done}` : ''}`;
+      api.refreshTermMeta(box);
       if (traceData.length < 60) {
         traceData.push({ kind: 'tool', name: event.name || 'run',
           command: command, code: event.code ?? 0 });
@@ -747,7 +780,9 @@ function createAssistantTurn(options = {}) {
     finishTerm() {
       const box = bubble.querySelector('.agent-term');
       if (!box) return;
-      box.classList.remove('is-open');
+      // Незакрытый вопрос важнее: оставляем шаги раскрытыми, пока ждём ответа.
+      if (box.querySelector('.agent-confirm:not(.is-approved):not(.is-denied)')) return;
+      api.setTermOpen(box, false);
       box.classList.add('is-done');
     },
 
@@ -840,42 +875,66 @@ function createAssistantTurn(options = {}) {
       scrollToBottom();
     },
 
-    /** Карточка «Разрешить / Отклонить» для опасного шага агента. */
+    /** Карточка «Разрешить / Отклонить» внутри блока шагов агента. */
     confirm(request) {
+      const term = api.ensureTerm();
+      const log = term.querySelector('.agent-term-log');
       const box = document.createElement('div');
-      box.className = 'agent-confirm';
+      box.className = 'agent-confirm is-open';
       box.dataset.id = request.id || '';
       const tool = escapeHtml(request.tool || 'действие');
       const command = escapeHtml(request.command || '');
       const args = request.args ? escapeHtml(JSON.stringify(request.args, null, 2)) : '';
       box.innerHTML = `
-        <div class="agent-confirm-head">⚠️ Нужно разрешение <span class="agent-confirm-risk">${escapeHtml(request.risk || 'danger')}</span></div>
+        <button type="button" class="agent-confirm-head" aria-expanded="true">
+          <span class="agent-confirm-ico">⚠️</span>
+          <span class="agent-confirm-title">Нужно разрешение · ${tool}</span>
+          <span class="agent-confirm-risk">${escapeHtml(request.risk || 'danger')}</span>
+          <span class="agent-confirm-note"></span>
+          <span class="caret">▼</span>
+        </button>
         <div class="agent-confirm-body">
-          <div class="agent-confirm-tool">${tool}</div>
           ${command ? `<pre class="agent-confirm-cmd">${command}</pre>` : ''}
           ${args ? `<details class="agent-confirm-args"><summary>Аргументы</summary><pre>${args}</pre></details>` : ''}
         </div>
         <div class="agent-confirm-actions">
           <button type="button" class="ok" data-confirm="yes">Разрешить</button>
           <button type="button" class="no" data-confirm="no">Отклонить</button>
-          <span class="agent-confirm-note"></span>
         </div>`;
-      bubble.appendChild(box);
+      log.appendChild(box);
+      // Пока ждём решение — блок раскрыт, чтобы вопрос был виден сразу.
+      api.setTermOpen(term, true);
+      api.refreshTermMeta(term);
+
+      const head = box.querySelector('.agent-confirm-head');
       const note = box.querySelector('.agent-confirm-note');
-      const decide = (approve) => {
-        box.querySelectorAll('button').forEach((button) => { button.disabled = true; });
+      head.addEventListener('click', () => {
+        box.classList.toggle('is-open');
+        head.setAttribute('aria-expanded', box.classList.contains('is-open'));
+      });
+
+      const settle = (approve, text) => {
+        if (box.classList.contains('is-approved') || box.classList.contains('is-denied')) return;
+        box.querySelectorAll('[data-confirm]').forEach((button) => { button.disabled = true; });
         box.classList.add(approve ? 'is-approved' : 'is-denied');
-        note.textContent = approve ? 'Разрешено — выполняю' : 'Отклонено';
+        box.classList.remove('is-open');
+        head.setAttribute('aria-expanded', 'false');
+        note.textContent = text || (approve ? '✔ разрешено' : '✕ отклонено');
+        api.refreshTermMeta(term);
+      };
+      const decide = (approve) => {
+        settle(approve, approve ? '✔ разрешено' : '✕ отклонено');
         fetch('/api/agent/confirm', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ id: request.id, approve }),
         }).then((response) => {
-          if (!response.ok) note.textContent = 'Решение не принято: возможно, время вышло';
-        }).catch(() => { note.textContent = 'Нет связи с сервером'; });
+          if (!response.ok) note.textContent = 'решение не принято: время вышло';
+        }).catch(() => { note.textContent = 'нет связи с сервером'; });
       };
       box.querySelector('[data-confirm="yes"]').addEventListener('click', () => decide(true));
       box.querySelector('[data-confirm="no"]').addEventListener('click', () => decide(false));
+      box._settle = settle;
       scrollToBottom();
       return box;
     },
@@ -884,10 +943,14 @@ function createAssistantTurn(options = {}) {
     confirmResult(event) {
       const box = bubble.querySelector(`.agent-confirm[data-id="${event.id}"]`);
       if (!box) return;
-      box.classList.add(event.approved ? 'is-approved' : 'is-denied');
-      box.querySelectorAll('button').forEach((button) => { button.disabled = true; });
-      const note = box.querySelector('.agent-confirm-note');
-      if (note && !note.textContent) note.textContent = event.approved ? 'Разрешено' : 'Отклонено';
+      if (box._settle) {
+        box._settle(!!event.approved, event.approved ? '✔ разрешено' : '✕ отклонено');
+      } else {
+        box.classList.add(event.approved ? 'is-approved' : 'is-denied');
+        box.querySelectorAll('button').forEach((button) => { button.disabled = true; });
+        const note = box.querySelector('.agent-confirm-note');
+        if (note && !note.textContent) note.textContent = event.approved ? 'Разрешено' : 'Отклонено';
+      }
     },
 
     setSources(sources) {

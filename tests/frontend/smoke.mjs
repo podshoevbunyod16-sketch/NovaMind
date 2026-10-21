@@ -230,9 +230,11 @@ const pageHtml = await (await fetch(BASE + '/chat')).text();
 // ровно тем содержимым, которое отдаёт сервер.
 const appJs = await (await fetch(BASE + '/static/app.js')).text();
 const linuxJs = await (await fetch(BASE + '/static/linux.js')).text();
+// Функция-заменитель, а не строка: в app.js есть '$' + ... — иначе String.replace
+// принимает «$'» за вставку остатка страницы и ломает инлайн-скрипт.
 const html = pageHtml
-  .replace('<script src="/static/app.js"></script>', '<script>' + appJs + '</script>')
-  .replace('<script src="/static/linux.js"></script>', '<script>' + linuxJs + '</script>');
+  .replace('<script src="/static/app.js"></script>', () => '<script>' + appJs + '</script>')
+  .replace('<script src="/static/linux.js"></script>', () => '<script>' + linuxJs + '</script>');
 if (!html.includes('window.Linux')) throw new Error('не удалось встроить /static/linux.js в страницу');
 
 const virtualConsole = new VirtualConsole();
@@ -781,6 +783,44 @@ check('если модель пошла работать — начатая фр
   lastAi().querySelector('.answer').textContent.trim() === 'В папке есть hello.py'
   && lastAi().querySelectorAll('.agent-term-row').length === 1,
   lastAi().querySelector('.answer').textContent);
+
+console.log('\n11б) Разрешение раскрывается внутри шагов агента');
+const confirmTurn = window.createAssistantTurn();
+confirmTurn.beginIdle('Думаю…');
+const confirmCard = confirmTurn.confirm({
+  id: 'confirm-smoke-1', tool: 'run', risk: 'danger',
+  command: 'git push origin main',
+  args: { action: 'run', command: 'git push origin main' },
+});
+const confirmTerm = confirmTurn.element.querySelector('.agent-term');
+check('карточка разрешения внутри блока шагов',
+  !!confirmCard && confirmCard.closest('.agent-term-log') === confirmTerm.querySelector('.agent-term-log'));
+check('блок шагов сам раскрылся на вопрос',
+  confirmTerm.classList.contains('is-open')
+  && confirmTerm.querySelector('.agent-term-head').getAttribute('aria-expanded') === 'true');
+check('в шагах видно команду, требующую разрешения',
+  confirmTerm.textContent.includes('Нужно разрешение')
+  && confirmTerm.textContent.includes('git push origin main'));
+check('шапка шагов говорит, что ждёт решения',
+  confirmTerm.querySelector('.agent-term-meta').textContent.includes('ждёт разрешения'),
+  confirmTerm.querySelector('.agent-term-meta').textContent);
+confirmCard.querySelector('[data-confirm="yes"]').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+await settle(30);
+check('после «Разрешить» строка свернулась и помечена',
+  confirmCard.classList.contains('is-approved') && !confirmCard.classList.contains('is-open')
+  && confirmCard.querySelector('.agent-confirm-note').textContent.includes('разрешено'));
+check('блок шагов остался раскрытым для выполнения',
+  confirmTerm.classList.contains('is-open')
+  && !confirmTerm.querySelector('.agent-term-meta').textContent.includes('ждёт'));
+const deniedCard = confirmTurn.confirm({
+  id: 'confirm-smoke-2', tool: 'mcp_call', risk: 'danger',
+  command: 'github:delete_repo', args: { repo: 'demo' },
+});
+confirmTurn.confirmResult({ id: 'confirm-smoke-2', approved: false });
+check('confirm_result закрывает вопрос и помечает отказ',
+  deniedCard.classList.contains('is-denied')
+  && deniedCard.querySelector('.agent-confirm-note').textContent.includes('отклонено'));
+confirmTurn.remove();
 
 // ══════════════════════════════════════════════════════════════
 // 12) Кнопка «Поиск» через Linux, кнопки у кода, откат без окружения

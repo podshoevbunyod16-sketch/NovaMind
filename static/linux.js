@@ -116,7 +116,7 @@
         body: JSON.stringify({ message, search, reasoning: !!options.reasoning }),
         signal: controller.signal,
       });
-      state.runId = response.headers.get('X-Agent-Run-Id') || '';
+      state.runId = response.headers?.get?.('X-Agent-Run-Id') || '';
       if (!response.ok) {
         if ((response.status === 403 || response.status === 404) && !coding) {
           turn.remove();
