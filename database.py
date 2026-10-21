@@ -104,11 +104,15 @@ def list_chats(limit=50):
     return [dict(r) for r in rows]
 
 def delete_chat(chat_id):
-    """Удаляет чат и все его сообщения."""
+    """Удаляет чат, его сообщения и трассы шагов."""
     with _db_lock:
         with get_db() as conn:
             conn.execute("DELETE FROM messages WHERE chat_id=?", (chat_id,))
             conn.execute("DELETE FROM chats WHERE id=?", (chat_id,))
+    try:
+        clear_traces(chat_id)          # таблицы может ещё не быть — не страшно
+    except sqlite3.Error:
+        pass
 
 def get_or_create_session_chat():
     """Получает или создаёт chat_id для текущей Flask-сессии."""
@@ -130,6 +134,87 @@ def trim_messages(chat_id, max_messages=100):
                         ORDER BY created_at DESC LIMIT ?
                     )
                 """, (chat_id, chat_id, max_messages))
+
+# ══════════════════════════════════════════════════════════════
+# ТРАССА ШАГОВ АГЕНТА (бонус Б2)
+# «Что делал агент»: шаги и команды сохраняются рядом с чатом, чтобы
+# панель можно было открыть после перезагрузки страницы.
+# ══════════════════════════════════════════════════════════════
+
+_traces_ready = set()
+
+
+def init_traces():
+    """Таблица трасс создаётся лениво — на старых базах её нет."""
+    if DB_PATH in _traces_ready:
+        return
+    with get_db() as conn:
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS step_traces (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id TEXT NOT NULL,
+                run_id TEXT DEFAULT '',
+                steps TEXT NOT NULL,
+                created_at REAL NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_traces_chat ON step_traces(chat_id, created_at DESC);
+        """)
+    _traces_ready.add(DB_PATH)
+
+
+def save_trace(chat_id, run_id, steps, limit_per_chat=100):
+    """Сохраняет трассу хода агента. Пустую трассу не пишем."""
+    if not chat_id or not steps:
+        return 0
+    init_traces()
+    payload = json.dumps(steps, ensure_ascii=False)
+    with _db_lock:
+        with get_db() as conn:
+            cursor = conn.execute(
+                "INSERT INTO step_traces (chat_id, run_id, steps, created_at) VALUES (?, ?, ?, ?)",
+                (chat_id, run_id or "", payload, time.time())
+            )
+            conn.execute("""
+                DELETE FROM step_traces WHERE chat_id=? AND id NOT IN (
+                    SELECT id FROM step_traces WHERE chat_id=?
+                    ORDER BY created_at DESC, id DESC LIMIT ?
+                )
+            """, (chat_id, chat_id, limit_per_chat))
+            return cursor.lastrowid
+
+
+def get_traces(chat_id, limit=20):
+    """Трассы чата (новые последними) — для панели «Что делал агент»."""
+    if not chat_id:
+        return []
+    init_traces()
+    with get_db() as conn:
+        rows = conn.execute(
+            "SELECT id, run_id, steps, created_at FROM step_traces "
+            "WHERE chat_id=? ORDER BY created_at DESC, id DESC LIMIT ?",
+            (chat_id, limit)
+        ).fetchall()
+    traces = []
+    for row in reversed(rows):
+        try:
+            steps = json.loads(row["steps"])
+        except (TypeError, ValueError):
+            steps = []
+        traces.append({"id": row["id"], "run_id": row["run_id"],
+                       "steps": steps, "created_at": row["created_at"]})
+    return traces
+
+
+def clear_traces(chat_id):
+    """Удаляет трассы чата (вместе с чатом или по кнопке «очистить»)."""
+    if not chat_id:
+        return 0
+    init_traces()
+    with _db_lock:
+        with get_db() as conn:
+            cursor = conn.execute("DELETE FROM step_traces WHERE chat_id=?", (chat_id,))
+            return cursor.rowcount
+
 
 # ---------- Админ ----------
 

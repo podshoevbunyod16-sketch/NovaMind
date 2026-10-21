@@ -566,6 +566,8 @@ function createAssistantTurn(options = {}) {
   let answerText = '';
   let sourcesData = [];
   const mediaData = [];
+  // «Что делал агент»: шаги и команды этого хода — переживают перезагрузку.
+  const traceData = [];
   let finished = false;
 
   const startTimer = () => {
@@ -647,6 +649,7 @@ function createAssistantTurn(options = {}) {
       row.innerHTML = `<span class="ico">${icon || '•'}</span><span class="txt">${escapeHtml(text || '')}</span>`;
       stepsEl.appendChild(row);
       while (stepsEl.children.length > 7) stepsEl.firstChild.remove();
+      if (traceData.length < 60) traceData.push({ kind: 'step', icon: icon || '•', text: text || '' });
       scrollToBottom();
     },
 
@@ -732,6 +735,10 @@ function createAssistantTurn(options = {}) {
         : (n10 >= 2 && n10 <= 4 && (n100 < 12 || n100 > 14)) ? 'шага' : 'шагов';
       box.querySelector('.agent-term-meta').textContent =
         `${count} ${word}${done ? ` · ошибок: ${done}` : ''}`;
+      if (traceData.length < 60) {
+        traceData.push({ kind: 'tool', name: event.name || 'run',
+          command: command, code: event.code ?? 0 });
+      }
       // Блок остаётся свёрнутым: раскрывается только по нажатию пользователя
       scrollToBottom();
     },
@@ -948,6 +955,8 @@ function createAssistantTurn(options = {}) {
           model: meta.model || null,
           elapsed_ms: Date.now() - startedAt,
           reasoning: reasoningText || null,
+          trace: traceData.length ? traceData.slice(0, 60) : undefined,
+          server_chat_id: meta.serverChatId || null,
         });
       }
       scrollToBottom();
@@ -1433,6 +1442,8 @@ function appendMessage(role, content, meta = null) {
   const savedMedia = isAI && Array.isArray(meta?.media) ? meta.media.filter((m) => m && m.url) : [];
   const mediaHtml = savedMedia.length
     ? `<div class="turn-media">${savedMedia.map(turnMediaItemHtml).join('')}</div>` : '';
+  const traceSteps = isAI && Array.isArray(meta?.trace) ? meta.trace : [];
+  const traceHtml = traceSteps.length ? agentTraceHtml(traceSteps) : '';
   const sources = Array.isArray(meta?.sources) ? meta.sources.filter((s) => s && s.url) : [];
   const sourcesHtml = sources.length ? `
     <div class="sources min">
@@ -1447,6 +1458,7 @@ function appendMessage(role, content, meta = null) {
       <div class="msg-bubble">
         ${meta?.reasoning ? `<div class="reasoning"><div class="reasoning-head"><span>🧠</span><span>Рассуждение</span><span class="caret">▶</span></div><div class="reasoning-body"><div class="reasoning-text">${escapeHtml(meta.reasoning)}</div></div></div>` : ''}
         ${mediaHtml}
+        ${traceHtml}
         <div class="answer">${formatted}${imageHtml}</div>
         ${sourcesHtml}
       </div>
@@ -1911,6 +1923,7 @@ function historyAddMessage(role, content, meta = null) {
 
   chat.messages.push(meta ? { role, content, meta } : { role, content });
   chat.updatedAt = Date.now();
+  if (meta && meta.server_chat_id) chat.serverId = meta.server_chat_id;
 
   if (role === 'user' && chat.messages.filter((m) => m.role === 'user').length === 1) {
     chat.title = content.slice(0, 55) + (content.length > 55 ? '…' : '');
@@ -2020,6 +2033,60 @@ function loadChat(chatId) {
   renderChatList();
   closeSidebar();
   scrollToBottom();
+  attachServerTraces(chat);
+}
+
+/**
+ * Панель «Что делал агент».
+ * Раскрытая details-карточка со шагами и командами — без JS-обработчиков.
+ */
+function agentTraceHtml(steps) {
+  if (!Array.isArray(steps) || !steps.length) return '';
+  const rows = steps.map((step) => {
+    if (step.kind === 'tool') {
+      const label = step.command || step.name || 'команда';
+      return `<div class="agent-trace-row"><span class="agent-trace-ico">⌨️</span>` +
+        `<code class="agent-trace-cmd">${escapeHtml(String(label))}</code></div>`;
+    }
+    if (step.kind === 'plan') {
+      return `<div class="agent-trace-row"><span class="agent-trace-ico">🗺</span>` +
+        `<span>${escapeHtml(String(step.text || ''))}</span></div>`;
+    }
+    return `<div class="agent-trace-row"><span class="agent-trace-ico">${escapeHtml(String(step.icon || '•'))}</span>` +
+      `<span>${escapeHtml(String(step.text || ''))}</span></div>`;
+  }).join('');
+  return `<details class="agent-trace">
+      <summary>🧭 Что делал агент · ${steps.length}</summary>
+      <div class="agent-trace-steps">${rows}</div>
+    </details>`;
+}
+
+/**
+ * После загрузки чата подтягиваем трассы из БД: локальная история живёт
+ * в браузере, а шаги агента хранятся на сервере — так панель видна даже
+ * после очистки кеша.
+ */
+async function attachServerTraces(chat) {
+  if (!chat || !chat.serverId) return;
+  let traces = [];
+  try {
+    const response = await fetch(`/api/chats/${encodeURIComponent(chat.serverId)}/traces`);
+    if (!response.ok) return;
+    const data = await response.json();
+    traces = Array.isArray(data.traces) ? data.traces : [];
+  } catch (_) { return; }
+  if (!traces.length) return;
+  const bubbles = Array.from(chatContainer.querySelectorAll('.message.ai .msg-bubble'))
+    .filter((bubble) => bubble.querySelector('.answer'));
+  const start = Math.max(0, bubbles.length - traces.length);
+  traces.forEach((trace, index) => {
+    const bubble = bubbles[start + index];
+    if (!bubble || bubble.querySelector('.agent-trace')) return;
+    const html = agentTraceHtml(trace.steps || []);
+    if (!html) return;
+    const answer = bubble.querySelector('.answer');
+    if (answer) answer.insertAdjacentHTML('beforebegin', html);
+  });
 }
 
 function deleteChat(chatId) {

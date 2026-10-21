@@ -12,7 +12,7 @@ import requests
 
 from database import (get_chat_history, add_message, trim_messages,
                       get_or_create_session_chat, create_chat,
-                      list_chats, delete_chat)
+                      list_chats, delete_chat, get_traces)
 from ai_providers import gemini_stream_request, gemini_request
 from ai_providers import groq_request_with_rotation
 from ai_providers import chat_completion, chat_stream, resolve_target
@@ -410,9 +410,16 @@ def api_create_chat():
 
 @chat_bp.route('/api/chats/<chat_id>', methods=['GET'])
 def api_get_chat(chat_id):
-    """Получить историю сообщений чата."""
+    """Получить историю сообщений чата и трассы шагов агента."""
     messages = get_chat_history(chat_id, limit=200)
-    return jsonify({'chat_id': chat_id, 'messages': messages})
+    return jsonify({'chat_id': chat_id, 'messages': messages,
+                    'traces': get_traces(chat_id, limit=20)})
+
+
+@chat_bp.route('/api/chats/<chat_id>/traces', methods=['GET'])
+def api_chat_traces(chat_id):
+    """«Что делал агент»: шаги и команды прошлых ходов."""
+    return jsonify({'chat_id': chat_id, 'traces': get_traces(chat_id, limit=20)})
 
 @chat_bp.route('/api/chats/<chat_id>', methods=['DELETE'])
 def api_delete_chat(chat_id):

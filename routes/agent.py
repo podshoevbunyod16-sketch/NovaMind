@@ -1521,9 +1521,27 @@ def agent_stream():
                        "run_id": run_id, "stopped": bool(state.get("stopped")),
                        "status": "stopped" if state.get("stopped") else "ok"})
         yield _ndjson({"type": "done"})
-        finish_run(run_id)
 
-    return Response(generate(), mimetype="application/x-ndjson",
+    def traced(stream):
+        """Копия ответа, которая попутно записывает трассу шагов (Б2).
+
+        Клиент может закрыть соединение — трассу всё равно сохраняем:
+        панель «Что делал агент» должна пережить перезагрузку страницы.
+        """
+        collected = []
+        try:
+            for chunk in stream:
+                collected.extend(_trace_entries(chunk))
+                yield chunk
+        finally:
+            try:
+                import database
+                database.save_trace(session.get("chat_id"), run_id, collected)
+            except Exception:
+                log.warning("Не удалось сохранить трассу шагов", exc_info=True)
+            finish_run(run_id)
+
+    return Response(traced(generate()), mimetype="application/x-ndjson",
                     headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no",
                              # Кнопка «Стоп» берёт run_id отсюда и присылает его
                              # в POST /api/agent/stop.
@@ -1534,6 +1552,31 @@ def agent_stream():
 
 def _ndjson(payload):
     return json.dumps(payload, ensure_ascii=False) + "\n"
+
+
+def _trace_entries(chunk):
+    """Превращает кусок NDJSON в записи трассы (шаги и команды)."""
+    try:
+        event = json.loads(chunk)
+    except (TypeError, ValueError):
+        return []
+    if not isinstance(event, dict):
+        return []
+    kind = event.get("type")
+    if kind == "step":
+        return [{"kind": "step", "icon": event.get("icon") or "•",
+                 "text": clip(str(event.get("text") or ""), 300)}]
+    if kind == "tool":
+        entry = {"kind": "tool", "name": event.get("name") or "tool",
+                 "command": clip(str(event.get("command") or ""), 300),
+                 "code": event.get("code")}
+        if event.get("path"):
+            entry["path"] = str(event.get("path"))[:200]
+        return [entry]
+    if kind == "plan":
+        pieces = [str(step.get("text") or "") for step in event.get("steps") or []]
+        return [{"kind": "plan", "text": clip(" → ".join(pieces), 500)}] if pieces else []
+    return []
 
 
 def _chunks(text, size=48):

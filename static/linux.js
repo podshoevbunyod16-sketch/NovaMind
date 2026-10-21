@@ -160,6 +160,9 @@
       turn.finish({
         model: result.model,
         provider: result.provider,
+        // Серверный id чата: по нему после перезагрузки подтягивается
+        // панель «Что делал агент» из базы.
+        serverChatId: result.chat_id,
         offline: result.offline,
         searched: result.searched,
         steps: result.steps,

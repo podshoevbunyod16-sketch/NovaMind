@@ -1198,3 +1198,49 @@ button, input, select, textarea, .stage, .sources-head, .msg-actions {
 .stage-plan-steps li.is-doing { color: #cbb8ff; }
 .stage-plan-check { width: 12px; flex-shrink: 0; text-align: center; }
 .stage-plan-steps li.is-done .stage-plan-check { color: #5dd69a; }
+
+/* Панель «Что делал агент» (Б2): шаги и команды прошлого хода. */
+.agent-trace {
+  margin: 8px 0 4px;
+  border: 1px solid var(--border, rgba(255, 255, 255, 0.1));
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.03);
+  overflow: hidden;
+}
+.agent-trace > summary {
+  cursor: pointer;
+  padding: 8px 12px;
+  font-size: 0.85rem;
+  color: var(--muted, #9aa4b2);
+  list-style: none;
+  user-select: none;
+}
+.agent-trace > summary::-webkit-details-marker { display: none; }
+.agent-trace > summary::after { content: '▾'; float: right; opacity: 0.6; }
+.agent-trace[open] > summary::after { content: '▴'; }
+.agent-trace-steps {
+  padding: 4px 12px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 260px;
+  overflow-y: auto;
+}
+.agent-trace-row {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  font-size: 0.82rem;
+  color: var(--text, #e6e9ef);
+  line-height: 1.35;
+}
+.agent-trace-ico { flex: 0 0 18px; text-align: center; opacity: 0.85; }
+.agent-trace-cmd {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.78rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: rgba(0, 0, 0, 0.28);
+  padding: 2px 6px;
+  border-radius: 6px;
+}
