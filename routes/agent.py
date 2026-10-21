@@ -53,7 +53,10 @@ AGENT_SYSTEM_PROMPT = """Ты — агент NovaMind внутри «мален�
 Твои инструменты:
   {"action":"run","command":"ls -la"}                      выполнить команду в рабочей папке
   {"action":"read","path":"hello.py"}                       прочитать файл
-  {"action":"write","path":"notes/plan.md","content":"…"}  записать файл
+  {"action":"write","path":"notes/plan.md","content":"…"}  создать НОВЫЙ файл
+  {"action":"edit","path":"app.py","old":"было","new":"стало"}  точечная правка файла
+  {"action":"grep","pattern":"TODO","path":"."}              поиск по содержимому файлов
+  {"action":"tree","path":".","depth":2}                     дерево файлов
   {"action":"ls"}                                          список файлов
   {"action":"search","query":"что найти"}                   ПОИСК В ИНТЕРНЕТЕ
   {"action":"open","url":"https://…"}                       прочитать страницу
@@ -71,7 +74,10 @@ AGENT_SYSTEM_PROMPT = """Ты — агент NovaMind внутри «мален�
 2. Сначала разберись в задаче (run/read/ls), потом действуй, потом answer.
 3. Один инструмент за один шаг. Не выдумывай результат команды — сначала выполни её.
 4. Команды выполняются ТОЛЬКО по одной, без | и >.
-5. Нужны свежие данные или факты — сначала проверь доступные MCP-инструменты. Для поиска
+5. Существующий файл НЕ переписывай целиком: читай его и правь точечно через edit
+   (old должен встречаться один раз). write — только для новых файлов. grep — поиск по коду,
+   tree — структура проекта.
+6. Нужны свежие данные или факты — сначала проверь доступные MCP-инструменты. Для поиска
    предпочитай инструмент Exa внутри MCP, если он есть; web search используй как запасной вариант.
 6. Если пользователь просит создать/сгенерировать/нарисовать изображение, видео или аудио,
    сразу используй action=image, action=video или action=audio, а не текстовый ответ.
@@ -1989,6 +1995,59 @@ def _perform(action, kind, use_tools, state, goal="", cancel=None):
 
     state["workspace_used"] = True
 
+    if kind in ("edit", "file_edit"):
+        rel_path = str(action.get("path") or "")
+        edit_result = call_tool("file_edit", path=rel_path,
+                                old=action.get("old") or "",
+                                new=action.get("new") or "",
+                                replace_all=bool(action.get("replace_all")))
+        if not edit_result.get("ok"):
+            message = str((edit_result.get("error") or {}).get("message") or "Не удалось изменить файл")
+            yield _ndjson({"type": "step", "icon": "⚠️", "text": message[:300]})
+            return message
+        diff = str(edit_result.get("diff") or "")
+        state["tools_used"].append("edit")
+        yield _ndjson({"type": "step", "icon": "✏️",
+                       "text": f"Изменил {edit_result.get('path')} "
+                               f"(замен: {edit_result.get('replaced')})"})
+        yield _ndjson({"type": "tool", "name": "edit", "command": str(edit_result.get("path")),
+                       "code": 0, "output": clip(diff, 1200), "diff": diff})
+        if state["task_id"]:
+            database.append_task_step(state["task_id"], f"Изменил {edit_result.get('path')}",
+                                      status="done", log=clip(diff, 1000))
+        return f"Файл {edit_result.get('path')} изменён.\n{diff}"
+
+    if kind in ("grep", "file_search"):
+        search_result = call_tool("file_search", pattern=str(action.get("pattern") or ""),
+                                  path=str(action.get("path") or "."),
+                                  ignore_case=bool(action.get("ignore_case", True)),
+                                  limit=int(action.get("limit") or 100))
+        if not search_result.get("ok"):
+            message = str((search_result.get("error") or {}).get("message") or "Поиск не удался")
+            yield _ndjson({"type": "step", "icon": "⚠️", "text": message[:300]})
+            return message
+        matches = search_result.get("matches") or []
+        text = "\n".join(f"{item['path']}:{item['line']}: {item['text']}" for item in matches)
+        state["tools_used"].append("grep")
+        yield _ndjson({"type": "step", "icon": "🔍",
+                       "text": f"Нашёл {len(matches)} совпадений по шаблону «{action.get('pattern')}»"})
+        yield _ndjson({"type": "tool", "name": "grep", "command": f"grep {action.get('pattern')}",
+                       "code": 0, "output": clip(text or "совпадений нет", 1200)})
+        return text or "Совпадений нет."
+
+    if kind in ("tree", "file_tree"):
+        tree_result = call_tool("file_tree", path=str(action.get("path") or "."),
+                                depth=int(action.get("depth") or 2),
+                                limit=int(action.get("limit") or 200))
+        if not tree_result.get("ok"):
+            return str((tree_result.get("error") or {}).get("message") or "Не удалось построить дерево")
+        lines = "\n".join(tree_result.get("tree") or []) or "Рабочая папка пуста."
+        state["tools_used"].append("tree")
+        yield _ndjson({"type": "step", "icon": "🌳", "text": "Показал дерево файлов"})
+        yield _ndjson({"type": "tool", "name": "tree", "command": "tree", "code": 0,
+                       "output": clip(lines, 1200)})
+        return lines
+
     if kind == "ls":
         state["tools_used"].append("ls")
         command, label, icon = "ls -la", "Смотрю файлы", "📂"
@@ -2012,9 +2071,12 @@ def _perform(action, kind, use_tools, state, goal="", cancel=None):
         state["tools_used"].append("write")
         rel_path = str(action.get("path", "notes/out.md"))
         content = str(action.get("content") or "")
-        write_result = call_tool("file_write", path=rel_path, content=content)
+        write_result = call_tool("file_write", path=rel_path, content=content,
+                                 allow_overwrite=bool(action.get("allow_overwrite")))
         if not write_result.get("ok"):
-            return str((write_result.get("error") or {}).get("message") or "Не удалось записать файл")
+            message = str((write_result.get("error") or {}).get("message") or "Не удалось записать файл")
+            yield _ndjson({"type": "step", "icon": "⚠️", "text": message[:300]})
+            return message
         try:
             path = safe_path(rel_path)
         except ValueError as exc:

@@ -109,12 +109,13 @@ def tool_schemas(workspace: bool | None = None) -> list[dict]:
 ACTION_TO_TOOL = {
     "search": "web_search", "open": "web_open", "run": "shell",
     "read": "file_read", "write": "file_write", "git": "git",
+    "edit": "file_edit", "grep": "file_search", "tree": "file_tree",
     "mcp_call": "mcp_call", "image": "image", "audio": "audio", "video": "video",
     "skill_create": "skill_create", "task": "task", "task_done": "task_done",
 }
 
 # Действия, которым нужна рабочая папка и вход пользователя.
-WORKSPACE_ACTIONS = {"run", "read", "write", "ls", "git"}
+WORKSPACE_ACTIONS = {"run", "read", "write", "ls", "git", "edit", "grep", "tree"}
 
 # Описания действий агента для нативного tool calling: имя → (описание, risk).
 AGENT_ACTION_META = {
@@ -122,7 +123,10 @@ AGENT_ACTION_META = {
     "open": ("Прочитать страницу по полному URL (http/https) и вернуть текст.", "safe"),
     "run": ("Выполнить одну команду в рабочей папке пользователя.", "write"),
     "read": ("Прочитать текстовый файл рабочей папки.", "safe"),
-    "write": ("Создать или перезаписать текстовый файл рабочей папки.", "write"),
+    "write": ("Создать новый текстовый файл рабочей папки (существующие — через edit).", "write"),
+    "edit": ("Точечно заменить old→new в файле; old должен встречаться один раз.", "write"),
+    "grep": ("Поиск по содержимому файлов рабочей папки (regex).", "safe"),
+    "tree": ("Показать дерево файлов рабочей папки.", "safe"),
     "ls": ("Показать файлы и папки рабочей директории.", "safe"),
     "git": ("Выполнить git-команду в рабочей папке.", "write"),
     "mcp_call": ("Вызвать инструмент подключённого MCP-сервера (server_id, tool, arguments).", "danger"),
@@ -243,21 +247,160 @@ def bootstrap_default_tools():
 
     if get_tool("file_write") is None:
         from routes.terminal import safe_path, relative_to_workspace
-        def write_file(path, content=""):
+        def write_file(path, content="", allow_overwrite=False):
             import os
             denied = _workspace_guard()
             if denied:
                 return denied
             p = safe_path(path)
-            os.makedirs(os.path.dirname(p), exist_ok=True)
+            if os.path.exists(p) and not allow_overwrite:
+                # Перезапись целого файла — только для новых файлов:
+                # существующий правится точечно через file_edit.
+                return {"ok": False, "error": {
+                    "type": "file_exists",
+                    "message": "Файл уже существует — используйте file_edit (edit) для точечной правки",
+                    "retryable": False}}
+            os.makedirs(os.path.dirname(p) or ".", exist_ok=True)
             with open(p, "w", encoding="utf-8") as f:
                 f.write(str(content))
             return {"ok": True, "path": relative_to_workspace(p),
                     "bytes": len(str(content).encode("utf-8"))}
         register_tool(ToolSpec(
-            "file_write", "Write a UTF-8 text file inside workspace.",
-            {"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}},"required":["path","content"]},
+            "file_write", "Создать новый текстовый файл в рабочей папке (существующие правятся file_edit).",
+            {"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"},
+                                           "allow_overwrite":{"type":"boolean"}},
+             "required":["path","content"]},
             write_file, permissions=("workspace",), timeout=5, risk="write"))
+
+    if get_tool("file_edit") is None:
+        from routes.terminal import safe_path, relative_to_workspace
+
+        def file_edit(path, old, new, replace_all=False):
+            """Точечная замена с проверкой уникальности вхождения."""
+            import os
+            denied = _workspace_guard()
+            if denied:
+                return denied
+            p = safe_path(path)
+            if not os.path.isfile(p):
+                return {"ok": False, "error": {"type": "not_found",
+                                               "message": "Файл не найден", "retryable": False}}
+            with open(p, "r", encoding="utf-8", errors="replace") as handle:
+                text = handle.read()
+            needle = str(old or "")
+            if not needle:
+                return {"ok": False, "error": {"type": "bad_arguments",
+                                               "message": "Нужен непустой old (что заменить)",
+                                               "retryable": False}}
+            count = text.count(needle)
+            if count == 0:
+                return {"ok": False, "error": {"type": "not_found",
+                                               "message": "Такое вхождение не найдено — прочитайте файл и уточните old",
+                                               "retryable": True}}
+            if count > 1 and not replace_all:
+                return {"ok": False, "error": {"type": "ambiguous",
+                                               "message": f"Вхождение встречается {count} раз — уточните old или передайте replace_all=true",
+                                               "retryable": True}}
+            updated = text.replace(needle, str(new or ""), -1 if replace_all else 1)
+            with open(p, "w", encoding="utf-8") as handle:
+                handle.write(updated)
+            return {"ok": True, "path": relative_to_workspace(p),
+                    "replaced": count if replace_all else 1,
+                    "diff": _simple_diff(text, updated, relative_to_workspace(p)),
+                    "lines_before": text.count("\n") + 1,
+                    "lines_after": updated.count("\n") + 1}
+        register_tool(ToolSpec(
+            "file_edit", "Точечная замена old→new в файле; old обязан встречаться один раз.",
+            {"type": "object",
+             "properties": {"path": {"type": "string"}, "old": {"type": "string"},
+                            "new": {"type": "string"}, "replace_all": {"type": "boolean"}},
+             "required": ["path", "old", "new"]},
+            file_edit, permissions=("workspace",), timeout=5, risk="write"))
+
+    if get_tool("file_search") is None:
+        from routes.terminal import safe_path, relative_to_workspace
+
+        def file_search(pattern, path=".", ignore_case=True, limit=100):
+            """Поиск по содержимому файлов рабочей папки (без grep и shell)."""
+            import os
+            import re
+            denied = _workspace_guard()
+            if denied:
+                return denied
+            needle = str(pattern or "")
+            if not needle:
+                return {"ok": False, "error": {"type": "bad_arguments",
+                                               "message": "Нужен непустой pattern",
+                                               "retryable": False}}
+            try:
+                regex = re.compile(needle, re.IGNORECASE if ignore_case else 0)
+            except re.error as exc:
+                return {"ok": False, "error": {"type": "bad_regex", "message": str(exc),
+                                               "retryable": False}}
+            root = safe_path(path if path not in (None, "", ".") else "")
+            matches = []
+            skipped_dirs = {".git", "__pycache__", "node_modules", ".venv", "venv"}
+            for base, dirs, files in os.walk(root):
+                dirs[:] = [name for name in dirs if name not in skipped_dirs]
+                for name in sorted(files):
+                    full = os.path.join(base, name)
+                    try:
+                        if os.path.getsize(full) > 512 * 1024:
+                            continue
+                        with open(full, "r", encoding="utf-8", errors="replace") as handle:
+                            for number, line in enumerate(handle, 1):
+                                if regex.search(line):
+                                    matches.append({"path": relative_to_workspace(full),
+                                                    "line": number, "text": line.rstrip()[:300]})
+                                    if len(matches) >= int(limit or 100):
+                                        break
+                    except OSError:
+                        continue
+                    if len(matches) >= int(limit or 100):
+                        break
+                if len(matches) >= int(limit or 100):
+                    break
+            return {"ok": True, "matches": matches, "count": len(matches)}
+        register_tool(ToolSpec(
+            "file_search", "Поиск по содержимому файлов рабочей папки (regex).",
+            {"type": "object",
+             "properties": {"pattern": {"type": "string"}, "path": {"type": "string"},
+                            "ignore_case": {"type": "boolean"}, "limit": {"type": "integer"}},
+             "required": ["pattern"]},
+            file_search, permissions=("workspace",), timeout=20))
+
+    if get_tool("file_tree") is None:
+        from routes.terminal import safe_path, relative_to_workspace
+
+        def file_tree(path=".", depth=2, limit=200):
+            """Дерево файлов рабочей папки (без shell и без find)."""
+            import os
+            denied = _workspace_guard()
+            if denied:
+                return denied
+            root = safe_path(path if path not in (None, "", ".") else "")
+            depth = max(1, min(int(depth or 2), 6))
+            limit = max(1, min(int(limit or 200), 1000))
+            root_depth = root.rstrip(os.sep).count(os.sep)
+            entries = []
+            for base, dirs, files in os.walk(root):
+                level = base.rstrip(os.sep).count(os.sep) - root_depth
+                if level >= depth:
+                    dirs[:] = []
+                dirs.sort()
+                for name in sorted(dirs):
+                    entries.append(relative_to_workspace(os.path.join(base, name)) + "/")
+                for name in sorted(files):
+                    entries.append(relative_to_workspace(os.path.join(base, name)))
+                if len(entries) >= limit:
+                    break
+            return {"ok": True, "tree": entries[:limit], "count": len(entries[:limit])}
+        register_tool(ToolSpec(
+            "file_tree", "Дерево файлов и папок рабочей директории.",
+            {"type": "object",
+             "properties": {"path": {"type": "string"}, "depth": {"type": "integer"},
+                            "limit": {"type": "integer"}}},
+            file_tree, permissions=("workspace",), timeout=10))
 
     if get_tool("git") is None:
         from routes.terminal import run_agent
@@ -460,6 +603,16 @@ def _workspace_guard():
         return {"ok": False, "error": {"type": "unavailable", "message": str(exc),
                                        "retryable": False}}
     return None
+
+
+def _simple_diff(before, after, path="", context=3):
+    """Компактный diff «было/стало» по строкам — для отчёта пользователю."""
+    import difflib
+    lines = list(difflib.unified_diff(str(before).splitlines(), str(after).splitlines(),
+                                      fromfile=f"{path} (было)", tofile=f"{path} (стало)",
+                                      lineterm="", n=context))
+    text = "\n".join(lines)
+    return text[:4000] + ("\n… diff обрезан" if len(text) > 4000 else "")
 
 
 def _search_result(pair):

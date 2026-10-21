@@ -70,6 +70,10 @@ FORBIDDEN = (
     "&&", "||", "`", "$(", "${", "\n", ">&",
 )
 
+# «;» вне кавычек разделяет команды как в shell. Внутри кавычек это обычный
+# текст: python3 -c 'import time; time.sleep(1)' должен работать.
+_UNQUOTED_SEMICOLON = re.compile(r"""('[^']*'|"[^"]*")|;""")
+
 # Знаки перенаправления, которые понимает песочница.
 REDIRECT_OPS = (">", ">>", "2>", "2>>", "&>")
 
@@ -237,6 +241,13 @@ def _validate_command_paths(segments):
             if (os.path.isabs(arg) or arg == ".." or arg.startswith("../")
                     or arg.startswith("..\\") or "/../" in arg):
                 raise ValueError("Path traversal запрещён")
+            # Симлинк внутри рабочей папки может указывать наружу: сверяем
+            # реальный путь уже существующих аргументов.
+            candidate = os.path.join(WORKSPACE, arg)
+            if os.path.lexists(candidate):
+                real = os.path.realpath(candidate)
+                if real != WORKSPACE and not real.startswith(WORKSPACE + os.sep):
+                    raise ValueError("Ссылка ведёт за пределы рабочей папки")
 
 
 def _tokenize(command):
@@ -280,6 +291,9 @@ def check_command(command):
     for bad in FORBIDDEN:
         if bad in command:
             raise ValueError(f"Конструкция «{bad.strip()}» отключена — выполняйте команды по одной")
+    for match in _UNQUOTED_SEMICOLON.finditer(command):
+        if match.group(0) == ";":
+            raise ValueError("Символ «;» вне кавычек отключён — выполняйте команды по одной")
     try:
         tokens = _tokenize(command)
     except ValueError as exc:
