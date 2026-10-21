@@ -382,7 +382,7 @@ def _split_paragraphs(text):
     return [part.strip() for part in re.split(r"\n\s*\n", text or "") if part.strip()]
 
 
-_BAD_ENDINGS = set(",;:—–-/\\*([{")
+_BAD_ENDINGS = set(",;:—–-\\([{")
 _TRUNCATED_WORDS = {
     "и", "в", "во", "на", "с", "со", "по", "для", "что", "как", "это", "не",
     "а", "но", "или", "же", "ли", "при", "из", "от", "до", "к", "о", "об",
@@ -400,14 +400,14 @@ def _looks_complete_answer(text):
     text = (text or "").strip()
     if not text:
         return False
-    if len(text) <= 40:                 # «42», «Готово», короткая реплика
-        return True
     if text.count('"') % 2:             # открытая кавычка — ответ оборван
         return False
     if text.count("«") != text.count("»"):
         return False
     if text[-1] in _BAD_ENDINGS:
         return False
+    if len(text) <= 40:                 # «42», «Готово», короткая реплика
+        return True
     last = text.splitlines()[-1].lstrip()
     if last.startswith(("-", "*", "•", "|")) or re.match(r"^\d+[.)]\s", last):
         return True

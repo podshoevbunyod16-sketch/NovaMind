@@ -90,6 +90,7 @@ def test_draft_hint_after_answer_is_trimmed():
 def test_cut_off_answer_is_rejected():
     text = "Первое поколение выпускали в 2008–2012 годах на"
     assert agent.final_answer_text(text, GOAL) == ""
+    assert agent.final_answer_text("Короткий обрыв на запятую,", GOAL) == ""
 
 
 def test_answer_without_final_period_is_kept():
