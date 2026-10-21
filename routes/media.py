@@ -3,6 +3,8 @@ routes/media.py — Загрузка файлов, изображений, TTS, 
 """
 from flask import Blueprint, request, jsonify, send_from_directory, send_file, session
 import os
+import shutil
+import tempfile
 import uuid
 import mimetypes
 import base64
@@ -45,7 +47,6 @@ def upload_file():
 @media_bp.route('/api/attachments/analyze', methods=['POST'])
 def analyze_attachment():
     """Universal analyzer for images and common documents."""
-    global contents
     uploaded = request.files.get('file') or request.files.get('image')
     if not uploaded or not uploaded.filename:
         return jsonify({'error': 'Файл не выбран'}), 400
@@ -55,8 +56,10 @@ def analyze_attachment():
     content_type = uploaded.mimetype or mimetypes.guess_type(filename)[0] or 'application/octet-stream'
     user_desc = (request.form.get('description') or '').strip()
 
-    upload_dir = os.path.join(os.path.dirname(__file__), "uploads")
-    os.makedirs(upload_dir, exist_ok=True)
+    # Файл нужен только на время анализа: складываем его во временную папку
+    # и удаляем после ответа. Раньше загрузки копились в routes/uploads и
+    # никто их не обслуживал.
+    upload_dir = tempfile.mkdtemp(prefix="novamind-upload-")
     filepath = os.path.join(upload_dir, f"{uuid.uuid4().hex}_{filename}")
     uploaded.save(filepath)
 
@@ -92,6 +95,8 @@ def analyze_attachment():
     except Exception as exc:
         print(f"[attachments] error: {exc}")
         return jsonify({'error': f'Ошибка обработки файла: {exc}'}), 500
+    finally:
+        shutil.rmtree(upload_dir, ignore_errors=True)
 
 
 def _default_file_instruction(ext):

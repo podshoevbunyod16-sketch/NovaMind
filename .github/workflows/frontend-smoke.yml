@@ -1,0 +1,36 @@
+name: Frontend smoke (jsdom)
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Install dependencies
+        run: |
+          pip install -r requirements-dev.txt
+          npm install --no-audit --no-fund
+      - name: Start NovaMind
+        run: |
+          TERMINAL_ENABLED=1 nohup python app.py > server.log 2>&1 &
+          for i in $(seq 1 40); do
+            curl -fsS http://127.0.0.1:5000/chat > /dev/null && break
+            sleep 1
+          done
+      - name: Run smoke
+        run: node tests/frontend/smoke.mjs http://127.0.0.1:5000
+      - name: Server log on failure
+        if: failure()
+        run: tail -100 server.log

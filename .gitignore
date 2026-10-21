@@ -14,5 +14,11 @@ novamind_chats.db
 node_modules/
 package-lock.json
 .pytest_cache/
+
+# Секреты и локальные данные: не должны попадать в git
+.ssh/
+uploads/
+*.db
+.env.*
+!.env.example
 mcp_connections.json
-novamind_chats.db

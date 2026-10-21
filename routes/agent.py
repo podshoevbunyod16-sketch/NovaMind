@@ -23,7 +23,9 @@ from urllib.parse import urlparse
 import json
 import logging
 import os
+import queue
 import re
+import threading
 import time
 
 from ai_providers import chat_completion, chat_stream, resolve_target  # noqa: F401 (chat_stream — для тестов)
@@ -33,6 +35,7 @@ from routes.terminal import (run_agent as run_terminal, safe_path, relative_to_w
                              can_use_workspace, signed_in, _format_results as _format_search_results)
 
 agent_bp = Blueprint("agent", __name__)
+log = logging.getLogger("novamind.agent")
 _AGENT_HISTORY_CACHE = {}
 log = logging.getLogger(__name__)
 
@@ -53,7 +56,9 @@ AGENT_SYSTEM_PROMPT = """Ты — агент NovaMind внутри «мален�
   {"action":"search","query":"что найти"}                   ПОИСК В ИНТЕРНЕТЕ
   {"action":"open","url":"https://…"}                       прочитать страницу
   {"action":"mcp_call","server_id":"github","tool":"...","arguments":{...}}  вызвать MCP-инструмент
-  {"action":"image|audio|video","prompt":"…"}              сгенерировать медиа
+  {"action":"image","prompt":"…","aspect":"16:9"}          нарисовать изображение
+  {"action":"audio","prompt":"…","voice":"Kore"}            озвучить текст
+  {"action":"video","prompt":"…","duration":5}              сделать видео
   {"action":"skill_create","name":"slug","content":"полный SKILL.md"} создать skill
   {"action":"task","title":"…","detail":"…"}                завести задачу с подпунктами в detail
   {"action":"task_done","note":"что сделано"}               задача выполнена
@@ -78,8 +83,51 @@ AGENT_SYSTEM_PROMPT = """Ты — агент NovaMind внутри «мален�
    Ссылки на источники писать не нужно — интерфейс покажет их сам."""
 
 
+_WORKSPACE_ACTION_RE = re.compile(r'"action"\s*:\s*"(run|read|write|ls|git)"')
+
+
+def agent_system_prompt(use_tools=True, strict_mcp=False):
+    """Собирает системный промпт под реально доступные инструменты.
+
+    Раньше промпт всегда перечислял run/read/write, даже когда песочница
+    выключена: модель пыталась вызывать недоступное. Теперь описание
+    инструментов совпадает с тем, что действительно работает.
+    """
+    prompt = AGENT_SYSTEM_PROMPT
+    if strict_mcp:
+        prompt = "\n".join(
+            line for line in prompt.splitlines()
+            if (not _WORKSPACE_ACTION_RE.search(line)
+                and not re.search(r'"action"\s*:\s*"(search|open|image|audio|video|media_models)"', line))
+        )
+        prompt += ("\n\nSTRICT MCP MODE: доступен только action=mcp_call. "
+                   "Не вызывай web_search, web_open, shell, run, read или write.")
+        return prompt
+    if not use_tools:
+        prompt = "\n".join(line for line in prompt.splitlines()
+                           if not _WORKSPACE_ACTION_RE.search(line))
+        prompt = prompt.replace(
+            "Команды выполняются ТОЛЬКО по одной, без | и >.",
+            "Инструменты рабочей папки сейчас недоступны — не вызывай run, read, write, ls или git.",
+        )
+        prompt += ("\n\nLinux-окружение сейчас выключено (TERMINAL_ENABLED=0): "
+                   "файлы и терминал недоступны. Поиск (search), чтение страниц (open), "
+                   "медиа (image/audio/video), skill и задачи работают.")
+    return prompt
+
+
 def is_enabled():
-    return os.getenv("AGENT_ENABLED", os.getenv("TERMINAL_ENABLED", "0")) == "1"
+    """Агент включён по умолчанию.
+
+    Раньше режим требовал явного `AGENT_ENABLED=1`: без него главный чат был
+    обычным текстовым, и «агент в чате» существовал только в документации.
+    Теперь агент — основной путь чата, а отключить его можно осознанно:
+    `AGENT_ENABLED=0`.
+    """
+    value = os.getenv("AGENT_ENABLED")
+    if value is None or not str(value).strip():
+        return True
+    return str(value).strip() == "1"
 
 
 def strict_mcp_request(text: str) -> bool:
@@ -90,18 +138,47 @@ def strict_mcp_request(text: str) -> bool:
     return bool(explicit or named_service)
 
 
+_MEDIA_VERB = re.compile(
+    r"(сгенери|сгенерь|созда|сдела|нарису|нарисую|покажи|озвуч|озвучь|прочитай\s+вслух|"
+    r"скажи\s+голосом|запиши\s+(?:голос|аудио)|спой|синтезир|"
+    r"generate|create|draw|make|render|speak|say|voice)",
+    re.I,
+)
+
+
 def requested_media_kind(text: str):
-    """Возвращает media action только для явного запроса генерации."""
+    """Возвращает media action только для явного запроса генерации.
+
+    Список глаголов расширен: «озвучь приветствие», «покажи закат», «сделай
+    ролик» — это такие же явные запросы, как «нарисуй». Иначе модель могла
+    ответить текстом вместо реальной генерации.
+    """
     value = str(text or "").lower()
-    if not re.search(r"(сгенерируй|создай|нарисуй|сделай|generate|create|draw)", value):
+    if not _MEDIA_VERB.search(value):
         return None
-    if re.search(r"(изображени|картинк|фото|иллюстрац|image|picture|photo)", value):
+    if re.search(r"(изображени|картинк|фото|иллюстрац|постер|image|picture|photo|draw)", value):
         return "image"
-    if re.search(r"(видео|ролик|video|clip)", value):
+    if re.search(r"(видео|ролик|клип|video|clip|анимаци)", value):
         return "video"
-    if re.search(r"(аудио|озвуч|голос|музык|audio|voice|music)", value):
+    if re.search(r"(аудио|озвуч|голос|музык|audio|voice|music|вслух|speech)", value):
+        return "audio"
+    # Глагол без существительного — тоже явный запрос: «нарисуй кота»,
+    # «озвучь приветствие». Без этого такие просьбы уходили в текстовый
+    # ответ, и картинка не появлялась.
+    if re.search(r"\b(нарису|нарисую|draw|render|sketch)", value):
+        return "image"
+    if re.search(r"\b(озвуч|прочитай\s+вслух|скажи\s+голосом|спой|speak|voice)", value):
         return "audio"
     return None
+
+
+def media_prompt(text: str) -> str:
+    """Убирает командный глагол, оставляя то, что нужно нарисовать."""
+    cleaned = re.sub(
+        r"^\s*(?:пожалуйста[,\s]+)?(?:нарисуй(?:те)?|нарисую|сгенерируй(?:те)?|"
+        r"создай(?:те)?|сделай(?:те)?|draw|generate|create|render|покажи(?:те)?)\s+",
+        "", str(text or ""), flags=re.I).strip()
+    return cleaned or str(text or "").strip()
 
 
 def requested_skill_creation(text: str) -> bool:
@@ -223,11 +300,11 @@ def _ask(messages, **kwargs):
                 error_text = str(chunk or "")
         text = strip_think("".join(chunks))
         if text:
-            offline_fallback = (
-                "встроенная **офлайн-модель" in text.lower()
-                or "ассистент novamind. спросите что-нибудь" in text.lower()
-                or "проверьте модель и настройки" in text.lower()
-            )
+            try:
+                import local_llm
+                offline_fallback = local_llm.looks_offline(text)
+            except Exception:
+                offline_fallback = "офлайн" in text.lower()
             if not offline_fallback:
                 return text, ""
     except Exception:
@@ -330,6 +407,64 @@ def _synthesize(goal, state, provider, model):
     return text
 
 
+def _turn_history(history_key, limit=10):
+    """(chat_id, prior) для текущего хода.
+
+    Источник истины — SQLite: обычный чат и агент теперь пишут в одну историю,
+    поэтому после перезагрузки страницы агент помнит разговор. Кеш в сессии
+    остаётся запасным путём, если база недоступна.
+    """
+    chat_id = None
+    prior = []
+    try:
+        import database
+        chat_id = database.get_or_create_session_chat()
+        prior = database.get_chat_history(chat_id, limit=limit)
+    except Exception:
+        chat_id = None
+    if not prior:
+        cached = _AGENT_HISTORY_CACHE.get(history_key, session.get("agent_history", []))
+        prior = cached if isinstance(cached, list) else []
+    clean = []
+    for item in prior:
+        if isinstance(item, dict) and item.get("role") in ("user", "assistant"):
+            content = str(item.get("content") or "").strip()
+            if content:
+                clean.append({"role": item["role"], "content": content[:4000]})
+    return chat_id, clean[-limit:]
+
+
+def _save_turn(chat_id, history_key, goal, answer, extra_messages=None):
+    """Сохраняет ход агента в общую историю чата и в кеш сессии."""
+    answer = str(answer or "").strip()
+    if chat_id and answer:
+        try:
+            import database
+            database.add_message(chat_id, "user", goal)
+            database.add_message(chat_id, "assistant", answer)
+            # Медиа — отдельными сообщениями, как в /send: интерфейс ищет
+            # маркер в начале content.
+            for content in extra_messages or []:
+                if content:
+                    database.add_message(chat_id, "assistant", content)
+            database.trim_messages(chat_id, max_messages=200)
+        except Exception:
+            log.warning("Не удалось сохранить ход агента в историю", exc_info=True)
+    updated = (_AGENT_HISTORY_CACHE.get(history_key) or [])
+    updated = [m for m in updated if isinstance(m, dict)]
+    updated += [{"role": "user", "content": goal},
+                {"role": "assistant", "content": answer}]
+    _AGENT_HISTORY_CACHE[history_key] = updated[-10:]
+    # Кеш — только вспомогательный: не даём ему расти без предела.
+    if len(_AGENT_HISTORY_CACHE) > 500:
+        for old_key in list(_AGENT_HISTORY_CACHE)[:100]:
+            _AGENT_HISTORY_CACHE.pop(old_key, None)
+    try:
+        session["agent_history"] = updated[-10:]
+    except Exception:
+        pass
+
+
 def _fallback_answer(state):
     """Модель молчит — отдаём хотя бы найденное, а не пустоту."""
     items = _note_items(state)
@@ -350,17 +485,26 @@ def agent_status():
     except Exception:
         mcp_tool_count = 0
     mcp_available = mcp_tool_count > 0
+    workspace = tools_enabled()
+    # Агент — основной путь чата: доступен всем пользователям, даже без
+    # входа. Вход (и TERMINAL_ENABLED=1) нужен только рабочей папке.
     return jsonify({
         "enabled": enabled,
-        "tools": tools_enabled(),
+        "available": bool(enabled),
+        "tools": workspace,
+        "search": bool(enabled),
         "mcp": mcp_available,
         "mcp_tools": mcp_tool_count,
-        "available": bool(is_enabled() and (tools_enabled() or mcp_available)),
+        "guest": not signed_in(),
         "max_steps": MAX_STEPS,
+        "timeout": AGENT_TIMEOUT,
         "user": signed_in(),
         "admin": bool(session.get("admin_logged_in")),
         "hint": ("" if enabled
                  else "Включите AGENT_ENABLED=1 и при необходимости TERMINAL_ENABLED=1 в .env и перезапустите сервер"),
+        "workspace_hint": ("" if workspace else
+                           "Поиск, страницы, медиа и задачи работают сразу. "
+                           "Для файлов и терминала войдите и включите TERMINAL_ENABLED=1."),
         "media": {kind: __import__("media_agent").quick_available(kind)
                   for kind in ("image", "audio", "video")},
     })
@@ -375,9 +519,11 @@ def agent_stream():
         return jsonify({"error": "Пустое сообщение"}), 400
     if not is_enabled():
         return jsonify({"error": "Агентный режим выключен (AGENT_ENABLED=1)"}), 403
-    if not signed_in():
-        return jsonify({"error": "Войдите в аккаунт, чтобы включить агентный режим"}), 403
 
+    # Агент доступен всем: поиск, чтение страниц, медиа, skills и задачи не
+    # требуют входа. Только инструменты рабочей папки (run/read/write/ls/git)
+    # остаются для вошедших пользователей — это защищает сервер, а не
+    # «включает агента».
     provider, model, _ = resolve_target()
     use_tools = tools_enabled()
     strict_mcp = strict_mcp_request(goal)
@@ -386,18 +532,22 @@ def agent_stream():
         mcp_available = bool(mcp_registry.connected_tools())
     except Exception:
         mcp_available = False
-    history_key = (
-        str(session.get("user_email") or session.get("email") or session.get("username") or "")
-        or request.cookies.get("session")
-        or "anonymous"
-    )
-    prior = _AGENT_HISTORY_CACHE.get(history_key, session.get("agent_history", []))
-    if not isinstance(prior, list):
-        prior = []
+    # Ключ памяти — на сессию, а не на cookie: раньше у всех анонимных
+    # посетителей был ключ "anonymous", и кеш истории протекал между
+    # пользователями (а в тестах — между тестами).
+    history_key = session.get("agent_memory_key")
+    if not history_key:
+        import secrets
+        history_key = secrets.token_hex(12)
+        session["agent_memory_key"] = history_key
+    chat_id, prior = _turn_history(history_key)
+    # Реестр инструментов — единый источник правды: он же формирует список
+    # AVAILABLE TOOL REGISTRY в промпте. Песочница создаётся только когда
+    # она действительно доступна.
+    bootstrap_default_tools()
     if use_tools:
-        bootstrap_default_tools()
         ensure_workspace()
-    available_schemas = tool_schemas() if (use_tools or mcp_available) else []
+    available_schemas = tool_schemas(workspace=use_tools)
     if strict_mcp:
         # В этом запросе модель физически не получает web/shell/file schemas.
         available_schemas = [item for item in available_schemas if item.get("name") == "mcp_call"]
@@ -408,11 +558,14 @@ def agent_stream():
         forced_media_kind = requested_media_kind(goal)
         state = {"task_id": None, "steps": 0, "answer": "", "sources": [], "notes": [],
                  "research": 0, "searched": bool(data.get("search")), "tool_steps": 0,
-                 "media_context": [], "media": []}
+                 "media_context": [], "media": [], "media_markers": [],
+                 "workspace_used": False, "tools_used": [], "media_tried": False,
+                 "media_error": ""}
+
 
         # 1. Один первый запрос: простой вопрос получает обычный ответ без лишнего plan/stage.
         # Если модель вернула action=plan, показываем его как план и продолжаем цикл.
-        system_content = AGENT_SYSTEM_PROMPT
+        system_content = agent_system_prompt(use_tools=use_tools, strict_mcp=strict_mcp)
         if strict_mcp:
             system_content += (
                 "\n\nSTRICT MCP MODE: Пользователь запретил web_search. "
@@ -453,7 +606,16 @@ def agent_stream():
                 history.append({"role": item["role"], "content": str(item.get("content") or "")[:4000]})
         history.append({"role": "user", "content": goal})
 
-        if is_simple_chat_request(goal) and not strict_mcp:
+        # Кнопка «Поиск» = гарантированный поиск. Выполняем его до первого
+        # обращения к модели, чтобы кнопка работала даже если модель решила
+        # ответить по памяти.
+        if data.get("search") and not strict_mcp:
+            observation = yield from _forced_search(goal, state, use_tools)
+            history.append({"role": "user", "content": observation})
+
+        pending_raw = None          # ответ быстрого запроса, если это действие/план
+
+        if is_simple_chat_request(goal) and not strict_mcp and not data.get("search"):
             # Короткие разговорные/объяснительные вопросы не должны ждать
             # discovery MCP, web-search и планирования из нескольких шагов.
             fast_history = [{
@@ -465,24 +627,36 @@ def agent_stream():
             fast_answer, fast_error = _ask(
                 fast_history, provider=provider, model=model,
                 temperature=0.3, max_tokens=700, timeout=30)
-            if fast_error:
-                fast_answer = "Не удалось получить быстрый ответ: " + str(fast_error)
-            parsed_fast = parse_action(fast_answer)
+            parsed_fast = parse_action(fast_answer) if fast_answer else None
             if parsed_fast and parsed_fast.get("action") == "answer":
                 fast_answer = str(parsed_fast.get("text") or "").strip()
-            state["answer"] = fast_answer.strip()
-            updated_fast_history = (prior + [{"role": "user", "content": goal},
-                                             {"role": "assistant", "content": state["answer"]}])[-10:]
-            _AGENT_HISTORY_CACHE[history_key] = updated_fast_history
-            session["agent_history"] = updated_fast_history
-            for chunk in _chunks(state["answer"]):
-                yield _ndjson({"type": "token", "token": chunk})
-            yield _ndjson({"type": "result", "reply": state["answer"], "steps": 0,
-                           "task_id": None, "model": model, "sources": [],
-                           "searched": False, "media": [], "linux": False,
-                           "offline": provider == "local_demo", "fast": True})
-            yield _ndjson({"type": "done"})
-            return
+                parsed_fast = None
+            # Быстрый ответ годится только если это действительно финальный
+            # текст. Если модель вернула действие, план или обрезанный JSON,
+            # уходим в полный агентный цикл: иначе инструмент молча терялся,
+            # а пользователь получал в чат сырой JSON.
+            wants_tool = bool(parsed_fast) or looks_like_action(fast_answer or "") \
+                or bool(re.match(r"^План\s*:", str(fast_answer or ""), re.I))
+            if (not wants_tool and str(fast_answer or "").strip()
+                    and not (forced_media_kind and provider == "local_demo")):
+                # Исключение: офлайн-контур не должен «заговорить» просьбу
+                # нарисовать/озвучить — её выполняет цикл действий ниже.
+                state["answer"] = str(fast_answer).strip()
+                _save_turn(chat_id, history_key, goal, state["answer"])
+                for chunk in _chunks(state["answer"]):
+                    yield _ndjson({"type": "token", "token": chunk})
+                yield _ndjson({"type": "result", "reply": state["answer"], "steps": 0,
+                               "task_id": None, "model": model, "provider": provider,
+                               "sources": [], "searched": False, "media": [],
+                               "linux": False, "tools": [],
+                               "offline": provider == "local_demo", "fast": True,
+                               "chat_id": chat_id})
+                yield _ndjson({"type": "done"})
+                return
+            # Модель захотела инструмент или прислала план — не выбрасываем
+            # этот ответ и не тратим второй запрос: отдаём его циклу как первый шаг.
+            if wants_tool and str(fast_answer or "").strip():
+                pending_raw = str(fast_answer).strip()
 
         # Раньше флаг search автоматически запускал DuckDuckGo до первого
         # решения модели. Теперь он только передаёт агенту подсказку: агент
@@ -496,18 +670,33 @@ def agent_stream():
             if time.time() - started > AGENT_TIMEOUT:
                 yield _ndjson({"type": "step", "icon": "⏱", "text": "Время вышло — собираю ответ"})
                 break
-            ask_kwargs = {"provider": provider, "model": model,
-                          "temperature": 0.1, "max_tokens": 1200, "timeout": 60}
+            # Правила агента лежат в history[0]. Дополнительные указания
+            # добавляем К НИМ, а не вместо них: раньше при включённом поиске
+            # system целиком заменялся строкой «ПОИСК ВКЛЮЧЁН», и модель
+            # забывала формат действий и доступные инструменты.
+            notes = []
             if strict_mcp:
-                ask_kwargs["system"] = (
+                notes.append(
                     "STRICT MCP MODE. Не используй web_search, web_open, shell, run, read или write. "
                     "Выполни только mcp_call; если он недоступен, верни action=answer с MCP_UNAVAILABLE."
                 )
             elif not use_tools:
-                ask_kwargs["system"] = "Linux-окружение сейчас выключено (TERMINAL_ENABLED=0). Не вызывай инструменты workspace; медиа-действия доступны."
+                notes.append(
+                    "Linux-окружение сейчас выключено (TERMINAL_ENABLED=0): файлы и терминал "
+                    "недоступны. Поиск, чтение страниц и медиа работают."
+                )
             if data.get("search") and not strict_mcp:
-                ask_kwargs["system"] = "ПОИСК ВКЛЮЧЁН. Используй найденные данные и указывай источники [1], [2], [3]."
-            raw, error = _ask(history, **ask_kwargs)
+                notes.append("ПОИСК ВКЛЮЧЁН. Используй найденные данные и указывай источники [1], [2], [3].")
+            base_system = history[0]["content"] if history and history[0].get("role") == "system" else ""
+            ask_kwargs = {"provider": provider, "model": model,
+                          "temperature": 0.1, "max_tokens": 1200, "timeout": 60,
+                          "system": (base_system + ("\n\n" + "\n".join(notes) if notes else "")).strip()}
+            dialogue = history[1:] if history and history[0].get("role") == "system" else history
+            if pending_raw is not None:
+                raw, error = pending_raw, ""
+                pending_raw = None
+            else:
+                raw, error = _ask(dialogue, **ask_kwargs)
             if error:
                 yield _ndjson({"type": "error", "text": error})
                 break                                   # ответ соберём из найденного
@@ -520,9 +709,13 @@ def agent_stream():
                 action = parse_action(_extract_json_object(raw))
                 if action:
                     yield _ndjson({"type": "retract", "count": len(raw)})
-            if forced_media_kind and (not action or str(action.get("action")) == "answer"):
-                # Не даём модели превратить явный запрос генерации в текстовый ответ.
-                action = {"action": forced_media_kind, "prompt": goal}
+            if (forced_media_kind and not state["media"] and not state["media_tried"]
+                    and (not action or str(action.get("action")) == "answer")):
+                # Не даём модели превратить явный запрос генерации в текстовый
+                # ответ. Пробуем ровно один раз: повторная попытка после
+                # отказа провайдера только засоряет чат.
+                state["media_tried"] = True
+                action = {"action": forced_media_kind, "prompt": media_prompt(goal)}
             if not action and re.match(r"^План\s*:", strip_think(raw), re.I):
                 plan_text = strip_think(raw).split(":", 1)[1].strip()
                 yield _ndjson({"type": "stage", "scene": "agent", "title": "Планирую",
@@ -633,16 +826,36 @@ def agent_stream():
                 log.exception("Не удалось собрать итоговый ответ: %s", exc)
                 state["answer"] = ""
         if not state["answer"] and not use_tools:
-            # инструменты нет — обычный ответ модели
+            # Linux-инструментов нет — обычный ответ модели
             history.append({"role": "user", "content":
-                            "Инструменты отключены: TERMINAL_ENABLED=0. Не вызывай run/read/write; "
-                            "ответь пользователю обычным текстом."})
+                            "Инструменты рабочей папки отключены (TERMINAL_ENABLED=0 или нет входа). "
+                            "Не вызывай run/read/write; ответь пользователю обычным текстом."})
             text, _err = _ask(history, provider=provider, model=model,
                               temperature=0.3, max_tokens=1200, timeout=60)
             action = parse_action(text)
             state["answer"] = (str(action.get("text") or "").strip() if action else text)
         if not state["answer"]:
             state["answer"] = _fallback_answer(state)
+        if provider == "local_demo":
+            # Офлайн-контур: языковой модели нет. Ничего не выдумываем, но
+            # и не отказываемся от работы: если пользователь прямо просит
+            # «найди …», честно идём в поиск настоящим инструментом и
+            # отвечаем найденными источниками.
+            try:
+                import local_llm
+                offline_reply = local_llm.looks_offline(state["answer"]) or not state["answer"]
+            except Exception:
+                offline_reply = True
+            if offline_reply and not state["searched"] and not state["media"]:
+                match = _OFFLINE_SEARCH_RE.match(goal) if not strict_mcp else None
+                if match and match.group(1).strip():
+                    yield from _forced_search(match.group(1).strip(), state, use_tools)
+            if offline_reply and state["searched"] and not state["notes"]:
+                state["answer"] = ("Поиск не дал результатов.\n\n" + state["answer"])
+            if offline_reply and state["notes"]:
+                state["answer"] = _offline_sources_answer(goal, state)
+            if offline_reply and forced_media_kind and not state["media"]:
+                state["answer"] = _offline_media_answer(forced_media_kind, state.get("media_error", ""))
 
         # Источники — отдельным событием; интерфейс держит их свёрнутыми
         if state["sources"]:
@@ -664,15 +877,19 @@ def agent_stream():
         historical_answer = state["answer"]
         if state["media_context"]:
             historical_answer += "\n" + "\n".join(state["media_context"])
-        updated_history = (prior + [{"role": "user", "content": goal},
-                                       {"role": "assistant", "content": historical_answer}])[-10:]
-        _AGENT_HISTORY_CACHE[history_key] = updated_history
-        session["agent_history"] = updated_history
+        # Маркеры MEDIA_RESULT: по ним интерфейс снова отрисует картинку,
+        # аудио или видео, когда историю загрузят из БД.
+        _save_turn(chat_id, history_key, goal, historical_answer,
+                   extra_messages=state["media_markers"])
         yield _ndjson({"type": "result", "reply": state["answer"], "steps": state["steps"],
-                       "task_id": state["task_id"], "model": model,
+                       "task_id": state["task_id"], "model": model, "provider": provider,
                        "sources": state["sources"], "searched": state["searched"],
-                       "media": state["media"], "linux": bool(use_tools),
-                       "offline": provider == "local_demo"})
+                       "media": state["media"],
+                       # linux = агент реально работал в рабочей папке, а не
+                       # «окружение включено». Иначе картинка помечалась «Linux».
+                       "linux": bool(state["workspace_used"]),
+                       "tools": state["tools_used"],
+                       "offline": provider == "local_demo", "chat_id": chat_id})
         yield _ndjson({"type": "done"})
 
     return Response(generate(), mimetype="application/x-ndjson",
@@ -749,13 +966,161 @@ def _exa_arguments(tool, query, limit=3):
 
 def _verify_action(kind, observation):
     text = str(observation or "").strip()
-    if kind in ("search", "open", "read", "run", "write", "ls", "mcp_call") and not text:
+    if kind in ("search", "open", "read", "run", "write", "ls", "git", "mcp_call") and not text:
         return {"ok": False, "message": "Проверка не пройдена: инструмент вернул пустой результат."}
-    if kind == "run" and "код -1" in text:
+    if kind in ("run", "git") and "код -1" in text:
         return {"ok": False, "message": "Проверка не пройдена: команда не выполнилась."}
     if kind == "search" and "ничего не вернул" in text.lower():
         return {"ok": False, "message": "Поиск не подтвердил наличие результатов."}
     return {"ok": True, "message": "Результат инструмента получен и принят."}
+
+
+def _forced_search(goal, state, use_tools):
+    """Поиск, который запускает кнопка «Поиск».
+
+    Кнопка раньше только добавляла подсказку в промпт: если модель решала
+    ответить сразу, поиска не происходило и кнопка «ничего не делала».
+    Здесь поиск выполняется по-настоящему и безусловно: выдача, чтение
+    страниц, заметка в рабочую папку — затем ответ модели по фактам.
+    """
+    yield _ndjson({"type": "stage", "scene": "search", "title": "Поиск в интернете",
+                   "text": "Ищу источники по запросу…"})
+    results, meta = nova_search(goal, limit=3)
+    results = results or []
+    state["searched"] = True
+    state["research"] += 1
+    if not results:
+        yield _ndjson({"type": "step", "icon": "⚠️", "text": f"Поиск «{goal}» ничего не дал"})
+        return ("Поиск ничего не нашёл. Отвечай по своим знаниям и честно скажи, "
+                "что свежих данных получить не удалось.")
+    _add_sources(state, results)
+    lines = "\n".join(
+        f"[{index}] {item.get('title') or item.get('host') or item.get('url')}\n"
+        f"    {item.get('url', '')}\n    {str(item.get('snippet') or '')[:240]}"
+        for index, item in enumerate(results, 1)
+    )
+    yield _ndjson({"type": "step", "icon": "🔎",
+                   "text": f"Нашёл {len(results)} источников по запросу «{goal}»"})
+    yield _ndjson({"type": "tool", "name": "search", "command": f"nova search {goal}",
+                   "code": 0, "output": lines, "results": results})
+
+    pages = []
+    for item in results[:3]:
+        url = str(item.get("url") or "")
+        if not url.startswith(("http://", "https://")):
+            continue
+        text, elapsed = nova_read(url)
+        if not text:
+            continue
+        pages.append(f"--- {url} ---\n{text}")
+        _note(state, f"страница {url}", text)
+        yield _ndjson({"type": "tool", "name": "open", "command": url, "code": 0,
+                       "output": clip(text, 1200)})
+
+    body = (f"# {goal}\n\n_поиск {time.strftime('%Y-%m-%d %H:%M')}_\n\n{lines}\n\n"
+            + "\n\n".join(pages))
+    if use_tools:
+        try:
+            path = _save_research(goal, body, "search")
+            yield _ndjson({"type": "step", "icon": "💾", "text": f"Сохранил {path}"})
+        except Exception as exc:
+            log.warning("Не удалось сохранить результаты поиска: %s", exc)
+
+    return ("Результаты поиска (доверяй им больше, чем памяти модели):\n\n" + lines
+            + ("\n\nПрочитанные страницы:\n\n" + "\n\n".join(pages) if pages else ""))
+
+
+_OFFLINE_SEARCH_RE = re.compile(
+    r"^\s*(?:найди|поищи|погугли|search|найти)\s+(?:в\s+интернете\s+)?(.+)$", re.I)
+
+
+_OFFLINE_MEDIA_HINT = {
+    "image": ("изображения", "IMAGE_GENERATION_URL + IMAGE_API_KEY, POLLINATIONS_API_KEY "
+                             "или GEMINI_API_KEY"),
+    "audio": ("аудио", "AUDIO_TTS_URL + AUDIO_API_KEY, GROQ_API_KEY или GEMINI_API_KEY"),
+    "video": ("видео", "VIDEO_API_URL + VIDEO_API_KEY (бесплатного видео-API сейчас нет)"),
+}
+
+
+def _offline_media_answer(kind, error=""):
+    """Почему медиа не создалось и что подключить — без «я не языковая модель»."""
+    what, how = _OFFLINE_MEDIA_HINT.get(kind, ("медиа", "провайдера медиа"))
+    reason = f"\n\nПричина: {str(error)[:400]}" if error else ""
+    return (f"**Не получилось создать {what}.**{reason}\n\n"
+            f"Без языковой модели это не нужно — достаточно подключить провайдера: `{how}`. "
+            "Затем повторите запрос, и агент сгенерирует файл по-настоящему.")
+
+
+def _offline_sources_answer(goal, state):
+    """Честный ответ офлайн-контура по реально найденным источникам."""
+    lines = [f"**Офлайн-режим.** Языковой модели нет, поэтому ниже — фактические "
+             f"результаты поиска по запросу «{goal}», без пересказа и домыслов."]
+    for index, item in enumerate(state["sources"][:6], 1):
+        title = item.get("title") or item.get("host") or item.get("url")
+        lines.append(f"{index}. [{title}]({item['url']})")
+    if state["notes"]:
+        lines.append("\n**Что удалось прочитать:**")
+        for label, text in state["notes"][-3:]:
+            snippet = " ".join(str(text).split())[:400]
+            lines.append(f"- _{label}_: {snippet}")
+    lines.append("\nЧтобы получить связный ответ, подключите модель (ключ в `.env` "
+                 "или локальный llama-server) — источники уже сохранены.")
+    return "\n".join(lines)
+
+
+def _media_history_marker(result, model):
+    """Строка MEDIA_RESULT для истории — тот же формат, что у /send."""
+    if not isinstance(result, dict):
+        return ""
+    try:
+        from routes.chat import media_result_marker
+        return media_result_marker(result, model)
+    except Exception:
+        log.warning("Не удалось собрать маркер медиа для истории", exc_info=True)
+        return ""
+
+
+def _generate_media_streaming(media_agent, kind, prompt, options, wanted_model):
+    """Запускает генерацию и отдаёт реальные статусы провайдера событиями.
+
+    `media_agent.generate` синхронный и умеет звать `on_status`. Чтобы эти
+    сообщения попали в NDJSON-поток, генерация уходит в отдельный поток, а
+    генератор-обёртка читает очередь и `yield`-ит `step`-события. Возвращает
+    `(result, model, errors)`.
+    """
+    events: "queue.Queue" = queue.Queue()
+    box = {}
+
+    def on_status(message):
+        events.put(("status", str(message)[:500]))
+
+    def work():
+        try:
+            box["value"] = media_agent.generate(
+                kind, prompt, options=options, wanted_model=wanted_model,
+                on_status=on_status,
+            )
+        except Exception as exc:                      # поток не должен падать молча
+            box["error"] = exc
+        finally:
+            events.put(("done", None))
+
+    thread = threading.Thread(target=work, name="agent-media", daemon=True)
+    thread.start()
+    while True:
+        try:
+            kind_event, payload = events.get(timeout=600)
+        except queue.Empty:
+            yield _ndjson({"type": "step", "icon": "⏱", "text": "Генерация медиа превысила лимит ожидания"})
+            break
+        if kind_event == "done":
+            break
+        yield _ndjson({"type": "step", "icon": "🎨", "text": payload})
+    thread.join(timeout=1)
+    if "error" in box:
+        return None, None, [f"{box['error'].__class__.__name__}: {box['error']}"]
+    result, model, errors = box.get("value") or (None, None, [])
+    return result, model, errors
 
 
 def _nudge(state, remaining):
@@ -821,26 +1186,32 @@ def _perform(action, kind, use_tools, state, goal=""):
         import media_agent
         prompt = str(action.get("prompt") or action.get("text") or "").strip()
         options = media_agent.build_options(kind, action)
-        errors = []
         yield _ndjson({"type": "stage", "scene": "media", "title": "Рисую медиа",
                        "text": f"Подбираю модель для типа: {kind}"})
-        def status(message):
-            yield_value = _ndjson({"type": "step", "icon": "🎨", "text": str(message)[:500]})
-            # A generator callback cannot yield into the outer generator;
-            # retain the final error/result while generation remains synchronous.
-            errors.append(yield_value)
-        result, model, generation_errors = media_agent.generate(kind, prompt, options=options,
-                                                                  wanted_model=str(action.get("model") or ""))
-        errors.extend(generation_errors or [])
+        # Генерация идёт в отдельном потоке, а её реальные статусы
+        # («Отправка запроса к …», «Провайдер вернул ответ») приходят в
+        # поток событий. Раньше callback status() ничего не отправлял:
+        # пользователь видел пустую сцену без прогресса.
+        result, model, generation_errors = yield from _generate_media_streaming(
+            media_agent, kind, prompt, options, str(action.get("model") or ""))
         if result:
             state["media_context"].append(f"Создано {kind}: {prompt}")
             state["media"].append(result)
+            state["tools_used"].append(kind)
+            marker = _media_history_marker(result, model)
+            if marker:
+                state["media_markers"].append(marker)
             yield _ndjson({"type": "media", "media": result, "model": model})
             if isinstance(result, dict) and result.get("state") == "queued":
-                return f"Медиа поставлено в очередь: {prompt}"
-            return f"Медиа создано: {prompt}"
-        yield _ndjson({"type": "step", "icon": "⚠️", "text": "Не получилось создать медиа"})
-        return "Не получилось создать медиа: " + "; ".join(str(item) for item in errors[-3:])
+                return (f"Медиа поставлено в очередь провайдера (job_id={result.get('job_id')}): {prompt}. "
+                        "Результат уже показан пользователю — ссылку повторять не нужно.")
+            return (f"Медиа создано и уже показано пользователю прямо в чате: {prompt}. "
+                    "Не вставляй ссылку на файл повторно — достаточно короткого подтверждения.")
+        reason = "; ".join(str(item) for item in (generation_errors or [])[-3:]) or "провайдер не ответил"
+        state["media_error"] = reason
+        yield _ndjson({"type": "step", "icon": "⚠️",
+                       "text": "Не получилось создать медиа: " + reason[:300]})
+        return "Не получилось создать медиа: " + reason
 
     if kind == "task":
         task = database.create_task(
@@ -865,11 +1236,13 @@ def _perform(action, kind, use_tools, state, goal=""):
     if kind == "answer":
         return ""  # цикл прервётся сам
 
-    if not use_tools:
-        return "Инструменты недоступны: TERMINAL_ENABLED=0. Ответь пользователю по имеющимся данным."
-
-    if kind == "search":
+    # Поиск, чтение страниц и медиа НЕ зависят от Linux-окружения: это
+    # отдельные инструменты, доступные любому пользователю. Раньше проверка
+    # TERMINAL_ENABLED стояла выше и отключала поиск вместе с терминалом.
+    if kind in ("search", "web_search"):
         state["searched"] = True
+        state["tools_used"].append("search")
+        action = {**action, "action": "search"}
         query = str(action.get("query") or "").strip()
         if not query:
             return 'Пустой поисковый запрос. Повтори с {"action":"search","query":"..."}.'
@@ -936,6 +1309,7 @@ def _perform(action, kind, use_tools, state, goal=""):
         if not url.startswith(("http://", "https://")):
             return "Нужен полный адрес страницы, например https://example.com"
         state["research"] += 1
+        state["tools_used"].append("open")
         started_open = time.time()
         open_result = call_tool("web_open", url=url, max_chars=4000)
         elapsed = int((time.time() - started_open) * 1000)
@@ -954,9 +1328,18 @@ def _perform(action, kind, use_tools, state, goal=""):
                        "output": (text or "страница пустая")[:1500]})
         return text or "Страница не прочиталась."
 
+    # ── Дальше только рабочая папка: для неё нужен вход и TERMINAL_ENABLED=1 ──
+    if not use_tools:
+        return ("Инструменты рабочей папки недоступны: TERMINAL_ENABLED=0 или пользователь не вошёл. "
+                "Ответь пользователю по имеющимся данным; поиск и медиа работают и без Linux.")
+
+    state["workspace_used"] = True
+
     if kind == "ls":
+        state["tools_used"].append("ls")
         command, label, icon = "ls -la", "Смотрю файлы", "📂"
     elif kind == "read":
+        state["tools_used"].append("read")
         rel_path = str(action.get("path", ""))
         read_result = call_tool("file_read", path=rel_path, max_chars=MAX_OBSERVATION)
         if not read_result.get("ok"):
@@ -972,6 +1355,7 @@ def _perform(action, kind, use_tools, state, goal=""):
         return content
 
     elif kind == "write":
+        state["tools_used"].append("write")
         rel_path = str(action.get("path", "notes/out.md"))
         content = str(action.get("content") or "")
         write_result = call_tool("file_write", path=rel_path, content=content)
@@ -989,7 +1373,15 @@ def _perform(action, kind, use_tools, state, goal=""):
                        "code": 0, "output": f"Файл {relative_to_workspace(path)} записан."})
         return f"Файл {relative_to_workspace(path)} записан. Открой его командой cat {relative_to_workspace(path)}."
 
+    elif kind == "git":
+        # Git идёт через тот же белый список песочницы, что и терминал.
+        command = str(action.get("command") or "status --short").strip()
+        if not command.startswith("git"):
+            command = "git " + command
+        state["tools_used"].append("git")
+        label, icon = f"$ {command}", "🌿"
     elif kind == "run":
+        state["tools_used"].append("run")
         command = str(action.get("command") or "").strip()
         label, icon = f"$ {command}", "⚙️"
     else:

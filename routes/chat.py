@@ -7,6 +7,7 @@ import queue
 import threading
 import time
 import os
+import logging
 import requests
 
 from database import (get_chat_history, add_message, trim_messages,
@@ -25,6 +26,15 @@ contents = []
 
 chat_bp = Blueprint("chat", __name__)
 
+
+def is_agent_enabled():
+    """Включён ли агентный режим (по умолчанию — да)."""
+    try:
+        from routes.agent import is_enabled
+        return bool(is_enabled())
+    except Exception:
+        return False
+
 # Маркер медиарезультата в истории: тот же приём, что COMPOSIO_CARDS: в app.js.
 MEDIA_RESULT_PREFIX = "MEDIA_RESULT:"
 
@@ -42,7 +52,7 @@ def media_result_marker(result: dict, model: dict) -> str:
         "job_id": result.get("job_id"),
         "state": result.get("state"),
         "elapsed_ms": result.get("elapsed_ms"),
-        "model": mg.selection_payload(model) if model else None,
+        "model": mg.selection_payload(model) if model and model.get("provider") else None,
     }
     return MEDIA_RESULT_PREFIX + json.dumps(payload, ensure_ascii=False)
 
@@ -229,6 +239,17 @@ def send_stream():
         return jsonify({'error': 'Пустое сообщение'}), 400
 
     contents.append({"role": "user", "content": message})
+
+    # Явный запрос агентного режима: клиенты без JS (curl, мобильные
+    # приложения, интеграции) получают ровно тот же цикл с инструментами,
+    # что и веб-чат. {"message": "...", "agent": true}
+    if data.get("agent") is True:
+        try:
+            from routes.agent import agent_stream
+            if is_agent_enabled():
+                return agent_stream()
+        except Exception:
+            logging.getLogger(__name__).warning("agent fallback недоступен", exc_info=True)
 
     # FIX: загружаем историю из БД для send_stream тоже
     _chat_id_stream = get_or_create_session_chat()

@@ -2,6 +2,7 @@
 config.py — Конфигурация NovaMind: переменные окружения, провайдеры, команды, плагины.
 """
 import os
+import secrets
 import sys
 import json
 import time
@@ -26,10 +27,16 @@ if os.path.exists(_env_path):
 # ---------- Google OAuth ----------
 GOOGLE_CLIENT_ID     = os.getenv("GOOGLE_CLIENT_ID", "")
 GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET", "")
-GOOGLE_REDIRECT_URI  = os.getenv("GOOGLE_REDIRECT_URI", "http://localhost:5000/auth/google/callback")
+SITE_URL             = os.getenv("SITE_URL", "http://localhost:5000").rstrip("/")
+GOOGLE_REDIRECT_URI  = os.getenv("GOOGLE_REDIRECT_URI",
+                                 f"{SITE_URL}/auth/google/callback")
 
 # ---------- Безопасность ----------
-ADMIN_CODE        = os.getenv("ADMIN_CODE", "007")
+# Пароль администратора. Предсказуемый дефолт опасен: без ADMIN_CODE
+# в окружении генерируем случайный код и печатаем его в лог при старте —
+# войти «по умолчанию» снаружи уже нельзя.
+ADMIN_CODE        = os.getenv("ADMIN_CODE") or secrets.token_urlsafe(9)
+ADMIN_CODE_IS_DEFAULT = not bool(os.getenv("ADMIN_CODE"))
 ADMIN_SESSION_KEY = os.getenv("SESSION_SECRET") or os.urandom(24).hex()
 # Логин и код администратора. ADMIN_USER можно переопределить в .env,
 # иначе вход идёт под именем admin с кодом ADMIN_CODE.
@@ -69,7 +76,7 @@ PROVIDERS = {
         "headers": {
             "Authorization": f"Bearer {os.getenv('OPENROUTER_API_KEY', '')}",
             "Content-Type": "application/json",
-            "HTTP-Referer": "http://localhost:5000",
+            "HTTP-Referer": os.getenv("SITE_URL", "http://localhost:5000").rstrip("/"),
             "X-Title": "NovaMind AI",
         },
         "models": [
@@ -242,11 +249,45 @@ def has_credentials(provider: str) -> bool:
     return False
 
 
+# Автообнаружение локального OpenAI-compatible сервера (llama.cpp, Ollama,
+# LM Studio). Выключено по умолчанию: без него первый запрос не тратит
+# время на сетевой пробинг. LOCAL_LLM_AUTODETECT=1 — и чат сам подхватит
+# запущенный локальный сервер, если облачных ключей нет.
+LOCAL_LLM_AUTODETECT = os.getenv("LOCAL_LLM_AUTODETECT", "0") == "1"
+_LOCAL_PROBE = {"at": 0.0, "ok": False}
+_LOCAL_PROBE_TTL = 60.0
+
+
+def local_endpoint_available(force: bool = False) -> bool:
+    """Отвечает ли локальный OpenAI-compatible сервер (с кэшем на минуту)."""
+    if not LOCAL_LLM_AUTODETECT:
+        return False
+    now = time.time()
+    if not force and now - _LOCAL_PROBE["at"] < _LOCAL_PROBE_TTL:
+        return _LOCAL_PROBE["ok"]
+    base = (os.getenv("OPENAI_BASE_URL") or os.getenv("OPENAI_COMPATIBLE_URL")
+            or "http://127.0.0.1:8080/v1").rstrip("/")
+    if base.endswith("/chat/completions"):
+        base = base[: -len("/chat/completions")].rstrip("/")
+    url = base + "/models"
+    ok = False
+    try:
+        import requests
+        response = requests.get(url, timeout=1.5)
+        ok = response.status_code < 500
+    except Exception:
+        ok = False
+    _LOCAL_PROBE.update({"at": now, "ok": ok})
+    return ok
+
+
 def first_available_provider() -> str:
     """Первый провайдер, который реально может ответить прямо сейчас."""
     for provider in ("groq", "google_ai_studio", "openrouter", "cerebras", "pollinations"):
         if has_credentials(provider):
             return provider
+    if local_endpoint_available():
+        return "openai_compatible"
     return "local_demo"
 
 
@@ -266,7 +307,12 @@ def ensure_usable_provider() -> None:
     logger.warning("Провайдер '%s' не подключён — переключаюсь на '%s'", current_provider, fallback)
     current_provider = fallback
     models = PROVIDERS.get(fallback, {}).get("models") or []
-    current_model = models[0]["id"] if models else "nova-local-1"
+    if fallback == "openai_compatible":
+        # У локального сервера имя модели задаётся в .env — берём его.
+        current_model = os.getenv("OPENAI_MODEL") or os.getenv("AI_MODEL") or (
+            models[0]["id"] if models else "local-model")
+    else:
+        current_model = models[0]["id"] if models else "nova-local-1"
 
 
 ensure_usable_provider()

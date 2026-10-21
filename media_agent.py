@@ -148,21 +148,30 @@ def candidates(kind: str, refresh: bool = False) -> list:
 
 
 def quick_available(kind: str) -> bool:
-    """Быстрая проверка без сети: подключён ли хоть один провайдер для `kind`.
+    """Быстрая проверка без сети: есть ли модель, которую агент реально возьмёт.
 
     Нужна для /api/agent/status — он вызывается при каждой загрузке чата,
     и ждать живые каталоги провайдеров там нельзя.
+
+    Важно: раньше здесь считалось, что Pollinations подключён всегда
+    (`provider_connected("pollinations") is True`), поэтому статус врал —
+    интерфейс показывал «медиа доступно», а `candidates()` возвращал пустой
+    список. Теперь проверка повторяет правила `_usable()`.
     """
+    if kind not in KINDS:
+        return False
     env_url = {"image": "IMAGE_GENERATION_URL", "audio": "AUDIO_TTS_URL", "video": "VIDEO_API_URL"}.get(kind)
     if env_url and os.getenv(env_url):
         return True
-    free_providers = {
-        "image": ("pollinations", "openrouter"),
-        "audio": ("google_ai_studio", "groq", "pollinations", "openrouter"),
-        "video": ("pollinations",),
-    }.get(kind, ())
-    if any(mg.provider_connected(provider) for provider in free_providers):
+
+    pollinations_key = bool(mg._pollinations_key())
+    free_audio_via_google = kind == "audio" and mg.provider_connected("google_ai_studio")
+    free_audio_via_groq = kind == "audio" and mg.provider_connected("groq")
+    if kind in ("image", "audio") and pollinations_key:
         return True
+    if free_audio_via_google or free_audio_via_groq:
+        return True
+    # Платные/пробные модели (Gemini image, Veo) — только с явным разрешением.
     return allow_paid() and mg.provider_connected("google_ai_studio")
 
 

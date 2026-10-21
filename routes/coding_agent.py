@@ -194,10 +194,20 @@ def _model(messages, provider, model):
                                    temperature=0.1, max_tokens=1800, timeout=45)
     return str(value or "").strip()
 
+def _agent_enabled():
+    """Единое правило: агент включён, если не выключен явно."""
+    try:
+        from routes.agent import is_enabled
+        return bool(is_enabled())
+    except Exception:
+        return os.getenv("AGENT_ENABLED", "0") == "1"
+
+
 @coding_agent_bp.route("/api/agent/coding/status")
 def coding_status():
-    return jsonify({"enabled": os.getenv("AGENT_ENABLED", "0") == "1",
-                    "admin_required": True, "available": bool(session.get("admin_logged_in"))})
+    return jsonify({"enabled": _agent_enabled(),
+                    "admin_required": True,
+                    "available": bool(_agent_enabled() and session.get("admin_logged_in"))})
 
 @coding_agent_bp.route("/api/agent/coding/stream", methods=["POST"])
 def coding_stream():
@@ -205,7 +215,7 @@ def coding_stream():
     goal = str(data.get("message") or "").strip()
     if not goal:
         return jsonify({"error": "Пустое сообщение."}), 400
-    if os.getenv("AGENT_ENABLED", "0") != "1":
+    if not _agent_enabled():
         return jsonify({"error": "Auto Coding Agent выключен: включите AGENT_ENABLED=1."}), 403
     if not session.get("admin_logged_in"):
         return jsonify({"error": "Auto Coding Agent доступен только администратору."}), 403

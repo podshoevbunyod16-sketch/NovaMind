@@ -460,6 +460,11 @@ check('тост показан', document.querySelectorAll('#toastStack .lg-toas
 console.log('\n5) Компоновка чата');
 const chatCss = await (await fetch(BASE + '/static/style.css')).text();
 const cssBlock = (selector) => (chatCss.match(new RegExp('\\' + selector + '\\s*\\{[^}]*\\}')) || [''])[0];
+// Раскладка проверяется для десктопа: правила внутри @media (мобильный
+// drawer со своим скроллом) сюда не попадают.
+const desktopCss = chatCss.split('@media')[0];
+const desktopBlock = (selector) =>
+  (desktopCss.match(new RegExp('\\' + selector + '\\s*\\{[^}]*\\}')) || [''])[0];
 
 const appShell = document.querySelector('.app');
 check('сайдбар скрыт по умолчанию', appShell.classList.contains('nav-off'));
@@ -471,9 +476,9 @@ window.toggleSidebar();
 check('бургер снова прячет панель', appShell.classList.contains('nav-off'));
 
 check('прокручивается всё окно, а не переписка',
-  !/overflow-y:\s*auto/.test(cssBlock('.chat-container')), cssBlock('.chat-container'));
+  !/overflow-y:\s*auto/.test(desktopBlock('.chat-container')), desktopBlock('.chat-container'));
 check('у сайдбара нет своего ползунка',
-  !/overflow-y:\s*auto/.test(cssBlock('.sidebar-body')), cssBlock('.sidebar-body'));
+  !/overflow-y:\s*auto/.test(desktopBlock('.sidebar-body')), desktopBlock('.sidebar-body'));
 check('поле ввода прилипает к низу окна', /position:\s*sticky/.test(cssBlock('.input-area')));
 check('шапка прилипает к верху окна', /position:\s*sticky/.test(cssBlock('.topbar')));
 
@@ -556,8 +561,14 @@ const settingsConsole = new VirtualConsole();
 settingsConsole.on('jsdomError', (error) => settingsErrors.push('jsdomError: ' + error.message));
 settingsConsole.on('error', (...args) => settingsErrors.push('console.error: ' + args.join(' ')));
 
-const settingsDom = new JSDOM(
-  settingsHtml.replace('<script src="/static/settings.js"></script>', '<script>' + settingsJs + '</script>'),
+// settings.js подключается с версией (?v=…), поэтому подставляем по регулярке
+const settingsPage = settingsHtml.replace(
+  /<script src="\/static\/settings\.js[^"]*"><\/script>/,
+  '<script>' + settingsJs + '</script>');
+if (!settingsPage.includes("const state")) {
+  throw new Error('не удалось встроить /static/settings.js в страницу настроек');
+}
+const settingsDom = new JSDOM(settingsPage,
   {
     url: BASE + '/settings',
     runScripts: 'dangerously',

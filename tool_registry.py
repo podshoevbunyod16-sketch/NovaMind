@@ -45,9 +45,21 @@ def get_tool(name: str) -> ToolSpec | None:
 def list_tools() -> list[ToolSpec]:
     return list(_REGISTRY.values())
 
-def tool_schemas() -> list[dict]:
+# Инструменты, которым нужна рабочая папка и вход пользователя.
+WORKSPACE_TOOLS = {"shell", "file_read", "file_write", "git", "file_delete"}
+
+
+def tool_schemas(workspace: bool | None = None) -> list[dict]:
+    """Схемы инструментов для промпта агента.
+
+    `workspace=False` скрывает инструменты, которым нужна песочница: гостю
+    незачем показывать shell/file/git, которых у него нет.
+    """
+    specs = list_tools()
+    if workspace is not None:
+        specs = [t for t in specs if workspace or t.name not in WORKSPACE_TOOLS]
     schemas = [{"name": t.name, "description": t.description, "schema": dict(t.schema),
-                "permissions": list(t.permissions), "timeout": t.timeout} for t in list_tools()]
+                "permissions": list(t.permissions), "timeout": t.timeout} for t in specs]
     try:
         import mcp_registry
         connected = mcp_registry.connected_tools()
@@ -102,12 +114,16 @@ def bootstrap_default_tools():
         register_tool(ToolSpec(
             "shell", "Run a policy-checked command inside the workspace.",
             {"type":"object","properties":{"command":{"type":"string"},"timeout":{"type":"number"}},"required":["command"]},
-            lambda command, timeout=12: _shell_result(run_agent(command, timeout=min(float(timeout),30))),
+            lambda command, timeout=12: _workspace_guard() or _shell_result(
+                run_agent(command, timeout=min(float(timeout),30))),
             permissions=("workspace",), timeout=30))
     if get_tool("file_read") is None:
         from routes.terminal import safe_path
         def read_file(path, max_chars=60000):
             import os
+            denied = _workspace_guard()
+            if denied:
+                return denied
             p=safe_path(path)
             if not os.path.isfile(p):
                 return {"ok":False,"error":{"type":"not_found","message":"File not found","retryable":False}}
@@ -123,6 +139,9 @@ def bootstrap_default_tools():
         from routes.terminal import safe_path, relative_to_workspace
         def write_file(path, content=""):
             import os
+            denied = _workspace_guard()
+            if denied:
+                return denied
             p = safe_path(path)
             os.makedirs(os.path.dirname(p), exist_ok=True)
             with open(p, "w", encoding="utf-8") as f:
@@ -137,6 +156,9 @@ def bootstrap_default_tools():
     if get_tool("git") is None:
         from routes.terminal import run_agent
         def git(command="status --short", timeout=12):
+            denied = _workspace_guard()
+            if denied:
+                return denied
             cmd = str(command).strip()
             if not cmd.startswith("git"):
                 cmd = "git " + cmd
@@ -145,6 +167,28 @@ def bootstrap_default_tools():
             "git", "Run a Git command inside the workspace.",
             {"type":"object","properties":{"command":{"type":"string"},"timeout":{"type":"number"}},"required":["command"]},
             git, permissions=("workspace",), timeout=30))
+
+def _workspace_guard():
+    """Единая проверка доступа к песочнице для инструментов реестра.
+
+    Маршруты Flask проверяют доступ сами, но реестр вызывается и из агента,
+    и из будущего кода. Без этой проверки shell/file могли обойти вход.
+    """
+    try:
+        from routes.terminal import is_enabled, can_use_workspace
+        if not is_enabled():
+            return {"ok": False, "error": {"type": "disabled",
+                                           "message": "TERMINAL_ENABLED=0: рабочая папка выключена",
+                                           "retryable": False}}
+        if not can_use_workspace():
+            return {"ok": False, "error": {"type": "unauthorized",
+                                           "message": "Нужен вход в аккаунт для работы с файлами",
+                                           "retryable": False}}
+    except Exception as exc:                 # импорт не должен ломать инструмент
+        return {"ok": False, "error": {"type": "unavailable", "message": str(exc),
+                                       "retryable": False}}
+    return None
+
 
 def _search_result(pair):
     results, trace = pair
