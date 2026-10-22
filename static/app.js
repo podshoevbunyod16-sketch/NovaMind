@@ -1018,6 +1018,9 @@ function createAssistantTurn(options = {}) {
       }
       if (meta.stopped) bits.push('остановлено');
       if (sourcesData.length) bits.push(`источников: ${sourcesData.length}`);
+      if (meta.tokens && Number(meta.tokens.total) > 0) {
+        bits.push(formatTokenCount(meta.tokens.total) + ' ток.');
+      }
       bits.push(`${seconds} c`);
       metaEl.innerHTML = `<span>${bits.join(' · ')}</span>`;
 
@@ -1033,6 +1036,9 @@ function createAssistantTurn(options = {}) {
         if (lastUserMessage) sendMessage(lastUserMessage);
       });
 
+      // Шапка берёт только /api/usage. Не прибавлять meta.tokens:
+      // ход уже записан на сервере, иначе сумма в шапке ровно x2.
+      refreshUsage();
       if (!historyReplay && answerText) {
         historyAddMessage('ai', answerText, {
           sources: sourcesData.slice(0, 12),
@@ -1079,6 +1085,34 @@ function createAssistantTurn(options = {}) {
   };
 
   return api;
+}
+
+function formatTokenCount(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n <= 0) return '';
+  if (n >= 1000) {
+    const scaled = (n / 1000).toFixed(1);
+    const pretty = scaled.endsWith('.0') ? scaled.slice(0, -2) : scaled;
+    return pretty + ' тыс.';
+  }
+  return String(Math.round(n));
+}
+
+function refreshUsage() {
+  const el = document.getElementById('usageTotal');
+  if (!el) return;
+  fetch('/api/usage')
+    .then((response) => (response.ok ? response.json() : null))
+    .then((data) => {
+      if (!data) return;
+      // Только total с бэкенда. prompt+completion+total дало бы ровно x2.
+      const total = Number(data.total) || 0;
+      const text = formatTokenCount(total);
+      el.textContent = text;
+      el.hidden = !text;
+      el.title = total ? `Токены за все ходы: ${total}` : '';
+    })
+    .catch(() => {});
 }
 
 function sourceItemHtml(source, index) {
@@ -2491,6 +2525,7 @@ document.addEventListener('click', (event) => {
   refreshAiStatus();
   checkHealth(false);
   renderChatList();
+  refreshUsage();
 
   window.addEventListener('online', () => {
     showNotification('Соединение восстановлено', 'ok');

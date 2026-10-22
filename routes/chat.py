@@ -12,7 +12,11 @@ import requests
 
 from database import (get_chat_history, add_message, trim_messages,
                       get_or_create_session_chat, create_chat,
+<<<<<<< HEAD
                       list_chats, delete_chat, get_traces)
+=======
+                      list_chats, delete_chat, usage_summary)
+>>>>>>> origin/arena/0907c828-novamind
 from ai_providers import gemini_stream_request, gemini_request
 from ai_providers import groq_request_with_rotation
 from ai_providers import chat_completion, chat_stream, resolve_target
@@ -144,6 +148,15 @@ def _media_stream_response(model, prompt, confirm, options, chat_id):
         mimetype="application/x-ndjson",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", "Connection": "keep-alive"},
     )
+
+
+@chat_bp.route("/api/usage")
+def api_usage():
+    """Сумма total по ходам. Каждый ход записан один раз — шапка не удваивает число."""
+    chat_id = (request.args.get("chat_id") or "").strip() or None
+    summary = usage_summary(chat_id)
+    summary["chat_id"] = chat_id
+    return jsonify(summary)
 
 
 @chat_bp.route('/send', methods=['POST'])

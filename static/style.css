@@ -284,6 +284,11 @@ html[data-glass-theme="light"] .menu-btn.is-open { color: var(--accent); }
 }
 .topbar-title .lg-dot { margin-right: 2px; flex-shrink: 0; }
 .topbar-actions { margin-left: auto; display: flex; gap: 7px; align-items: center; flex-shrink: 0; }
+.usage-total {
+  font-size: 11px; font-weight: 700; letter-spacing: .01em;
+  color: var(--text-3, #9aa); white-space: nowrap; flex-shrink: 0;
+  padding: 0 2px;
+}
 .icon-btn {
   width: 36px; height: 36px;
   display: flex; align-items: center; justify-content: center;
