@@ -59,14 +59,12 @@ AGENT_SYSTEM_PROMPT = """Ты — агент NovaMind внутри «мален�
   {"action":"grep","pattern":"TODO","path":"."}              поиск по содержимому файлов
   {"action":"tree","path":".","depth":2}                     дерево файлов
   {"action":"ls"}                                          список файлов
-  {"action":"search","query":"что найти"}                   встроенный поиск в интернете
+  {"action":"search","query":"что найти"}                   ПОИСК В ИНТЕРНЕТЕ
   {"action":"open","url":"https://…"}                       прочитать страницу
-  {"action":"tool_search","query":"что нужно сделать","server_id":"необязательно"}  найти MCP-инструмент
   {"action":"mcp_call","server_id":"github","tool":"...","arguments":{...}}  вызвать MCP-инструмент
   {"action":"image","prompt":"…","aspect":"16:9"}          нарисовать изображение
   {"action":"audio","prompt":"…","voice":"Kore"}            озвучить текст
   {"action":"video","prompt":"…","duration":5}              сделать видео
-  {"action":"skill_read","name":"slug"}                     прочитать полный SKILL.md
   {"action":"skill_create","name":"slug","content":"полный SKILL.md"} создать skill
   {"action":"task","title":"…","detail":"…"}                завести задачу с подпунктами в detail
   {"action":"task_done","note":"что сделано"}               задача выполнена
@@ -77,7 +75,6 @@ AGENT_SYSTEM_PROMPT = """Ты — агент NovaMind внутри «мален�
 2. Сначала разберись в задаче (run/read/ls), потом действуй, потом answer.
 3. Один инструмент за один шаг. Не выдумывай результат команды — сначала выполни её.
 4. Команды выполняются ТОЛЬКО по одной, без | и >.
-<<<<<<< HEAD
 5. Существующий файл НЕ переписывай целиком: читай его и правь точечно через edit
    (old должен встречаться один раз). write — только для новых файлов. grep — поиск по коду,
    tree — структура проекта.
@@ -102,14 +99,6 @@ AGENT_SYSTEM_PROMPT = """Ты — агент NovaMind внутри «мален�
    потом 1–3 предложения пояснения. Не пересказывай свои шаги, не выводи ход мыслей,
    черновики и английские рассуждения — только готовый ответ. Не вставляй JSON.
    Ссылки на источники писать не нужно — интерфейс покажет их сам."""
-=======
-5. Нужны свежие факты — сначала MCP-поиск (Exa): tool_search, затем mcp_call. Встроенный search — только если MCP-поиска нет или он вернул ошибку/пусто. Успешный поиск не повторяй.
-6. Если пользователь просит создать/сгенерировать/нарисовать изображение, видео или аудио, сразу используй action=image, action=video или action=audio, а не текстовый ответ.
-7. Повторяй действие только если результат пустой или содержит ошибку; успешное действие не повторяй.
-8. Сначала tool_search, потом mcp_call с точными server_id и tool из результата. Не выдумывай имя инструмента. Без tool_search можно вызывать только встроенные search, open, run, read, write, ls, image, audio, video, task, task_done и answer.
-9. Если запрос подходит под skill из короткого списка, сначала skill_read и следуй прочитанному. Для создания skill сформируй полный SKILL.md с frontmatter name и description и используй skill_create.
-10. В answer дай ПРЯМОЙ ответ на вопрос пользователя по-русски: сначала суть (названия, цифры, годы), потом 1–3 предложения пояснения. Не пересказывай свои шаги и не вставляй JSON. Ссылки на источники писать не нужно — интерфейс покажет их сам."""
->>>>>>> origin/arena/0907c828-novamind
 
 
 FINAL_ONLY_SYSTEM = (
@@ -138,8 +127,7 @@ def agent_system_prompt(use_tools=True, strict_mcp=False):
             if (not _WORKSPACE_ACTION_RE.search(line)
                 and not re.search(r'"action"\s*:\s*"(search|open|image|audio|video|media_models)"', line))
         )
-        prompt += ("\n\nSTRICT MCP MODE: доступны только action=tool_search и action=mcp_call. "
-                   "Сначала tool_search, потом mcp_call. "
+        prompt += ("\n\nSTRICT MCP MODE: доступен только action=mcp_call. "
                    "Не вызывай web_search, web_open, shell, run, read или write.")
         return prompt
     if not use_tools:
@@ -225,7 +213,6 @@ def requested_skill_creation(text: str) -> bool:
     return bool(re.search(r"(создай|создать|сделай|напиши|добавь)\s+(?:мне\s+)?(?:skill|скилл|навык)", value))
 
 
-<<<<<<< HEAD
 # Признаки многошаговой задачи: несколько действий, явная просьба
 # «по шагам», сравнение источников и т.п.
 _COMPLEX_MARKERS = (
@@ -301,52 +288,17 @@ def is_simple_chat_request(text: str) -> bool:
     """Определяет короткие вопросы, которым не нужны внешние инструменты."""
     value = str(text or "").strip().lower()
     if not value or len(value) > 240 or requested_media_kind(value):
-=======
-_TOOL_TRIGGER_WORDS = (
-    "найди", "поищи", "поиск", "проверь", "актуальн", "сегодня", "сейчас",
-    "последн", "новост", "ссылк", "открой", "прочитай", "репозитор",
-    "github", "youtube", "composio", "mcp", "switchboard", "exa",
-    "термукс", "termux", "linux", "команд", "файл", "код", "запусти",
-    "папк", "folder", "посчитай", "выполни",
-    "сгенерируй", "создай", "нарисуй", "отправь", "удали", "сохрани",
-    "инструмент", "email", "почт", "notion", "drive", "skill", "скилл", "навык",
-)
-
-_SMALLTALK_RE = re.compile(
-    r"^(?:привет(?:ик|ствую)?|здравствуй(?:те)?|добр(?:ый|ое|ого)\s+(?:день|утро|вечер)|"
-    r"хай|hello|hi|hey|салам|ассалому алейкум|ассалом|"
-    r"спасибо(?:\s+большое)?|благодарю(?:\s+вас)?|thanks|thank you|рахмат|ташаккур|"
-    r"как дела|как ты|кто ты|что умеешь|как тебя зовут|чем можешь помочь|"
-    r"пока|до свидания|хорошего дня)"
-    r"(?:[\s,!.]*\s*(?:как дела|как ты|novamind|новамайнд|khirad))?"
-    r"\s*[!?.…]*$",
-    re.I,
-)
-
-
-def _has_tool_trigger(value: str) -> bool:
-    return any(word in value for word in _TOOL_TRIGGER_WORDS)
-
-
-def is_smalltalk(text: str) -> bool:
-    """Приветствие, благодарность или чистая болтовня — без инструментов и без поиска."""
-    value = " ".join(str(text or "").strip().lower().split())
-    if not value or len(value) > 80 or requested_media_kind(value) or _has_tool_trigger(value):
->>>>>>> origin/arena/0907c828-novamind
         return False
-    return bool(_SMALLTALK_RE.match(value))
-
-
-def is_simple_chat_request(text: str) -> bool:
-    """Короткий вопрос без инструментов: приветствие, благодарность, болтовня, общий вопрос."""
-    value = str(text or "").strip().lower()
-    if not value or requested_media_kind(value):
-        return False
-    if is_smalltalk(value):
-        return True
-    if len(value) > 360 or _has_tool_trigger(value):
-        return False
-    return True
+    tool_words = (
+        "найди", "поищи", "поиск", "проверь", "актуальн", "сегодня", "сейчас",
+        "последн", "новост", "ссылк", "открой", "прочитай", "репозитор",
+        "github", "youtube", "composio", "mcp", "switchboard", "exa",
+        "термукс", "termux", "linux", "команд", "файл", "код", "запусти",
+        "папк", "folder", "посчитай", "выполни", "запусти",
+        "сгенерируй", "создай", "нарисуй", "отправь", "удали", "сохрани",
+        "инструмент", "email", "почт", "notion", "drive",
+    )
+    return not any(word in value for word in tool_words)
 
 
 def tools_enabled():
@@ -641,7 +593,6 @@ def clip(text, limit=MAX_OBSERVATION):
     return text if len(text) <= limit else text[:limit] + "\n… обрезано"
 
 
-<<<<<<< HEAD
 # Провайдеры/модели, у которых нативный tool calling уже не сработал:
 # второй раз в том же процессе не пробуем, сразу идём JSON-протоколом.
 _NATIVE_TOOL_BLOCKED: set = set()
@@ -1083,57 +1034,16 @@ def _request_step(dialogue, ask_kwargs, native_mode, native_tools, provider, mod
 
 def _ask(messages, **kwargs):
     """Запрашивает модель через поток; fallback на обычный completion."""
-=======
-class UsageMeter:
-    """Сумма usage всех вызовов модели за один ход. Один вызов — одна добавка."""
-
-    def __init__(self):
-        self.prompt = 0
-        self.completion = 0
-        self.total = 0
-
-    def add(self, usage):
-        if not isinstance(usage, dict):
-            return
-        prompt = int(usage.get("prompt") or usage.get("prompt_tokens") or 0)
-        completion = int(usage.get("completion") or usage.get("completion_tokens") or 0)
-        raw_total = usage.get("total", usage.get("total_tokens"))
-        total = int(raw_total if raw_total is not None else prompt + completion)
-        self.prompt += prompt
-        self.completion += completion
-        self.total += total
-
-    def as_dict(self):
-        return {"prompt": self.prompt, "completion": self.completion, "total": self.total}
-
-
-def _charge(meter, usage, messages, text, system=""):
-    """Берёт usage API. Оценку len/3 — только если API ничего не вернул."""
-    if meter is None:
-        return
-    if not usage:
-        from ai_providers import estimate_usage
-        usage = estimate_usage(messages, text, system)
-    meter.add(usage)
-
-
-def _ask(messages, meter=None, **kwargs):
-    """Запрашивает модель через поток; fallback на обычный completion.
-
-    Usage потока и fallback не суммируются: в счётчик попадает ровно один ответ.
-    """
-    system = kwargs.get("system") or ""
->>>>>>> origin/arena/0907c828-novamind
     try:
         chunks = []
-        usage = None
+        error_text = ""
+        saw = False
         for kind, chunk in chat_stream(messages, **kwargs):
+            saw = True
             if kind == "token":
                 chunks.append(str(chunk or ""))
-            elif kind == "usage" and isinstance(chunk, dict):
-                usage = chunk
             elif kind == "error":
-                pass
+                error_text = str(chunk or "")
         text = strip_think("".join(chunks))
         if text:
             try:
@@ -1142,15 +1052,12 @@ def _ask(messages, meter=None, **kwargs):
             except Exception:
                 offline_fallback = "офлайн" in text.lower()
             if not offline_fallback:
-                _charge(meter, usage, messages, text, system)
                 return text, ""
     except Exception:
         pass
     text, meta = chat_completion(messages, **kwargs)
     text = strip_think(text)
-    api_usage = meta.get("usage") if isinstance(meta, dict) else None
     if text:
-        _charge(meter, api_usage, messages, text, system)
         return text, ""
     return "", str(meta) if isinstance(meta, str) and meta else "модель не ответила"
 
@@ -1222,7 +1129,6 @@ def _is_research_command(command):
 
 # ───────────────────────── итоговый ответ ─────────────────────────
 
-<<<<<<< HEAD
 def _synthesize(goal, state, provider, model):
     """Финальный запрос: модель отвечает обычным текстом по собранным данным.
 
@@ -1230,10 +1136,6 @@ def _synthesize(goal, state, provider, model):
     лимит токенов), текст чистится, а при пустом остатке запрос повторяется
     один раз со строгой инструкцией «только готовый ответ».
     """
-=======
-def _synthesize(goal, state, provider, model, meter=None):
-    """Финальный запрос: модель отвечает обычным текстом по собранным данным."""
->>>>>>> origin/arena/0907c828-novamind
     notes = "\n\n".join(f"[{label}]\n{text}" for label, text in _note_items(state)[-6:])
     prompt = (
         f"Вопрос пользователя: {goal}\n\n"
@@ -1243,7 +1145,6 @@ def _synthesize(goal, state, provider, model, meter=None):
         "закончи мысль. Если данные неполные или противоречивые — скажи об этом честно. "
         "Не пиши JSON, не пересказывай свои шаги, не показывай команды и не вставляй ссылки."
     )
-<<<<<<< HEAD
     systems = (
         "Ты — NovaMind, ассистент. Отвечай точно и по делу.",
         FINAL_ONLY_SYSTEM,
@@ -1275,23 +1176,6 @@ def _final_retry(history, goal, provider, model):
     text, _err = _ask(strict_history, provider=provider, model=model,
                       temperature=0.2, max_tokens=1200, timeout=60)
     return final_answer_text(text, goal)
-=======
-    system = "Ты — NovaMind, ассистент. Отвечай точно и по делу."
-    messages = [{"role": "system", "content": system},
-                {"role": "user", "content": prompt}]
-    text, meta = chat_completion(
-        messages,
-        provider=provider, model=model, temperature=0.3, max_tokens=1200, timeout=60,
-    )
-    api_usage = meta.get("usage") if isinstance(meta, dict) else None
-    _charge(meter, api_usage, messages, text or "", "")
-    if text is None:
-        text = ""
-    action = parse_action(text)
-    if action:                                   # модель всё равно ответила JSON-ом
-        text = str(action.get("text") or "").strip() if action.get("action") == "answer" else ""
-    return text
->>>>>>> origin/arena/0907c828-novamind
 
 
 def _turn_history(history_key, limit=10):
@@ -1343,11 +1227,13 @@ def _save_turn(chat_id, history_key, goal, answer, extra_messages=None):
                 {"role": "assistant", "content": answer}]
     _AGENT_HISTORY_CACHE[history_key] = updated[-10:]
     # Кеш — только вспомогательный: не даём ему расти без предела.
-    # Сессию здесь не трогаем: функция вызывается из генератора потока,
-    # а после закрытия запроса session поднимает RuntimeError.
     if len(_AGENT_HISTORY_CACHE) > 500:
         for old_key in list(_AGENT_HISTORY_CACHE)[:100]:
             _AGENT_HISTORY_CACHE.pop(old_key, None)
+    try:
+        session["agent_history"] = updated[-10:]
+    except Exception:
+        pass
 
 
 def _fallback_answer(state):
@@ -1395,7 +1281,6 @@ def agent_status():
     })
 
 
-<<<<<<< HEAD
 @agent_bp.route("/api/agent/stop", methods=["POST"])
 def agent_stop():
     """Кнопка «Стоп»: {run_id}. Цикл прервётся после текущего шага."""
@@ -1449,203 +1334,6 @@ def agent_permissions_reset():
     """Сбрасывает все правила «разрешить всегда»."""
     forget_always_allowed()
     return jsonify({"ok": True, "rules": []})
-=======
-def _ru_tools(count):
-    n = abs(int(count))
-    n10, n100 = n % 10, n % 100
-    if n10 == 1 and n100 != 11:
-        word = "инструмент"
-    elif 2 <= n10 <= 4 and not (12 <= n100 <= 14):
-        word = "инструмента"
-    else:
-        word = "инструментов"
-    return f"{n} {word}"
-
-
-def mcp_catalog_line(tools):
-    """Одна строка каталога: сервер и число инструментов, без схем."""
-    counts = {}
-    order = []
-    for tool in tools or []:
-        sid = str(tool.get("server_id") or "?").strip() or "?"
-        if sid not in counts:
-            order.append(sid)
-            counts[sid] = 0
-        counts[sid] += 1
-    if not order:
-        return ("MCP: нет подключённых серверов. "
-                "Чтобы узнать нужный инструмент, вызови action=tool_search.")
-    parts = ", ".join(f"{sid}({_ru_tools(counts[sid])})" for sid in order)
-    return f"MCP: {parts}. Чтобы узнать нужный инструмент, вызови action=tool_search."
-
-
-def _param_summary(schema):
-    schema = schema if isinstance(schema, dict) else {}
-    props = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
-    required = {str(name) for name in (schema.get("required") or [])}
-    params = []
-    for name, spec in props.items():
-        spec = spec if isinstance(spec, dict) else {}
-        params.append({
-            "name": str(name),
-            "type": spec.get("type") or "any",
-            "required": str(name) in required,
-        })
-    return params
-
-
-def search_mcp_tools(query, server_id="", limit=5):
-    """Топ-5 MCP-инструментов по словам в name и description. Без inputSchema."""
-    import mcp_registry
-    tools = list(mcp_registry.connected_tools() or [])
-    wanted = str(server_id or "").strip()
-    if wanted:
-        tools = [tool for tool in tools if str(tool.get("server_id") or "") == wanted]
-    words = [word for word in re.split(r"[^\w]+", str(query or "").lower(), flags=re.U) if len(word) >= 2]
-    scored = []
-    for tool in tools:
-        name = str(tool.get("name") or "")
-        description = str(tool.get("description") or "")
-        hay = f"{name} {description}".lower()
-        score = 0
-        for word in words:
-            if word in name.lower():
-                score += 3
-            elif word in hay:
-                score += 1
-        if score > 0:
-            scored.append((score, name.lower(), tool))
-    scored.sort(key=lambda item: (-item[0], item[1]))
-    found = []
-    for _, _, tool in scored[:5]:
-        found.append({
-            "server_id": tool.get("server_id"),
-            "name": tool.get("name"),
-            "description": str(tool.get("description") or "")[:150],
-            "parameters": _param_summary(tool.get("inputSchema")),
-        })
-    return found
-
-
-def _fast_messages(prior, goal):
-    """Последние 5 реплик без большого system, каждая не длиннее 1500 символов."""
-    dialogue = []
-    for item in prior or []:
-        if isinstance(item, dict) and item.get("role") in ("user", "assistant"):
-            content = str(item.get("content") or "").strip()
-            if content:
-                dialogue.append({"role": item["role"], "content": content[:4000]})
-    dialogue.append({"role": "user", "content": str(goal or "")})
-    messages = [{"role": "system", "content": "Ты NovaMind. Отвечай кратко по-русски."}]
-    for item in dialogue[-5:]:
-        messages.append({"role": item["role"], "content": str(item.get("content") or "")[:1500]})
-    return messages
-
-
-def _shrink_old_observations(history, limit=400):
-    """Прошлые наблюдения сжимаются, полный текст остаётся только у последнего шага."""
-    indexes = []
-    for index, message in enumerate(history or []):
-        if not isinstance(message, dict) or message.get("role") != "user":
-            continue
-        content = str(message.get("content") or "")
-        if content.startswith(("Результат действия:", "Результаты поиска", "VERIFY:")):
-            indexes.append(index)
-    for index in indexes[:-1]:
-        text = str(history[index].get("content") or "").strip()
-        if len(text) > limit:
-            history[index]["content"] = text[:limit] + "…"
-
-
-def _level1_system(use_tools, strict_mcp, want_search, goal):
-    """Компактный system уровня 1. Схемы MCP и полные SKILL.md сюда не входят."""
-    bootstrap_default_tools()
-    if use_tools:
-        try:
-            ensure_workspace()
-        except Exception:
-            log.warning("Не удалось подготовить песочницу", exc_info=True)
-    system = agent_system_prompt(use_tools=use_tools, strict_mcp=strict_mcp)
-    tools = []
-    try:
-        import mcp_registry
-        tools = mcp_registry.connected_tools()
-    except Exception:
-        tools = []
-    system += "\n\n" + mcp_catalog_line(tools)
-    if strict_mcp:
-        system += (
-            "\n\nSTRICT MCP MODE: Пользователь запретил обычный поиск. "
-            "Сначала action=tool_search, затем action=mcp_call с точным server_id и tool. "
-            "Если инструмент недоступен, ответь action=answer с MCP_UNAVAILABLE и причиной."
-        )
-    try:
-        import skills_registry
-        catalog = skills_registry.prompt_context()
-        if catalog:
-            system += (
-                "\n\nНавыки (имя: описание в одну строку). "
-                "Полный текст читай через action=skill_read, только если запрос подходит:\n"
-                + catalog
-            )
-    except Exception:
-        pass
-    if requested_skill_creation(goal):
-        system += (
-            "\n\nПользователь просит создать skill. Не отвечай только описанием. "
-            "Сначала подготовь валидный полный SKILL.md и вызови action=skill_create с name и content, "
-            "затем сообщи о сохранении."
-        )
-    if want_search and not strict_mcp:
-        system += (
-            "\n\nСначала MCP-поиск (Exa через tool_search и mcp_call), "
-            "встроенный search — только если MCP-поиск пуст или с ошибкой."
-        )
-    return system
-
-
-def save_trace(chat_id, goal, events, tokens=None):
-    """Трасса шагов. Не читает session и request — безопасна после закрытия запроса."""
-    try:
-        import database
-        database.save_agent_trace(chat_id, goal, events, tokens)
-    except Exception:
-        log.warning("Не удалось сохранить трассу агента", exc_info=True)
-
-
-def _commit_usage(chat_id, turn_key, meter):
-    tokens = meter.as_dict() if meter is not None else {"prompt": 0, "completion": 0, "total": 0}
-    try:
-        import database
-        database.record_turn_usage(
-            chat_id, turn_key, tokens["prompt"], tokens["completion"], tokens["total"],
-        )
-    except Exception:
-        log.warning("Не удалось записать usage хода", exc_info=True)
-    return tokens
-
-
-def _traced(chat_id, goal, meter, turn_key, source):
-    """Сохраняет трассу и usage один раз, не трогая Flask session."""
-    raw_lines = []
-    try:
-        for line in source:
-            raw_lines.append(line)
-            yield line
-    finally:
-        parsed = []
-        for line in raw_lines:
-            try:
-                parsed.append(json.loads(line))
-            except (TypeError, ValueError):
-                continue
-        tokens = meter.as_dict() if meter is not None else None
-        save_trace(chat_id, goal, parsed, tokens)
-        _commit_usage(chat_id, turn_key, meter)
-
-
-_STRICT_KINDS = ("mcp_call", "tool_search", "answer", "plan")
->>>>>>> origin/arena/0907c828-novamind
 
 
 @agent_bp.route("/api/agent/stream", methods=["POST"])
@@ -1658,7 +1346,6 @@ def agent_stream():
     if not is_enabled():
         return jsonify({"error": "Агентный режим выключен (AGENT_ENABLED=1)"}), 403
 
-<<<<<<< HEAD
     # Агент доступен всем: поиск, чтение страниц, медиа, skills и задачи не
     # требуют входа. Только инструменты рабочей папки (run/read/write/ls/git)
     # остаются для вошедших пользователей — это защищает сервер, а не
@@ -1684,40 +1371,44 @@ def agent_stream():
         response.headers["Retry-After"] = str(retry_after)
         return response, 429
 
-=======
-    # Всё из request/session читается до генератора и передаётся переменными.
-    # Внутри потока к session и request обращаться нельзя: после закрытия
-    # запроса это RuntimeError «Working outside of request context».
->>>>>>> origin/arena/0907c828-novamind
     provider, model, _ = resolve_target()
     use_tools = tools_enabled()
     strict_mcp = strict_mcp_request(goal)
-    want_search = bool(data.get("search"))
+    try:
+        import mcp_registry
+        mcp_available = bool(mcp_registry.connected_tools())
+    except Exception:
+        mcp_available = False
+    # Ключ памяти — на сессию, а не на cookie: раньше у всех анонимных
+    # посетителей был ключ "anonymous", и кеш истории протекал между
+    # пользователями (а в тестах — между тестами).
     history_key = session.get("agent_memory_key")
     if not history_key:
         import secrets
         history_key = secrets.token_hex(12)
         session["agent_memory_key"] = history_key
     chat_id, prior = _turn_history(history_key)
-    meter = UsageMeter()
-    turn_key = f"{chat_id or history_key}:{time.time_ns()}"
-    level0 = is_simple_chat_request(goal) and not strict_mcp and (not want_search or is_smalltalk(goal))
+    # Реестр инструментов — единый источник правды: он же формирует список
+    # AVAILABLE TOOL REGISTRY в промпте. Песочница создаётся только когда
+    # она действительно доступна.
+    bootstrap_default_tools()
+    if use_tools:
+        ensure_workspace()
+    available_schemas = tool_schemas(workspace=use_tools)
+    if strict_mcp:
+        # В этом запросе модель физически не получает web/shell/file schemas.
+        available_schemas = [item for item in available_schemas if item.get("name") == "mcp_call"]
 
-<<<<<<< HEAD
     run_id, cancel_run = register_run()
 
     @stream_with_context
     def generate():
-=======
-    def _run():
->>>>>>> origin/arena/0907c828-novamind
         started = time.time()
         forced_media_kind = requested_media_kind(goal)
         state = {"task_id": None, "steps": 0, "answer": "", "sources": [], "notes": [],
-                 "research": 0, "searched": False, "tool_steps": 0,
+                 "research": 0, "searched": bool(data.get("search")), "tool_steps": 0,
                  "media_context": [], "media": [], "media_markers": [],
                  "workspace_used": False, "tools_used": [], "media_tried": False,
-<<<<<<< HEAD
                  "media_error": "", "stopped": False, "approved": set(), "run_id": run_id,
                  "plan": [], "plan_done": 0, "verify_requests": 0, "verified": False,
                  "verify_pending": False, "memory_key": ""}
@@ -1815,19 +1506,15 @@ def agent_stream():
             fast_history.extend(history[-5:])
             fast_answer, fast_error = _ask(
                 fast_history, provider=provider, model=model,
-=======
-                 "media_error": "", "search_ok": {}}
-        pending_raw = None
-
-        if level0:
-            fast_answer, _fast_error = _ask(
-                _fast_messages(prior, goal), meter=meter, provider=provider, model=model,
->>>>>>> origin/arena/0907c828-novamind
                 temperature=0.3, max_tokens=700, timeout=30)
             parsed_fast = parse_action(fast_answer) if fast_answer else None
             if parsed_fast and parsed_fast.get("action") == "answer":
                 fast_answer = str(parsed_fast.get("text") or "").strip()
                 parsed_fast = None
+            # Быстрый ответ годится только если это действительно финальный
+            # текст. Если модель вернула действие, план или обрезанный JSON,
+            # уходим в полный агентный цикл: иначе инструмент молча терялся,
+            # а пользователь получал в чат сырой JSON.
             wants_tool = bool(parsed_fast) or looks_like_action(fast_answer or "") \
                 or bool(re.match(r"^План\s*:", str(fast_answer or ""), re.I))
             if not wants_tool and str(fast_answer or "").strip():
@@ -1843,13 +1530,9 @@ def agent_stream():
                                    or salvage_quoted_answer(fast_raw, goal))
             if (not wants_tool and str(fast_answer or "").strip()
                     and not (forced_media_kind and provider == "local_demo")):
-<<<<<<< HEAD
                 # Исключение: офлайн-контур не должен «заговорить» просьбу
                 # нарисовать/озвучить — её выполняет цикл действий ниже.
                 state["answer"] = final_answer_text(fast_answer, goal)
-=======
-                state["answer"] = str(fast_answer).strip()
->>>>>>> origin/arena/0907c828-novamind
                 _save_turn(chat_id, history_key, goal, state["answer"])
                 usage = usage_stats.record_turn(
                     chat_id, provider, model, prompt_text=_history_text(fast_history),
@@ -1862,19 +1545,15 @@ def agent_stream():
                                "sources": [], "searched": False, "media": [],
                                "linux": False, "tools": [], "usage": usage,
                                "offline": provider == "local_demo", "fast": True,
-<<<<<<< HEAD
                                "chat_id": chat_id, "run_id": run_id})
-=======
-                               "tokens": meter.as_dict(),
-                               "chat_id": chat_id})
->>>>>>> origin/arena/0907c828-novamind
                 yield _ndjson({"type": "done"})
                 finish_run(run_id)
                 return
+            # Модель захотела инструмент или прислала план — не выбрасываем
+            # этот ответ и не тратим второй запрос: отдаём его циклу как первый шаг.
             if wants_tool and str(fast_answer or "").strip():
                 pending_raw = str(fast_answer).strip()
 
-<<<<<<< HEAD
         # Нативный tool calling: модели отдаём настоящие функции, а не
         # инструкцию «ответь JSON-ом». Если провайдер их не принимает,
         # на лету откатываемся на старый JSON-протокол (см. _request_step).
@@ -1896,20 +1575,8 @@ def agent_stream():
             )
         else:
             native_tools = []
-=======
-        # Уровень 1: каталог MCP и навыки — только если простой ответ не подошёл.
-        system_content = _level1_system(use_tools, strict_mcp, want_search, goal)
-        history = [{"role": "system", "content": system_content}]
-        for item in (prior or [])[-8:]:
-            if isinstance(item, dict) and item.get("role") in ("user", "assistant"):
-                history.append({"role": item["role"], "content": str(item.get("content") or "")[:4000]})
-        history.append({"role": "user", "content": goal})
 
-        if want_search and not strict_mcp and not is_smalltalk(goal) and pending_raw is None:
-            observation = yield from _forced_search(goal, state, use_tools)
-            history.append({"role": "user", "content": observation})
->>>>>>> origin/arena/0907c828-novamind
-
+        # 2. Цикл действий
         seen, duplicates, parse_fails = set(), 0, 0
         outcomes, retries = {}, {}
         limit_reached = False
@@ -1922,19 +1589,22 @@ def agent_stream():
             if time.time() - started > AGENT_TIMEOUT:
                 yield _ndjson({"type": "step", "icon": "⏱", "text": "Время вышло — собираю ответ"})
                 break
-            _shrink_old_observations(history)
+            # Правила агента лежат в history[0]. Дополнительные указания
+            # добавляем К НИМ, а не вместо них: раньше при включённом поиске
+            # system целиком заменялся строкой «ПОИСК ВКЛЮЧЁН», и модель
+            # забывала формат действий и доступные инструменты.
             notes = []
             if strict_mcp:
                 notes.append(
                     "STRICT MCP MODE. Не используй web_search, web_open, shell, run, read или write. "
-                    "Сначала tool_search, затем mcp_call. Если он недоступен, верни action=answer с MCP_UNAVAILABLE."
+                    "Выполни только mcp_call; если он недоступен, верни action=answer с MCP_UNAVAILABLE."
                 )
             elif not use_tools:
                 notes.append(
                     "Linux-окружение сейчас выключено (TERMINAL_ENABLED=0): файлы и терминал "
                     "недоступны. Поиск, чтение страниц и медиа работают."
                 )
-            if want_search and not strict_mcp:
+            if data.get("search") and not strict_mcp:
                 notes.append("ПОИСК ВКЛЮЧЁН. Используй найденные данные и указывай источники [1], [2], [3].")
             plan_note = plan_status_text(state)
             if plan_note:
@@ -1954,7 +1624,6 @@ def agent_stream():
                 pending_raw = None
                 action = None
             else:
-<<<<<<< HEAD
                 step_result = _request_step(dialogue, ask_kwargs, native_mode,
                                             native_tools, provider, model, state)
                 if step_result["fallback"]:
@@ -1968,12 +1637,9 @@ def agent_stream():
                 pending_native = step_result["pending"]
                 if native_call is not None and str(raw or "").strip():
                     yield _ndjson({"type": "step", "icon": "🧠", "text": clip(str(raw), 600)})
-=======
-                raw, error = _ask(dialogue, meter=meter, **ask_kwargs)
->>>>>>> origin/arena/0907c828-novamind
             if error:
                 yield _ndjson({"type": "error", "text": error})
-                break
+                break                                   # ответ соберём из найденного
 
             if action is not None and action.get("_arguments_error"):
                 # Битый JSON в аргументах: не выполняем инструмент, просим повторить.
@@ -2003,6 +1669,9 @@ def agent_stream():
                     yield _ndjson({"type": "retract", "count": len(raw)})
             if (forced_media_kind and not state["media"] and not state["media_tried"]
                     and (not action or str(action.get("action")) == "answer")):
+                # Не даём модели превратить явный запрос генерации в текстовый
+                # ответ. Пробуем ровно один раз: повторная попытка после
+                # отказа провайдера только засоряет чат.
                 state["media_tried"] = True
                 action = {"action": forced_media_kind, "prompt": media_prompt(goal)}
                 native_call = None
@@ -2016,6 +1685,7 @@ def agent_stream():
                 continue
             if not action:
                 if looks_like_action(raw):
+                    # JSON обрезался или сломан: один раз просим повторить, потом сдаёмся
                     parse_fails += 1
                     if parse_fails >= 2:
                         break
@@ -2023,7 +1693,7 @@ def agent_stream():
                     history.append({"role": "user", "content":
                                     "Это не разобралось как JSON. Повтори одним корректным JSON-объектом."})
                     continue
-                state["answer"] = raw.strip()
+                state["answer"] = raw.strip()           # обычный текст — это и есть ответ
                 break
 
             kind = str(action.get("action"))
@@ -2070,17 +1740,17 @@ def agent_stream():
                 retries[key] = retries.get(key, 0) + 1
                 yield _ndjson({"type": "step", "icon": "🔁",
                                "text": f"Повторяю неудачное действие ({retries[key]}/2)"})
-                if strict_mcp and kind not in _STRICT_KINDS:
-                    observation = "MCP_ONLY: действие запрещено. Сначала tool_search, затем mcp_call."
+                if strict_mcp and kind not in ("mcp_call", "answer", "plan"):
+                    observation = "MCP_ONLY: действие запрещено. Используй только mcp_call."
                 else:
                     observation = yield from _perform_guarded(action, kind, use_tools, state,
                                                                goal=goal, cancel=cancel_run)
             else:
                 seen.add(key)
-                if strict_mcp and kind not in _STRICT_KINDS:
+                if strict_mcp and kind not in ("mcp_call", "answer", "plan"):
                     observation = (
-                        "MCP_ONLY: действие запрещено. Пользователь разрешил только tool_search и mcp_call. "
-                        "Сначала вызови tool_search и возьми точные server_id и tool из результата."
+                        "MCP_ONLY: действие запрещено. Пользователь разрешил только mcp_call. "
+                        "Используй доступный server_id и tool из AVAILABLE TOOL REGISTRY."
                     )
                     yield _ndjson({"type": "tool", "name": kind, "command": "blocked", "code": 1,
                                    "output": observation})
@@ -2164,33 +1834,34 @@ def agent_stream():
         if limit_reached or (state["tool_steps"] >= MAX_STEPS and not state["answer"]):
             yield _ndjson({"type": "step", "icon": "⏹", "text": "Шаги закончились — готовлю итог"})
 
-<<<<<<< HEAD
         # 3. Нет ответа (лимит шагов, таймаут, повторы, сбой) — собираем его по найденному
         if state.get("stopped"):
             # Останавливаться нужно быстро: без нового запроса к модели.
             partial = _partial_answer(state)
             state["answer"] = ("⏹ Остановлено пользователем." + (f"\n\n{partial}" if partial else ""))
         if not state["answer"] and (use_tools or state["notes"]) and not state.get("stopped"):
-=======
-        if not state["answer"] and (use_tools or state["notes"]):
->>>>>>> origin/arena/0907c828-novamind
             yield _ndjson({"type": "step", "icon": "✍️", "text": "Готовлю ответ по найденному"})
             try:
-                state["answer"] = _synthesize(goal, state, provider, model, meter=meter)
-            except Exception as exc:
+                state["answer"] = _synthesize(goal, state, provider, model)
+            except Exception as exc:  # поток не должен обрываться из-за сборки ответа
                 log.exception("Не удалось собрать итоговый ответ: %s", exc)
                 state["answer"] = ""
         if not state["answer"] and not use_tools:
+            # Linux-инструментов нет — обычный ответ модели
             history.append({"role": "user", "content":
                             "Инструменты рабочей папки отключены (TERMINAL_ENABLED=0 или нет входа). "
                             "Не вызывай run/read/write; ответь пользователю обычным текстом."})
-            text, _err = _ask(history, meter=meter, provider=provider, model=model,
+            text, _err = _ask(history, provider=provider, model=model,
                               temperature=0.3, max_tokens=1200, timeout=60)
             action = parse_action(text)
             state["answer"] = (str(action.get("text") or "").strip() if action else text)
         if not state["answer"]:
             state["answer"] = _fallback_answer(state)
         if provider == "local_demo":
+            # Офлайн-контур: языковой модели нет. Ничего не выдумываем, но
+            # и не отказываемся от работы: если пользователь прямо просит
+            # «найди …», честно идём в поиск настоящим инструментом и
+            # отвечаем найденными источниками.
             try:
                 import local_llm
                 offline_reply = local_llm.looks_offline(state["answer"]) or not state["answer"]
@@ -2207,7 +1878,6 @@ def agent_stream():
             if offline_reply and forced_media_kind and not state["media"]:
                 state["answer"] = _offline_media_answer(forced_media_kind, state.get("media_error", ""))
 
-<<<<<<< HEAD
         # Последний барьер: ни один путь (action=answer, обычный ответ, синтез)
         # не должен вывести рассуждение модели в чат.
         if state["answer"]:
@@ -2222,11 +1892,10 @@ def agent_stream():
             state["answer"] = _fallback_answer(state)
 
         # Источники — отдельным событием; интерфейс держит их свёрнутыми
-=======
->>>>>>> origin/arena/0907c828-novamind
         if state["sources"]:
             yield _ndjson({"type": "sources", "sources": state["sources"]})
 
+        # 4. Финальный ответ печатаем по кускам — интерфейс любит поток
         for chunk in _chunks(state["answer"]):
             yield _ndjson({"type": "token", "token": chunk})
 
@@ -2242,6 +1911,8 @@ def agent_stream():
         historical_answer = state["answer"]
         if state["media_context"]:
             historical_answer += "\n" + "\n".join(state["media_context"])
+        # Маркеры MEDIA_RESULT: по ним интерфейс снова отрисует картинку,
+        # аудио или видео, когда историю загрузят из БД.
         _save_turn(chat_id, history_key, goal, historical_answer,
                    extra_messages=state["media_markers"])
         usage = usage_stats.record_turn(
@@ -2253,10 +1924,11 @@ def agent_stream():
                        "task_id": state["task_id"], "model": model, "provider": provider,
                        "sources": state["sources"], "searched": state["searched"],
                        "media": state["media"],
+                       # linux = агент реально работал в рабочей папке, а не
+                       # «окружение включено». Иначе картинка помечалась «Linux».
                        "linux": bool(state["workspace_used"]),
                        "tools": state["tools_used"],
                        "offline": provider == "local_demo", "chat_id": chat_id,
-<<<<<<< HEAD
                        "run_id": run_id, "stopped": bool(state.get("stopped")),
                        "status": "stopped" if state.get("stopped") else "ok"})
         yield _ndjson({"type": "done"})
@@ -2287,17 +1959,6 @@ def agent_stream():
                              "X-Agent-Run-Id": run_id,
                              "X-RateLimit-Limit": str(limit),
                              "X-RateLimit-Remaining": str(remaining)})
-=======
-                       "tokens": meter.as_dict()})
-        yield _ndjson({"type": "done"})
-
-    @stream_with_context
-    def generate():
-        yield from _traced(chat_id, goal, meter, turn_key, _run())
-
-    return Response(generate(), mimetype="application/x-ndjson",
-                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
->>>>>>> origin/arena/0907c828-novamind
 
 
 def _ndjson(payload):
@@ -2363,76 +2024,12 @@ def _chunks(text, size=48):
 def _action_key(action, kind):
     """Ключ действия для поиска повторов."""
     value = (action.get("command") or action.get("query") or action.get("url")
-             or action.get("path") or action.get("name") or "")
+             or action.get("path") or "")
     if kind == "mcp_call":
         value = f"{action.get('server_id', '')}:{action.get('tool', '')}:{json.dumps(action.get('arguments') or {}, sort_keys=True, ensure_ascii=False)}"
-    if kind == "tool_search":
-        value = f"{action.get('server_id', '')}:{action.get('query', '')}"
-    if kind == "skill_read":
-        value = action.get("name") or action.get("skill") or ""
     if kind == "write":
         value = f"{value}|{str(action.get('content') or '')[:200]}"
     return (kind, " ".join(str(value).lower().split()))
-
-
-def _search_key(query):
-    return " ".join(str(query or "").lower().split())
-
-
-def _remember_search(state, query, summary):
-    key = _search_key(query)
-    if key and summary:
-        state.setdefault("search_ok", {})[key] = summary
-
-
-def _cached_search(state, query):
-    return (state.get("search_ok") or {}).get(_search_key(query))
-
-
-def _mcp_payload_useful(result):
-    if not result or (isinstance(result, dict) and (result.get("error") or result.get("isError"))):
-        return False
-    text = result if isinstance(result, str) else json.dumps(result, ensure_ascii=False)
-    text = text.strip()
-    return bool(text) and text.lower() not in {"null", "{}", "[]", "none"}
-
-
-def _exa_search(query, state, limit=3):
-    """MCP-поиск (Exa). None — надо идти во встроенный web_search."""
-    cached = _cached_search(state, query)
-    if cached:
-        yield _ndjson({"type": "step", "icon": "🔎", "text": "Поиск уже выполнен — повторять не нужно"})
-        return cached
-    tool = _find_exa_search_tool()
-    if not tool:
-        return None
-    import mcp_registry
-    server_id = str(tool.get("server_id") or "")
-    tool_name = str(tool.get("name") or "")
-    try:
-        result = mcp_registry.call_tool(server_id, tool_name, _exa_arguments(tool, query, limit=limit))
-    except Exception as exc:
-        yield _ndjson({"type": "tool", "name": "mcp_call",
-                       "command": f"{server_id}:{tool_name}", "code": 1,
-                       "output": f"Exa MCP error: {exc}"})
-        return None
-    if not _mcp_payload_useful(result):
-        yield _ndjson({"type": "step", "icon": "⚠️", "text": "MCP-поиск пуст, пробую встроенный поиск"})
-        return None
-    text = json.dumps(result, ensure_ascii=False, indent=2)
-    state["searched"] = True
-    state["research"] = int(state.get("research") or 0) + 1
-    _note(state, f"MCP Exa {tool_name}", text)
-    try:
-        from routes.search import _exa_mcp_results, _normalize_and_rank
-        _add_sources(state, _normalize_and_rank(_exa_mcp_results(result), query, limit=8))
-    except Exception:
-        pass
-    yield _ndjson({"type": "tool", "name": "mcp_call",
-                   "command": f"{server_id}:{tool_name}", "code": 0,
-                   "output": clip(text, 1800)})
-    _remember_search(state, query, text)
-    return text
 
 
 def _retryable_observation(observation):
@@ -2503,15 +2100,8 @@ def _forced_search(goal, state, use_tools, cancel=None):
     """
     yield _ndjson({"type": "stage", "scene": "search", "title": "Поиск в интернете",
                    "text": "Ищу источники по запросу…"})
-<<<<<<< HEAD
     if cancel is not None and cancel.is_set():
         return "Остановлено пользователем: поиск не выполнялся."
-=======
-    exa_text = yield from _exa_search(goal, state, limit=3)
-    if exa_text:
-        state["searched"] = True
-        return exa_text
->>>>>>> origin/arena/0907c828-novamind
     results, meta = nova_search(goal, limit=3)
     results = results or []
     state["searched"] = True
@@ -2539,10 +2129,9 @@ def _forced_search(goal, state, use_tools, cancel=None):
         url = str(item.get("url") or "")
         if not url.startswith(("http://", "https://")):
             continue
-        text, elapsed = nova_read(url, max_chars=3000)
+        text, elapsed = nova_read(url)
         if not text:
             continue
-        text = str(text)[:3000]
         pages.append(f"--- {url} ---\n{text}")
         _note(state, f"страница {url}", text)
         yield _ndjson({"type": "tool", "name": "open", "command": url, "code": 0,
@@ -2557,10 +2146,8 @@ def _forced_search(goal, state, use_tools, cancel=None):
         except Exception as exc:
             log.warning("Не удалось сохранить результаты поиска: %s", exc)
 
-    observation = ("Результаты поиска (доверяй им больше, чем памяти модели):\n\n" + lines
-                   + ("\n\nПрочитанные страницы:\n\n" + "\n\n".join(pages) if pages else ""))
-    _remember_search(state, goal, observation)
-    return observation
+    return ("Результаты поиска (доверяй им больше, чем памяти модели):\n\n" + lines
+            + ("\n\nПрочитанные страницы:\n\n" + "\n\n".join(pages) if pages else ""))
 
 
 _OFFLINE_SEARCH_RE = re.compile(
@@ -2679,33 +2266,8 @@ def _perform(action, kind, use_tools, state, goal="", cancel=None):
     """
     import database
 
-<<<<<<< HEAD
     if cancel is not None and cancel.is_set():
         return "Остановлено пользователем: действие не выполнялось."
-=======
-    if kind == "tool_search":
-        query = str(action.get("query") or goal or "").strip()
-        found = search_mcp_tools(query, action.get("server_id") or "", limit=5)
-        text = json.dumps(found, ensure_ascii=False)
-        yield _ndjson({"type": "tool", "name": "tool_search", "command": query or "*",
-                       "code": 0, "output": clip(text, 1500)})
-        if not found:
-            return ("tool_search: подходящих MCP-инструментов не найдено. "
-                    "Уточни запрос или используй встроенный search.")
-        return text
-
-    if kind == "skill_read":
-        import skills_registry
-        name = str(action.get("name") or action.get("skill") or "").strip()
-        try:
-            item = skills_registry.get_skill(name)
-        except Exception as exc:
-            return f"Skill не прочитан: {exc}"
-        text = str(item.get("content") or "")
-        yield _ndjson({"type": "tool", "name": "skill_read", "command": name, "code": 0,
-                       "output": clip(text, 800)})
-        return text
->>>>>>> origin/arena/0907c828-novamind
 
     if kind == "skill_create":
         import skills_registry
@@ -2883,9 +2445,33 @@ def _perform(action, kind, use_tools, state, goal="", cancel=None):
         query = str(action.get("query") or "").strip()
         if not query:
             return 'Пустой поисковый запрос. Повтори с {"action":"search","query":"..."}.'
-        exa_text = yield from _exa_search(query, state, limit=3)
-        if exa_text:
-            return exa_text
+        exa_tool = _find_exa_search_tool()
+        if exa_tool:
+            import mcp_registry
+            server_id = str(exa_tool.get("server_id") or "")
+            tool_name = str(exa_tool.get("name") or "")
+            try:
+                result = mcp_registry.call_tool(
+                    server_id, tool_name, _exa_arguments(exa_tool, query, limit=3))
+                text = json.dumps(result, ensure_ascii=False, indent=2)
+                state["research"] += 1
+                _note(state, f"MCP Exa {tool_name}", text)
+                try:
+                    from routes.search import _exa_mcp_results, _normalize_and_rank
+                    _add_sources(state, _normalize_and_rank(_exa_mcp_results(result), query, limit=8))
+                except Exception:
+                    pass
+                yield _ndjson({"type": "tool", "name": "mcp_call",
+                               "command": f"{server_id}:{tool_name}", "code": 0,
+                               "output": clip(text, 1800)})
+                if result and not (isinstance(result, dict) and result.get("error")):
+                    return text
+                return "Exa MCP вернул пустой или ошибочный результат."
+            except Exception as exc:
+                yield _ndjson({"type": "tool", "name": "mcp_call",
+                               "command": f"{server_id}:{tool_name}", "code": 1,
+                               "output": f"Exa MCP error: {exc}"})
+                # Ниже будет обычный поиск только как fallback после сбоя Exa.
         state["research"] += 1
         # Use the same function as the terminal/UI search. This keeps one
         # internet-search implementation (httpx + BeautifulSoup4) and makes source
@@ -2919,8 +2505,6 @@ def _perform(action, kind, use_tools, state, goal="", cancel=None):
             import database as _db
             _db.append_task_step(state["task_id"], f"Поиск: {query}", status="done",
                                  log=text[:1200])
-        if results:
-            _remember_search(state, query, text)
         return text
 
     if kind == "open":

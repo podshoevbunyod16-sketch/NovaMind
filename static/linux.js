@@ -168,11 +168,7 @@
         offline: result.offline,
         searched: result.searched,
         steps: result.steps,
-<<<<<<< HEAD
         stopped: !!result.stopped,
-=======
-        tokens: result.tokens || null,
->>>>>>> origin/arena/0907c828-novamind
         linux: coding ? false : (result.linux === undefined ? (result.steps > 0 || result.searched) : !!result.linux),
       });
     } catch (error) {

@@ -71,7 +71,6 @@ def tool_schemas(workspace: bool | None = None) -> list[dict]:
         import mcp_registry
         connected = mcp_registry.connected_tools()
         if connected:
-<<<<<<< HEAD
             available = ", ".join(f"{x['server_id']}:{x['name']}" for x in connected)
             # Если mcp_call уже зарегистрирован, не дублируем его, а дополняем
             # каталогом реально подключённых инструментов.
@@ -85,19 +84,6 @@ def tool_schemas(workspace: bool | None = None) -> list[dict]:
             entry = existing or {
                 "name": "mcp_call",
                 "description": "Вызвать инструмент подключённого MCP-сервера.",
-=======
-            counts: dict[str, int] = {}
-            for item in connected:
-                sid = str(item.get("server_id") or "?")
-                counts[sid] = counts.get(sid, 0) + 1
-            summary = ", ".join(f"{sid}({count})" for sid, count in counts.items())
-            schemas.append({
-                "name": "mcp_call",
-                "description": (
-                    "Вызвать MCP-инструмент после action=tool_search. "
-                    "Полные схемы в промпт не кладутся. " + summary
-                ),
->>>>>>> origin/arena/0907c828-novamind
                 "schema": {
                     "type": "object",
                     "properties": {

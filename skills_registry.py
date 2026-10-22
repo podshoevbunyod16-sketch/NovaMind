@@ -139,22 +139,19 @@ def delete_skill(skill_id: str) -> None:
         shutil.rmtree(target)
 
 
-def prompt_context(max_chars: int = 800) -> str:
-    """Короткий каталог «имя: описание». Полный SKILL.md читается отдельно."""
-    lines = []
-    used = 0
-    limit = max(0, int(max_chars))
+def prompt_context(max_chars: int = 18_000) -> str:
+    blocks = []
+    remaining = max_chars
     for item in list_skills():
         if item.get("invalid"):
             continue
-        name = str(item.get("id") or item.get("name") or "").strip()
-        description = " ".join(str(item.get("description") or "").split())
-        line = f"{name}: {description}" if description else name
-        if len(line) > 180:
-            line = line[:177] + "…"
-        extra = len(line) + (1 if lines else 0)
-        if used + extra > limit:
+        try:
+            skill = get_skill(item["id"])
+        except Exception:
+            continue
+        block = f"\n## Skill: {skill['name']} ({skill['id']})\n{skill['description']}\n{skill['content']}\n"
+        if len(block) > remaining:
             break
-        lines.append(line)
-        used += extra
-    return "\n".join(lines)
+        blocks.append(block)
+        remaining -= len(block)
+    return "\n".join(blocks)

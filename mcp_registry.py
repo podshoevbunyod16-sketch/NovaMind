@@ -9,7 +9,6 @@ import json
 import os
 import secrets
 import stat
-import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -20,9 +19,6 @@ import requests
 ROOT = Path(__file__).resolve().parent
 STORE = Path(os.getenv("MCP_CONNECTIONS_FILE", ROOT / "mcp_connections.json"))
 TIMEOUT = float(os.getenv("MCP_TIMEOUT", "12"))
-TOOLS_CACHE_TTL = 300.0
-_TOOLS_CACHE: dict[str, Any] = {"at": 0.0, "tools": None}
-_TOOLS_LOCK = threading.Lock()
 
 CATALOG = [
     {"id": "custom", "name": "Свой MCP-сервер", "description": "Любой Streamable HTTP MCP endpoint", "auth": ["api_key", "bearer", "basic", "oauth", "none"]},
@@ -76,7 +72,6 @@ def save_connection(payload: dict[str, Any]) -> dict[str, Any]:
             item[key] = old[key]
     data[server_id] = item
     _write(data)
-    invalidate_tools_cache()
     return server_id
 
 
@@ -84,7 +79,6 @@ def remove_connection(server_id: str) -> None:
     data = _read()
     data.pop(server_id, None)
     _write(data)
-    invalidate_tools_cache()
 
 
 def _headers(item: dict[str, Any]) -> dict[str, str]:
@@ -194,15 +188,8 @@ def list_tools(server_id: str) -> list[dict[str, Any]]:
     return [tool for tool in tools if isinstance(tool, dict) and tool.get("name")]
 
 
-def invalidate_tools_cache() -> None:
-    """Сбрасывает кеш инструментов. Зовут save/remove и force=True."""
-    with _TOOLS_LOCK:
-        _TOOLS_CACHE["at"] = 0.0
-        _TOOLS_CACHE["tools"] = None
-
-
-def _load_connected_tools() -> list[dict[str, Any]]:
-    """Сетевой опрос tools/list по всем подключённым серверам."""
+def connected_tools() -> list[dict[str, Any]]:
+    """Собирает инструменты всех подключённых MCP-серверов."""
     result = []
     for server_id, item in _read().items():
         if not item.get("connected"):
@@ -219,24 +206,6 @@ def _load_connected_tools() -> list[dict[str, Any]]:
         except Exception as exc:
             item["last_error"] = f"{exc.__class__.__name__}: {exc}"
     return result
-
-
-def connected_tools(force: bool = False) -> list[dict[str, Any]]:
-    """Инструменты MCP. Сетевой опрос не чаще раза в 5 минут."""
-    now = time.time()
-    with _TOOLS_LOCK:
-        cached = _TOOLS_CACHE.get("tools")
-        fresh = (
-            not force
-            and isinstance(cached, list)
-            and (now - float(_TOOLS_CACHE.get("at") or 0.0)) < TOOLS_CACHE_TTL
-        )
-        if fresh:
-            return [dict(item) for item in cached]
-        result = _load_connected_tools()
-        _TOOLS_CACHE["tools"] = result
-        _TOOLS_CACHE["at"] = now
-        return [dict(item) for item in result]
 
 
 def call_tool(server_id: str, tool_name: str, arguments: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -266,7 +235,6 @@ def test_connection(server_id: str) -> dict[str, Any]:
             data[server_id]["protocol_version"] = body.get("protocolVersion", "2025-06-18")
         data[server_id]["updated_at"] = int(time.time())
         _write(data)
-        invalidate_tools_cache()
         # MCP requires this notification after a successful initialize.
         try:
             request(server_id, "notifications/initialized", {})
@@ -279,5 +247,4 @@ def test_connection(server_id: str) -> dict[str, Any]:
         data[server_id]["last_error"] = f"{exc.__class__.__name__}: {exc}"
         data[server_id]["updated_at"] = int(time.time())
         _write(data)
-        invalidate_tools_cache()
         return {"connected": False, "error": data[server_id]["last_error"]}
