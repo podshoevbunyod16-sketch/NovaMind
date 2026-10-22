@@ -150,7 +150,15 @@ def gemini_request(model,payload,timeout=90,max_retries=2):
                 for part in (candidate.get("content") or {}).get("parts",[]):
                     if part.get("text"): parts.append(part["text"])
             if not parts: return None,"Google AI Studio не вернул текст"
-            return {"choices":[{"message":{"role":"assistant","content":"".join(parts)}}]},None
+            result = {"choices":[{"message":{"role":"assistant","content":"".join(parts)}}]}
+            usage = extract_usage(data)
+            if usage:
+                result["usage"] = {
+                    "prompt_tokens": usage["prompt"],
+                    "completion_tokens": usage["completion"],
+                    "total_tokens": usage["total"],
+                }
+            return result, None
         except requests.exceptions.Timeout:
             if attempt<max_retries-1: continue
             return None,"Google AI Studio: таймаут"
@@ -318,6 +326,67 @@ def supports_reasoning(model: str) -> bool:
     return any(hint in model_id for hint in REASONING_MODELS_HINT)
 
 
+def extract_usage(payload):
+    """Нормализует usage ответа API в {prompt, completion, total}.
+
+    Единственный источник правды — поля провайдера. Нулевый или пустой
+    блок считается отсутствующим: вызывающий код тогда оценивает длину.
+    Не складывать prompt+completion с total — total уже их сумма, иначе
+    счётчик в шапке показывает ровно x2.
+    """
+    if not isinstance(payload, dict):
+        return None
+    usage = payload.get("usage") if isinstance(payload.get("usage"), dict) else None
+    if usage is None and any(key in payload for key in ("prompt_tokens", "completion_tokens", "total_tokens")):
+        usage = payload
+    if isinstance(usage, dict):
+        prompt = usage.get("prompt_tokens", usage.get("prompt"))
+        completion = usage.get("completion_tokens", usage.get("completion"))
+        total = usage.get("total_tokens", usage.get("total"))
+        if any(value is not None for value in (prompt, completion, total)):
+            return _normalize_usage(prompt, completion, total)
+    meta = payload.get("usageMetadata") or payload.get("usage_metadata")
+    if isinstance(meta, dict):
+        prompt = meta.get("promptTokenCount", meta.get("prompt_token_count"))
+        completion = meta.get("candidatesTokenCount", meta.get("candidates_token_count"))
+        total = meta.get("totalTokenCount", meta.get("total_token_count"))
+        if any(value is not None for value in (prompt, completion, total)):
+            return _normalize_usage(prompt, completion, total)
+    return None
+
+
+def _normalize_usage(prompt, completion, total):
+    def _num(value):
+        try:
+            return max(0, int(value))
+        except (TypeError, ValueError):
+            return 0
+    prompt_n = _num(prompt)
+    completion_n = _num(completion)
+    if total is None:
+        total_n = prompt_n + completion_n
+    else:
+        total_n = _num(total)
+    if prompt_n == 0 and completion_n == 0 and total_n == 0:
+        return None
+    return {"prompt": prompt_n, "completion": completion_n, "total": total_n}
+
+
+def estimate_usage(messages, completion_text="", system=""):
+    """Грубая оценка len/3 — только если API не вернул usage."""
+    parts = []
+    if system:
+        parts.append(str(system))
+    for message in messages or []:
+        if isinstance(message, dict):
+            parts.append(str(message.get("content") or ""))
+        else:
+            parts.append(str(message or ""))
+    prompt = len("\n".join(parts)) // 3
+    completion = len(str(completion_text or "")) // 3
+    return {"prompt": prompt, "completion": completion, "total": prompt + completion}
+
+
 def resolve_target(provider: str = None, model: str = None):
     """(provider, model, provider_cfg) — с откатом на рабочий провайдер."""
     import config
@@ -383,7 +452,11 @@ def chat_completion(messages, provider=None, model=None, system=None,
     if not text.strip():
         logger.warning("Пустые content и reasoning (provider=%s, model=%s)", provider, model)
         return None, "Провайдер вернул пустой ответ (content и reasoning отсутствуют)"
-    return text, {"provider": provider, "model": model, "offline": False}
+    meta = {"provider": provider, "model": model, "offline": False}
+    usage = extract_usage(data)
+    if usage:
+        meta["usage"] = usage
+    return text, meta
 
 
 def chat_stream(messages, provider=None, model=None, system=None, temperature=0.7,
@@ -416,6 +489,10 @@ def chat_stream(messages, provider=None, model=None, system=None, temperature=0.
         "max_tokens": int(max_tokens or cfg.get("max_tokens", 8192)),
         "stream": True,
     }
+    # Groq отдаёт usage в последнем чанке только если его явно попросить.
+    # Локальный llama-server неизвестное поле может отвергнуть — не шлём его туда.
+    if provider == "groq":
+        payload["stream_options"] = {"include_usage": True}
     # Groq: параметры рассуждений по документации — reasoning_effort (строка)
     # и reasoning_format. Раньше уходило поле "reasoning": {"effort": ...} в
     # стиле OpenRouter: Groq мог ответить 400, и пользователь получал
@@ -517,6 +594,9 @@ def _raw_stream(provider, model, payload, cfg, timeout):
                     chunk = json.loads(line)
                 except (TypeError, ValueError):
                     continue
+                usage = extract_usage(chunk)
+                if usage:
+                    yield "usage", usage
                 for candidate in chunk.get("candidates", []):
                     for part in (candidate.get("content") or {}).get("parts", []):
                         if part.get("thought"):
@@ -595,6 +675,9 @@ def _raw_stream(provider, model, payload, cfg, timeout):
                     chunk = json.loads(line)
                 except (TypeError, ValueError):
                     continue
+                usage = extract_usage(chunk)
+                if usage:
+                    yield "usage", usage
                 choice = (chunk.get("choices") or [{}])[0]
                 delta = choice.get("delta") or {}
                 thought = delta.get("reasoning") or delta.get("reasoning_content") or ""

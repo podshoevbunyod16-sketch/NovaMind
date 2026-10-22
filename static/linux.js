@@ -160,6 +160,7 @@
         offline: result.offline,
         searched: result.searched,
         steps: result.steps,
+        tokens: result.tokens || null,
         linux: coding ? false : (result.linux === undefined ? (result.steps > 0 || result.searched) : !!result.linux),
       });
     } catch (error) {

@@ -64,16 +64,17 @@ def tool_schemas(workspace: bool | None = None) -> list[dict]:
         import mcp_registry
         connected = mcp_registry.connected_tools()
         if connected:
-            available = ", ".join(f"{x['server_id']}:{x['name']}" for x in connected)
-            catalog = [{
-                "server_id": x["server_id"],
-                "name": x["name"],
-                "description": str(x.get("description") or "")[:500],
-                "inputSchema": x.get("inputSchema") or {"type": "object"},
-            } for x in connected]
+            counts: dict[str, int] = {}
+            for item in connected:
+                sid = str(item.get("server_id") or "?")
+                counts[sid] = counts.get(sid, 0) + 1
+            summary = ", ".join(f"{sid}({count})" for sid, count in counts.items())
             schemas.append({
                 "name": "mcp_call",
-                "description": "Вызвать инструмент подключённого MCP-сервера. Доступные инструменты: " + available,
+                "description": (
+                    "Вызвать MCP-инструмент после action=tool_search. "
+                    "Полные схемы в промпт не кладутся. " + summary
+                ),
                 "schema": {
                     "type": "object",
                     "properties": {
@@ -83,7 +84,6 @@ def tool_schemas(workspace: bool | None = None) -> list[dict]:
                     },
                     "required": ["server_id", "tool"],
                 },
-                "mcp_tools": catalog,
                 "permissions": ["network", "external_service"],
                 "timeout": 30,
             })
