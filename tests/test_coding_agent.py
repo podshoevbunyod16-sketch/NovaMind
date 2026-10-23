@@ -49,30 +49,30 @@ def test_coding_agent_does_not_follow_symlinks_outside_project(tmp_path, monkeyp
 
 # ══════════════ маршрут ══════════════
 
-def test_coding_agent_requires_admin(client, monkeypatch):
+def test_coding_agent_requires_sign_in(client, monkeypatch):
     monkeypatch.setenv("AGENT_ENABLED", "1")
     response = client.post(
         "/api/agent/coding/stream",
         json={"message": "Найди ошибку в routes/agent.py"},
     )
     assert response.status_code == 403
-    assert "администратору" in response.get_json()["error"]
+    assert "войдите" in response.get_json()["error"].lower()
 
 
-def test_coding_agent_status_requires_admin(client, monkeypatch):
+def test_coding_agent_status_is_available_to_signed_in_non_admin(google_client, monkeypatch):
     monkeypatch.setenv("AGENT_ENABLED", "1")
-    status = client.get("/api/agent/coding/status").get_json()
-    assert status["admin_required"] is True and status["available"] is False
-    assert status["engine"] == "agenticseek"
+    status = google_client.get("/api/agent/coding/status").get_json()
+    assert status["admin_required"] is False and status["available"] is True
+    assert status["user"] is True and status["engine"] == "agenticseek"
 
 
 # ══════════════ протокол блоков ══════════════
 
-def test_coding_agent_reads_project_file(admin_client, monkeypatch):
+def test_coding_agent_reads_project_file(google_client, monkeypatch):
     seen = []
     script(monkeypatch, ["```project_read\nroutes/coding_agent.py\n```",
                          "Прочитал маршрут, замечаний нет."], seen, module=coding_agent)
-    events = ndjson(admin_client.post("/api/agent/coding/stream",
+    events = ndjson(google_client.post("/api/agent/coding/stream",
                                       json={"message": "проверь routes/coding_agent.py"}))
     tool = events_of(events, "tool")[0]
     assert tool["name"] == "project_read" and tool["code"] == 0

@@ -1,10 +1,10 @@
-"""Admin-only read-first coding agent for inspecting the NovaMind source tree.
+"""Read-first coding agent for signed-in users inspecting the NovaMind source tree.
 
 The exploration loop itself lives in the agent engine
 (``agenticseek.core.project_agent`` + ``agenticseek.tools.project_tools``).
 This route only enforces the access rules and streams the engine events:
 
-* admin session required;
+* signed-in session required;
 * the agent may read the project, check syntax and run one test file;
 * changes are proposals, never applied — the previous route worked the same way,
   and a server that edits itself is not something a web request may do.
@@ -39,12 +39,20 @@ def _event(payload):
     return json.dumps(payload, ensure_ascii=False) + "\n"
 
 
+def _signed_in():
+    """Project inspection is available to every signed-in user, not just admins."""
+    return bool(session.get("admin_logged_in") or session.get("nova_google_login")
+                or session.get("nova_signed_in") or session.get("nova_user_nick")
+                or session.get("username"))
+
+
 @coding_agent_bp.route("/api/agent/coding/status")
 def coding_status():
     return jsonify({"enabled": _agent_enabled(),
-                    "admin_required": True,
+                    "admin_required": False,
+                    "user": _signed_in(),
                     "engine": "agenticseek",
-                    "available": bool(_agent_enabled() and session.get("admin_logged_in"))})
+                    "available": bool(_agent_enabled() and _signed_in())})
 
 
 @coding_agent_bp.route("/api/agent/coding/stream", methods=["POST"])
@@ -55,8 +63,8 @@ def coding_stream():
         return jsonify({"error": "Пустое сообщение."}), 400
     if not _agent_enabled():
         return jsonify({"error": "Auto Coding Agent выключен: включите AGENT_ENABLED=1."}), 403
-    if not session.get("admin_logged_in"):
-        return jsonify({"error": "Auto Coding Agent доступен только администратору."}), 403
+    if not _signed_in():
+        return jsonify({"error": "Войдите в аккаунт, чтобы пользоваться Auto Coding Agent."}), 403
 
     provider, model, _cfg = resolve_target()
 
