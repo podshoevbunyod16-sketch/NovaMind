@@ -5,6 +5,7 @@ import pytest
 
 import database
 import routes.agent as agent_routes
+from tests.agent_helpers import script
 
 
 def _ndjson(response):
@@ -116,25 +117,47 @@ def test_chat_endpoint_includes_traces(client):
 # ══════════════ сквозная запись из агента ══════════════
 
 def test_agent_turn_saves_trace(admin_client, sandbox, monkeypatch):
-    _stub_model(monkeypatch, [
-        '{"action":"run","command":"pwd","thought":"проверю папку"}',
-        "Работаю в рабочей папке.",
-    ])
-    events = _ndjson(admin_client.post("/api/agent/stream", json={"message": "где я нахожусь"}))
+    """Каждый шаг агента попадает в панель «Что делал агент»."""
+    script(monkeypatch, ["```bash\npwd\n```", "Работаю в рабочей папке."])
+    events = _ndjson(admin_client.post("/api/agent/stream", json={"message": "выполни pwd в терминале"}))
     result = next(event for event in events if event["type"] == "result")
     assert result["chat_id"]
 
     traces = database.get_traces(result["chat_id"])
     assert traces, "трасса хода должна сохраниться"
-    kinds = {step["kind"] for step in traces[-1]["steps"]}
-    assert "step" in kinds or "tool" in kinds
-    assert any(step.get("command") == "pwd" for step in traces[-1]["steps"])
+    steps = traces[-1]["steps"]
+    assert any(step["kind"] == "tool" and step.get("command") == "pwd" for step in steps)
+    assert any(step["kind"] == "step" for step in steps)
 
 
-def test_simple_answer_saves_no_trace(google_client, sandbox, monkeypatch):
-    """Простой ответ без инструментов — панели нет, лишних записей нет."""
-    _stub_model(monkeypatch, ["Привет! Чем помочь?"])
+def test_simple_answer_saves_no_tool_steps(google_client, sandbox, monkeypatch):
+    """Простой ответ без инструментов: панели с командами нет."""
+    script(monkeypatch, ["Привет! Чем помочь?"])
     events = _ndjson(google_client.post("/api/agent/stream", json={"message": "привет"}))
     result = next(event for event in events if event["type"] == "result")
     assert result["chat_id"]
-    assert database.get_traces(result["chat_id"]) == []
+    traces = database.get_traces(result["chat_id"])
+    assert not [step for trace in traces for step in trace["steps"]
+                if step["kind"] == "tool"]
+
+
+def test_trace_is_not_saved_for_offline_turn_without_steps(client, sandbox, monkeypatch):
+    """Офлайн-ответ без инструментов не создаёт запись с командами."""
+    events = _ndjson(client.post("/api/agent/stream", json={"message": "2+2"}))
+    result = next(event for event in events if event["type"] == "result")
+    traces = database.get_traces(result["chat_id"])
+    assert not [step for trace in traces for step in trace["steps"]
+                if step["kind"] == "tool"]
+
+
+def test_failed_run_is_recorded_with_error(client, sandbox, monkeypatch):
+    """Отказ модели всё равно виден в истории запусков."""
+    monkeypatch.setattr(agent_routes, "resolve_target",
+                        lambda provider=None, model=None: ("groq", "test-model", {}))
+    monkeypatch.setattr(agent_routes, "chat_completion",
+                        lambda messages, **kwargs: (None, "quota exceeded"))
+    events = _ndjson(client.post("/api/agent/stream", json={"message": "привет"}))
+    run_id = next(event for event in events if event["type"] == "result")["run_id"]
+    run = database.get_agent_run(run_id)
+    assert run and run["status"] == "error"
+    assert "Модель не ответила" in (run.get("error") or "")

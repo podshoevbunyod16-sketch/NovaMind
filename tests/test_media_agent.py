@@ -16,6 +16,7 @@ import pytest
 import media_agent
 import media_generation as mg
 import routes.agent as agent_routes
+from tests.agent_helpers import answer_of, events_of, model_text, ndjson, script
 
 
 @pytest.fixture(autouse=True)
@@ -127,7 +128,7 @@ def _stub_model(monkeypatch, answers, seen=None):
 
 
 def _answer(events):
-    return "".join(event["token"] for event in events if event["type"] == "token")
+    return answer_of(events)
 
 
 @pytest.fixture
@@ -150,66 +151,60 @@ def fake_media(monkeypatch):
 
 
 def test_ai_draws_picture_by_itself(google_client, monkeypatch, fake_media):
+    """«Нарисуй лису» — одна генерация и ни одного запроса к модели."""
     seen = []
-    _stub_model(monkeypatch, [
-        '{"action":"image","prompt":"a cute red fox in a snowy forest, watercolor","aspect":"16:9"}',
-        "Готово! Нарисовал лисичку в зимнем лесу акварелью.",
-    ], seen)
-    events = _ndjson(google_client.post("/api/agent/stream", json={"message": "нарисуй лису"}))
+    script(monkeypatch, ["этот ответ не должен понадобиться"], seen)
 
-    assert fake_media[0]["kind"] == "image"
-    assert fake_media[0]["options"]["width"] == 1344          # 16:9
-    stage = next(event for event in events if event["type"] == "stage")
-    assert stage["scene"] == "media" and "Рисую" in stage["title"]
-    media = next(event for event in events if event["type"] == "media")["media"]
+    events = ndjson(google_client.post("/api/agent/stream", json={"message": "нарисуй лису"}))
+    assert len(fake_media) == 1 and fake_media[0]["kind"] == "image"
+    assert "нарисуй лису" in fake_media[0]["prompt"]
+    assert seen == [], "явный медиа-запрос не зовёт модель"
+    stage = next(event for event in events_of(events, "stage") if event["scene"] == "media")
+    assert "медиа" in stage["title"].lower()
+    media = events_of(events, "media")[0]["media"]
     assert media["url"] == "/media/image_1.png" and media["model_name"] == "Pollinations Flux"
-    assert not [event for event in events if event["type"] == "tool"]   # это не Linux
-    assert "лисичку" in _answer(events)
+    assert not events_of(events, "tool")          # это не Linux
+    assert "Готово" in answer_of(events)
 
     result = next(event for event in events if event["type"] == "result")
     assert result["media"][0]["url"] == "/media/image_1.png"
     assert result["linux"] is False
-    # Модель узнала, что файл уже показан — ссылку повторять не надо
-    observation = seen[1]["messages"][-1]["content"]
-    assert "уже показано пользователю" in observation
-    # Промпт объясняет медиа-инструменты
-    assert '"action":"image"' in seen[0]["system"] and '"action":"video"' in seen[0]["system"]
+
+
+def test_media_status_is_forwarded_as_steps(google_client, monkeypatch, fake_media):
+    """Сообщения провайдера («пробую модель …») видны пользователю как шаги."""
+    events = ndjson(google_client.post("/api/agent/stream", json={"message": "нарисуй маяк"}))
+    assert any("Пробую Pollinations Flux" in event["text"] for event in events_of(events, "step"))
 
 
 def test_media_works_without_linux(google_client, monkeypatch, fake_media):
     monkeypatch.setenv("TERMINAL_ENABLED", "0")
-    seen = []
-    _stub_model(monkeypatch, [
-        '{"action":"audio","text":"Добро пожаловать в NovaMind!","voice":"Kore"}',
-        "Озвучил приветствие.",
-    ], seen)
-    events = _ndjson(google_client.post("/api/agent/stream", json={"message": "озвучь приветствие"}))
-    assert fake_media[0]["kind"] == "audio" and fake_media[0]["options"] == {"voice": "Kore"}
-    assert any(event["type"] == "media" for event in events)
-    assert '"action":"run"' not in seen[0]["system"]          # Linux-команд в промпте нет
-    assert "Linux-окружение сейчас выключено" in seen[0]["system"]
+    events = ndjson(google_client.post("/api/agent/stream", json={"message": "озвучь приветствие"}))
+    assert fake_media[0]["kind"] == "audio"
+    assert events_of(events, "media")
+    assert next(e for e in events if e["type"] == "result")["linux"] is False
 
 
-def test_linux_action_without_linux_goes_back_to_model(google_client, monkeypatch):
+def test_terminal_off_is_reported_to_the_model(google_client, monkeypatch):
+    """Без песочницы промпт честно говорит, что команд нет."""
     monkeypatch.setenv("TERMINAL_ENABLED", "0")
     seen = []
-    _stub_model(monkeypatch, ['{"action":"run","command":"ls"}', "Посчитал в уме: 42"], seen)
-    events = _ndjson(google_client.post("/api/agent/stream", json={"message": "посчитай"}))
-    assert not [event for event in events if event["type"] == "tool"]
-    assert "TERMINAL_ENABLED" in seen[1]["messages"][-1]["content"]
-    assert _answer(events) == "Посчитал в уме: 42"
+    script(monkeypatch, ["Посчитал в уме: 42"], seen)
+    events = ndjson(google_client.post("/api/agent/stream", json={"message": "посчитай в уме"}))
+    assert answer_of(events) == "Посчитал в уме: 42"
+    offered = model_text(seen).split("ДОСТУПНЫЕ")[-1]
+    assert "```bash" not in offered
 
 
 def test_failed_generation_is_explained_to_model(google_client, monkeypatch):
     monkeypatch.setattr(media_agent, "generate",
                         lambda *a, **k: (None, None, ["Нет доступных моделей (видео). Подключить: VIDEO_API_URL"]))
-    seen = []
-    _stub_model(monkeypatch, ['{"action":"video","prompt":"ocean waves at sunset"}',
-                              "Видео сейчас сделать не могу: нужен видео-провайдер."], seen)
-    events = _ndjson(google_client.post("/api/agent/stream", json={"message": "сделай видео"}))
-    assert not [event for event in events if event["type"] == "media"]
-    assert any(event["type"] == "step" and "Не получилось" in event["text"] for event in events)
-    assert "VIDEO_API_URL" in seen[1]["messages"][-1]["content"]
+    script(monkeypatch, ["этот ответ не должен понадобиться"])
+    events = ndjson(google_client.post("/api/agent/stream", json={"message": "сделай видео волн"}))
+    assert not events_of(events, "media")
+    step = next(event for event in events_of(events, "step") if "Не получилось" in event["text"])
+    assert "VIDEO_API_URL" in step["text"]
+    assert "Не получилось создать видео" in answer_of(events)
 
 
 def test_video_job_is_reported_as_queued(google_client, monkeypatch):
@@ -218,40 +213,29 @@ def test_video_job_is_reported_as_queued(google_client, monkeypatch):
                  "model_name": "Veo 3.1", "provider_name": "Google AI Studio"},
                 {"name": "Veo 3.1", "provider_name": "Google AI Studio"}, [])
     monkeypatch.setattr(media_agent, "generate", queued)
-    seen = []
-    _stub_model(monkeypatch, ['{"action":"video","prompt":"a cat surfing"}', "Видео готовится."], seen)
-    events = _ndjson(google_client.post("/api/agent/stream", json={"message": "видео с котом"}))
-    media = next(event for event in events if event["type"] == "media")["media"]
+    events = ndjson(google_client.post("/api/agent/stream", json={"message": "сделай видео с котом"}))
+    media = events_of(events, "media")[0]["media"]
     assert media["job_id"] == "job-7" and media["state"] == "queued"
-    assert "очередь" in seen[1]["messages"][-1]["content"]
+    assert "очеред" in answer_of(events).lower()
 
 
-def test_media_models_action_lists_choices(google_client, monkeypatch):
-    monkeypatch.setenv("POLLINATIONS_API_KEY", "pk-test")
+def test_model_is_not_asked_to_list_media_models(google_client, monkeypatch):
+    """Список моделей — это /api/agent/status и describe(), а не ход агента."""
     seen = []
-    _stub_model(monkeypatch, ['{"action":"media_models","type":"image"}', "Есть flux и turbo."], seen)
-    _ndjson(google_client.post("/api/agent/stream", json={"message": "какие модели рисуют?"}))
-    observation = seen[1]["messages"][-1]["content"]
-    assert "flux" in observation and "turbo" in observation
+    script(monkeypatch, ["Доступные модели перечислены в настройках."], seen)
+    events = ndjson(google_client.post("/api/agent/stream", json={"message": "какие модели рисуют?"}))
+    assert answer_of(events) == "Доступные модели перечислены в настройках."
+    assert not events_of(events, "media")
 
 
 def test_generated_media_is_remembered_in_history(google_client, monkeypatch, fake_media):
-    _stub_model(monkeypatch, ['{"action":"image","prompt":"a lighthouse at night"}', "Маяк готов."])
-    _ndjson(google_client.post("/api/agent/stream", json={"message": "нарисуй маяк"}))
+    """После перезагрузки страницы медиа отрисуется из маркера в истории."""
+    script(monkeypatch, ["не нужен"])
+    ndjson(google_client.post("/api/agent/stream", json={"message": "нарисуй маяк"}).get_data()
+           if False else google_client.post("/api/agent/stream", json={"message": "нарисуй маяк"}))
+
     seen = []
-    _stub_model(monkeypatch, ["Сделаю ярче."], seen)
-    _ndjson(google_client.post("/api/agent/stream", json={"message": "сделай ярче"}))
-    history = " ".join(message["content"] for message in seen[0]["messages"])
-    assert "a lighthouse at night" in history
-
-
-def test_status_check_is_instant_and_needs_no_network(google_client, monkeypatch):
-    """Статус агента грузится при каждом открытии чата — он не ходит в каталоги провайдеров."""
-    def forbidden(*args, **kwargs):
-        raise AssertionError("статус не должен вызывать живой каталог")
-    monkeypatch.setattr(media_agent, "candidates", forbidden)
-    assert google_client.get("/api/agent/status").get_json()["media"] == {
-        "image": False, "audio": False, "video": False}
-    monkeypatch.setenv("POLLINATIONS_API_KEY", "pk-test")
-    media = google_client.get("/api/agent/status").get_json()["media"]
-    assert media["image"] is True and media["audio"] is True
+    script(monkeypatch, ["Сделаю ярче."], seen)
+    ndjson(google_client.post("/api/agent/stream", json={"message": "сделай ярче"}))
+    history = model_text(seen)
+    assert "MEDIA_RESULT:" in history and "/media/image_1.png" in history

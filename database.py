@@ -684,3 +684,199 @@ def delete_task(task_id):
     with _db_lock:
         with get_db() as conn:
             conn.execute("DELETE FROM tasks WHERE id=?", (task_id,))
+
+
+# ══════════════════════════════════════════════════════════════
+# ЗАПУСКИ АГЕНТА (движок AgenticSeek)
+#
+# Один ход агента = запись в agent_runs + шаги в agent_run_steps. Это
+# отдельная сущность, а не часть истории сообщений: история чата не
+# меняется, а панель «Что делал агент» может показать план, шаги и
+# причину остановки даже после перезагрузки страницы.
+# ══════════════════════════════════════════════════════════════
+
+_runs_ready = set()
+
+
+def init_agent_runs():
+    """Создаёт таблицы запусков агента (лениво, как tasks/memory)."""
+    if DB_PATH in _runs_ready:
+        return
+    with _db_lock:
+        with get_db() as conn:
+            conn.executescript("""
+                CREATE TABLE IF NOT EXISTS agent_runs (
+                    id TEXT PRIMARY KEY,
+                    chat_id TEXT DEFAULT '',
+                    run_id TEXT DEFAULT '',
+                    goal TEXT NOT NULL DEFAULT '',
+                    engine TEXT NOT NULL DEFAULT 'agenticseek',
+                    status TEXT NOT NULL DEFAULT 'running',
+                    route TEXT DEFAULT '',
+                    provider TEXT DEFAULT '',
+                    model TEXT DEFAULT '',
+                    plan TEXT NOT NULL DEFAULT '[]',
+                    steps INTEGER NOT NULL DEFAULT 0,
+                    answer TEXT DEFAULT '',
+                    error TEXT DEFAULT '',
+                    started_at REAL NOT NULL,
+                    finished_at REAL
+                );
+                CREATE INDEX IF NOT EXISTS idx_agent_runs_chat
+                    ON agent_runs(chat_id, started_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_agent_runs_run ON agent_runs(run_id);
+                CREATE TABLE IF NOT EXISTS agent_run_steps (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    run_id TEXT NOT NULL,
+                    seq INTEGER NOT NULL,
+                    tool TEXT DEFAULT '',
+                    label TEXT DEFAULT '',
+                    ok INTEGER NOT NULL DEFAULT 1,
+                    output TEXT DEFAULT '',
+                    created_at REAL NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_agent_run_steps
+                    ON agent_run_steps(run_id, seq);
+            """)
+            _ensure_agent_columns(conn)
+    _runs_ready.add(DB_PATH)
+
+
+def _ensure_agent_columns(conn):
+    """Дописывает колонки, появившиеся после первого запуска (миграция).
+
+    База пользователя живёт дольше кода: таблицы создаются через
+    CREATE TABLE IF NOT EXISTS, поэтому новая колонка не появится сама.
+    ALTER TABLE ADD COLUMN безопасен: существующие строки получают значение
+    по умолчанию, данные не перезаписываются.
+    """
+    wanted = {
+        "agent_runs": {
+            "chat_id": "TEXT DEFAULT ''", "run_id": "TEXT DEFAULT ''",
+            "route": "TEXT DEFAULT ''", "provider": "TEXT DEFAULT ''",
+            "model": "TEXT DEFAULT ''", "plan": "TEXT NOT NULL DEFAULT '[]'",
+            "steps": "INTEGER NOT NULL DEFAULT 0", "answer": "TEXT DEFAULT ''",
+            "error": "TEXT DEFAULT ''", "finished_at": "REAL",
+        },
+        "agent_run_steps": {
+            "label": "TEXT DEFAULT ''", "ok": "INTEGER NOT NULL DEFAULT 1",
+            "output": "TEXT DEFAULT ''",
+        },
+    }
+    for table, columns in wanted.items():
+        existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+        for name, definition in columns.items():
+            if name not in existing:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
+
+
+def create_agent_run(goal, chat_id="", run_id="", provider="", model="",
+                     engine="agenticseek"):
+    """Регистрирует запуск агента. Возвращает id записи ("" при ошибке)."""
+    init_agent_runs()
+    record_id = str(uuid.uuid4())
+    with _db_lock:
+        with get_db() as conn:
+            conn.execute(
+                "INSERT INTO agent_runs (id, chat_id, run_id, goal, engine, status,"
+                " provider, model, plan, steps, answer, error, started_at, finished_at)"
+                " VALUES (?, ?, ?, ?, ?, 'running', ?, ?, '[]', 0, '', '', ?, NULL)",
+                (record_id, str(chat_id or ""), str(run_id or ""),
+                 str(goal or "")[:4000], str(engine or "agenticseek"),
+                 str(provider or ""), str(model or ""), time.time()),
+            )
+    return record_id
+
+
+def update_agent_run(record_id, **fields):
+    """Обновляет поля запуска: status, route, plan, steps, answer, error…"""
+    if not record_id:
+        return None
+    init_agent_runs()
+    allowed = ("status", "route", "plan", "steps", "answer", "error",
+               "provider", "model", "finished_at", "chat_id")
+    values = {key: fields[key] for key in allowed if key in fields}
+    if not values:
+        return get_agent_run(record_id)
+    if "plan" in values and not isinstance(values["plan"], str):
+        values["plan"] = json.dumps(values["plan"], ensure_ascii=False)[:20000]
+    if "answer" in values:
+        values["answer"] = str(values["answer"] or "")[:20000]
+    if "error" in values:
+        values["error"] = str(values["error"] or "")[:2000]
+    sets = ", ".join(f"{key}=?" for key in values)
+    with _db_lock:
+        with get_db() as conn:
+            conn.execute(f"UPDATE agent_runs SET {sets} WHERE id=?",
+                         (*values.values(), record_id))
+    return get_agent_run(record_id)
+
+
+def add_agent_run_step(run_id, seq, tool, label="", ok=True, output=""):
+    """Добавляет шаг запуска. run_id — agent_runs.id или agent_runs.run_id."""
+    init_agent_runs()
+    if not run_id:
+        return None
+    with _db_lock:
+        with get_db() as conn:
+            row = conn.execute(
+                "SELECT id FROM agent_runs WHERE id=? OR run_id=?"
+                " ORDER BY started_at DESC LIMIT 1", (str(run_id), str(run_id))).fetchone()
+            if row is None:
+                return None
+            record_id = row["id"]
+            conn.execute(
+                "INSERT INTO agent_run_steps (run_id, seq, tool, label, ok, output,"
+                " created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (record_id, int(seq or 1), str(tool or "")[:80], str(label or "")[:400],
+                 1 if ok else 0, str(output or "")[:4000], time.time()),
+            )
+            conn.execute("UPDATE agent_runs SET steps=? WHERE id=?", (int(seq or 1), record_id))
+    return seq
+
+
+def get_agent_run(record_id):
+    """Запуск + шаги. record_id — id записи или run_id."""
+    if not record_id:
+        return None
+    init_agent_runs()
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT * FROM agent_runs WHERE id=? OR run_id=?"
+            " ORDER BY started_at DESC LIMIT 1", (str(record_id), str(record_id))).fetchone()
+        if row is None:
+            return None
+        steps = conn.execute(
+            "SELECT seq, tool, label, ok, output, created_at FROM agent_run_steps"
+            " WHERE run_id=? ORDER BY seq", (row["id"],)).fetchall()
+    data = dict(row)
+    try:
+        data["plan"] = json.loads(data.get("plan") or "[]")
+    except (TypeError, ValueError):
+        data["plan"] = []
+    data["steps_log"] = [dict(step) for step in steps]
+    return data
+
+
+def list_agent_runs(chat_id=None, limit=20):
+    """Последние запуски агента (для панели «Что делал агент»)."""
+    init_agent_runs()
+    with get_db() as conn:
+        if chat_id:
+            rows = conn.execute(
+                "SELECT id, chat_id, run_id, goal, status, route, provider, model,"
+                " steps, answer, error, started_at, finished_at FROM agent_runs"
+                " WHERE chat_id=? ORDER BY started_at DESC LIMIT ?",
+                (str(chat_id), int(limit))).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT id, chat_id, run_id, goal, status, route, provider, model,"
+                " steps, answer, error, started_at, finished_at FROM agent_runs"
+                " ORDER BY started_at DESC LIMIT ?", (int(limit),)).fetchall()
+    return [dict(row) for row in rows]
+
+
+def finish_agent_run(record_id, status, answer="", error="", steps=0):
+    """Закрывает запуск: статус, ответ, время окончания."""
+    return update_agent_run(record_id, status=status, answer=answer, error=error,
+                            steps=int(steps or 0), finished_at=time.time())

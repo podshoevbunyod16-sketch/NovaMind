@@ -94,9 +94,10 @@ def record_turn(chat_id, provider, model, prompt_text="", answer_text="", usage=
     Возвращает словарь для потока агента: токены хода, цена и итоги чата.
     """
     prompt_tokens, completion_tokens = tokens_from_usage(usage)
-    if prompt_tokens is None:
+    # Провайдер может не отдавать usage: ноль — это «неизвестно», а не «бесплатно».
+    if not prompt_tokens:
         prompt_tokens = estimate_tokens(prompt_text)
-    if completion_tokens is None:
+    if not completion_tokens:
         completion_tokens = estimate_tokens(answer_text)
     cost = cost_of(provider, model, prompt_tokens, completion_tokens)
     row = database.add_usage(chat_id, provider, model, prompt_tokens,

@@ -21,6 +21,9 @@ def _answer(events):
     return "".join(event["token"] for event in events if event["type"] == "token")
 
 
+from tests.agent_helpers import model_text, script  # noqa: E402
+
+
 @pytest.fixture(autouse=True)
 def fresh_memory(tmp_path, monkeypatch):
     """Своя база памяти на каждый тест (репозиторий не трогаем)."""
@@ -142,19 +145,11 @@ def test_memory_route_rejects_secrets(google_client):
 def test_agent_puts_memory_block_into_prompt(google_client, sandbox, monkeypatch):
     memory.remember("ivan@example.com", "Предпочитаю краткие ответы без воды", kind="preference")
     seen = []
-
-    def completion(messages, **kwargs):
-        seen.append({"messages": list(messages), "system": kwargs.get("system", "")})
-        return "Коротко: да.", {}
-
-    monkeypatch.setattr(agent_routes, "chat_completion", completion)
-    monkeypatch.setattr(agent_routes, "chat_stream", lambda *a, **k: iter(()))
+    script(monkeypatch, ["Коротко: да."], seen)
 
     events = _ndjson(google_client.post("/api/agent/stream",
                                         json={"message": "как дела? ответь кратко"}))
-    prompt = seen[0]["system"] + "\n".join(str(item.get("content") or "")
-                                            for item in seen[0]["messages"])
-    assert "MEMORY" in prompt
+    prompt = model_text(seen)
     assert "Предпочитаю краткие ответы" in prompt
     assert "Коротко: да." in _answer(events)
 
@@ -162,44 +157,44 @@ def test_agent_puts_memory_block_into_prompt(google_client, sandbox, monkeypatch
 def test_guest_has_no_memory_block(client, sandbox, monkeypatch):
     memory.remember("someone@example.com", "Секретная деталь про кофе")
     seen = []
-
-    def completion(messages, **kwargs):
-        seen.append(kwargs.get("system", ""))
-        return "Ответ", {}
-
-    monkeypatch.setattr(agent_routes, "chat_completion", completion)
-    monkeypatch.setattr(agent_routes, "chat_stream", lambda *a, **k: iter(()))
+    script(monkeypatch, ["Ответ"], seen)
 
     _ndjson(client.post("/api/agent/stream", json={"message": "найди что-нибудь"}))
-    assert all("Секретная деталь" not in system for system in seen)
+    assert seen, "модель должна была получить запрос"
+    assert all("Секретная деталь" not in model_text(seen, index)
+               for index in range(len(seen)))
 
 
 def test_agent_remember_action_saves_and_blocks_secrets(google_client, sandbox, monkeypatch):
-    answers = [
-        '{"action":"remember","text":"Работаю над проектом NovaMind","kind":"project","tags":"работа"}',
+    """Блок ```remember``` пишет в память и не сохраняет пароли."""
+    script(monkeypatch, [
+        '```remember\n{"text": "Работаю над проектом NovaMind", "kind": "project", "tags": "работа"}\n```',
+        '```remember\n{"text": "мой пароль: 123456"}\n```',
         "Запомнил.",
-    ]
-    monkeypatch.setattr(agent_routes, "chat_completion",
-                        lambda messages, **kwargs: ((answers.pop(0) if answers else "готово"), {}))
-    monkeypatch.setattr(agent_routes, "chat_stream", lambda *a, **k: iter(()))
+    ])
 
     events = _ndjson(google_client.post("/api/agent/stream",
                                         json={"message": "запомни, что я работаю над проектом NovaMind"}))
-    saved = [item for item in memory.list_all("ivan@example.com")]
+    saved = memory.list_all("ivan@example.com")
     assert saved and saved[0]["text"] == "Работаю над проектом NovaMind"
-    assert any(event["type"] == "memory" for event in events)
+    assert all("123456" not in item["text"] for item in saved)
+    tools = [event for event in events if event["type"] == "tool"]
+    assert tools[0]["name"] == "remember" and tools[0]["code"] == 0
+    assert tools[1]["name"] == "remember" and tools[1]["code"] == 1
     assert "Запомнил" in _answer(events)
 
 
 def test_agent_forget_action_removes_memory(google_client, sandbox, monkeypatch):
     item = memory.remember("ivan@example.com", "Люблю тёмную тему", kind="preference")
-    answers = [json.dumps({"action": "forget", "id": item["id"]}, ensure_ascii=False), "Удалил."]
-    monkeypatch.setattr(agent_routes, "chat_completion",
-                        lambda messages, **kwargs: ((answers.pop(0) if answers else "готово"), {}))
-    monkeypatch.setattr(agent_routes, "chat_stream", lambda *a, **k: iter(()))
+    script(monkeypatch, [
+        f'```forget\n{{"id": "{item["id"]}"}}\n```',
+        "Удалил.",
+    ])
 
-    _ndjson(google_client.post("/api/agent/stream", json={"message": "забудь про тёмную тему"}))
+    events = _ndjson(google_client.post("/api/agent/stream",
+                                        json={"message": "забудь про тёмную тему"}))
     assert memory.list_all("ivan@example.com") == []
+    assert "Удалил" in _answer(events)
 
 
 def test_remember_tool_rejects_secret_without_crashing(sandbox, google_client):

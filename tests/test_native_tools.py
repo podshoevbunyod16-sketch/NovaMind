@@ -1,13 +1,13 @@
-"""Нативный tool calling (этап 1).
+"""Нативный tool calling на уровне провайдера и реестра инструментов.
 
-Модель вызывает настоящие функции вместо JSON-текста, но старый протокол
-{"action": ...} остаётся запасным режимом:
+Сам агент работает на протоколе блоков AgenticSeek (``\u0060\u0060\u0060web_search``), а не
+на ``tool_calls``: блок виден пользователю как шаг, не требует поддержки
+``tools`` у провайдера и одинаково работает у всех моделей. Нативный слой
+остаётся в ``ai_providers``/``tool_registry`` — им пользуются другие места
+(чат с инструментами, MCP-панель), и его нельзя молча ломать.
 
-  * провайдер принимает `tools` — работаем нативно, включая несколько
-    tool_calls в одном ответе;
-  * провайдер не знает про `tools` — молча откатываемся на JSON;
-  * аргументы вызова пришли битым JSON — инструмент не выполняем,
-    а просим модель повторить.
+Эти тесты проверяют обе половины: провайдер умеет tool_calls, а агент
+по-прежнему ходит через блоки (никаких ``tools`` в запросе).
 """
 import json
 
@@ -16,6 +16,7 @@ import pytest
 import ai_providers
 import routes.agent as agent_routes
 import tool_registry
+from tests.agent_helpers import answer_of, events_of, model_text, ndjson, script
 
 
 def _ndjson(response):
@@ -31,52 +32,6 @@ def _normalized(call_id, name, arguments, arguments_error=""):
     return {"id": call_id, "name": name, "arguments": arguments,
             "raw_arguments": json.dumps(arguments, ensure_ascii=False),
             "arguments_error": arguments_error}
-
-
-@pytest.fixture
-def fake_search(monkeypatch):
-    results = [{"title": "Документация asyncio", "url": "https://docs.python.org/asyncio",
-                "snippet": "asyncio — библиотека", "host": "docs.python.org"}]
-    calls = []
-
-    def search(query, limit=8):
-        calls.append(query)
-        return list(results), {"backend": "test", "elapsed_ms": 2, "query": query,
-                               "results": results, "count": len(results),
-                               "trace": [{"backend": "test", "ok": True, "ms": 2}]}
-
-    monkeypatch.setattr(agent_routes, "nova_search", search)
-    monkeypatch.setattr(agent_routes, "nova_read", lambda url, max_chars=4000: ("Текст страницы " + url, 2))
-    return calls
-
-
-@pytest.fixture
-def native_provider(monkeypatch):
-    """Провайдер, который умеет нативный tool calling."""
-    monkeypatch.setattr(agent_routes, "resolve_target", lambda *a, **k: ("groq", "llama-3.3-70b", {}))
-    agent_routes._NATIVE_TOOL_BLOCKED.clear()
-    yield
-    agent_routes._NATIVE_TOOL_BLOCKED.clear()
-
-
-def _stub_native(monkeypatch, script, seen=None):
-    """Модель отвечает заранее заданными шагами (native tool calls)."""
-    queue = list(script)
-
-    def fake_completion(messages, **kwargs):
-        if seen is not None:
-            seen.append({"messages": list(messages), "tools": kwargs.get("tools"),
-                         "system": kwargs.get("system", "")})
-        item = queue.pop(0) if queue else {"text": "готово"}
-        if isinstance(item, str):
-            return item, {"provider": "groq", "tool_calls": []}
-        return item.get("text", ""), {"provider": "groq",
-                                      "tool_calls": item.get("tool_calls") or [],
-                                      "native_tools": True}
-
-    monkeypatch.setattr(agent_routes, "chat_completion", fake_completion)
-    monkeypatch.setattr(agent_routes, "chat_stream", lambda *a, **k: iter(()))
-    return queue
 
 
 # ══════════════ ai_providers ══════════════
@@ -199,109 +154,78 @@ def test_tool_schemas_report_risk():
     assert risks["mcp_call"] == "danger"
 
 
-# ══════════════ агент: нативный режим ══════════════
+# ══════════════ агент: протокол блоков ══════════════
 
-def test_agent_uses_native_tool_call_and_answers(admin_client, sandbox, fake_search,
-                                                 native_provider, monkeypatch):
+def _fake_search(monkeypatch):
+    results = [{"title": "Документация asyncio", "url": "https://docs.python.org/asyncio",
+                "snippet": "asyncio — библиотека", "host": "docs.python.org"}]
+    calls = []
+
+    def search(query, limit=8):
+        calls.append(query)
+        return list(results), {"backend": "test", "query": query, "results": results}
+
+    monkeypatch.setattr(agent_routes, "nova_search", search)
+    monkeypatch.setattr(agent_routes, "nova_read",
+                        lambda url, max_chars=6000: ("Текст страницы " + url, 2))
+    return calls
+
+
+def test_agent_sends_no_native_tools_to_the_model(admin_client, sandbox, monkeypatch):
+    """Агент использует блоки, а не tool_calls: запрос к модели без ``tools``."""
     seen = []
-    _stub_native(monkeypatch, [
-        {"tool_calls": [_normalized("call_1", "search", {"query": "asyncio"})]},
-        {"tool_calls": [_normalized("call_2", "answer", {"text": "asyncio — библиотека Python"})]},
-        # ответ на обязательную самопроверку (этап 5)
-        {"tool_calls": [_normalized("call_3", "answer", {"text": "asyncio — библиотека Python"})]},
-    ], seen)
-
-    events = _ndjson(admin_client.post("/api/agent/stream", json={"message": "найди документацию asyncio"}))
-
-    assert fake_search == ["asyncio"]
-    tool = next(event for event in events if event["type"] == "tool")
-    assert tool["name"] == "search"
-    assert "asyncio" in _answer(events)
-
-    # модель получила инструменты и историю с результатом вызова
-    assert seen[0]["tools"] and seen[0]["tools"][0]["function"]["name"] == "search"
-    assert "НАТИВНОГО TOOL CALLING" in seen[0]["system"]
-    tool_messages = [item for item in seen[1]["messages"] if item.get("role") == "tool"]
-    assert tool_messages and tool_messages[0]["tool_call_id"] == "call_1"
-    assistant_calls = [item for item in seen[1]["messages"]
-                       if item.get("role") == "assistant" and item.get("tool_calls")]
-    assert assistant_calls[0]["tool_calls"][0]["function"]["name"] == "search"
+    script(monkeypatch, ["Просто ответ"], seen)
+    ndjson(admin_client.post("/api/agent/stream", json={"message": "найди asyncio"}))
+    assert all(item.get("tools") is None for item in seen)
+    assert "web_search" in model_text(seen).split("ДОСТУПНЫЕ")[-1]
 
 
-def test_agent_executes_every_native_call_from_one_response(admin_client, sandbox, fake_search,
-                                                            native_provider, monkeypatch):
+def test_several_blocks_in_one_answer_run_in_order(admin_client, sandbox, monkeypatch):
+    calls = _fake_search(monkeypatch)
+    monkeypatch.setattr(agent_routes, "nova_read",
+                        lambda url, max_chars=6000: ("Текст страницы", 2))
+
+    def search(query, limit=8):
+        return [{"title": "asyncio", "url": "https://docs.python.org/asyncio",
+                 "snippet": "библиотека", "host": "docs.python.org"}], {"backend": "test"}
+
+    monkeypatch.setattr(agent_routes, "nova_search", search)
+    script(monkeypatch, [
+        "```web_search\nasyncio\n```\n```web_open\nhttps://docs.python.org/asyncio\n```",
+        "Готово: два инструмента",
+    ])
+    events = ndjson(admin_client.post("/api/agent/stream",
+                                      json={"message": "найди и открой документацию asyncio"}))
+    assert [tool["name"] for tool in events_of(events, "tool")] == ["web_search", "web_open"]
+    assert answer_of(events) == "Готово: два инструмента"
+
+
+def test_unknown_tool_tag_is_not_shown_to_the_user(admin_client, sandbox, monkeypatch):
+    """Блок несуществующего инструмента не попадает в чат как «сделано»."""
     seen = []
-    _stub_native(monkeypatch, [
-        {"tool_calls": [
-            _normalized("call_1", "search", {"query": "asyncio"}),
-            _normalized("call_2", "open", {"url": "https://docs.python.org/asyncio"}),
-        ]},
-        {"tool_calls": [_normalized("call_3", "answer", {"text": "готово: два инструмента"})]},
-        {"tool_calls": [_normalized("call_4", "answer", {"text": "готово: два инструмента"})]},
-    ], seen)
-
-    events = _ndjson(admin_client.post("/api/agent/stream", json={"message": "найди и изучи asyncio по шагам"}))
-
-    names = [event["name"] for event in events if event["type"] == "tool"]
-    assert names == ["search", "open"]
-
-    tool_messages = [item for item in seen[1]["messages"] if item.get("role") == "tool"]
-    assert [item["tool_call_id"] for item in tool_messages] == ["call_1", "call_2"]
-    assert "два инструмента" in _answer(events)
+    script(monkeypatch, ["Проверил.\n```nonexistent_tool\nx\n```"], seen)
+    events = ndjson(admin_client.post("/api/agent/stream", json={"message": "сделай что-нибудь"}))
+    assert not events_of(events, "tool")
+    assert "nonexistent_tool" not in answer_of(events)
+    assert "Проверил." in answer_of(events)
+    assert any("недоступный инструмент" in event["text"] for event in events_of(events, "step"))
 
 
-def test_agent_falls_back_to_json_protocol_when_tools_unsupported(admin_client, sandbox, fake_search,
-                                                                  native_provider, monkeypatch):
-    answers = ['{"action":"search","query":"asyncio"}', "asyncio — библиотека [1]"]
-    calls = {"with_tools": 0}
-
-    def completion(messages, **kwargs):
-        if kwargs.get("tools"):
-            calls["with_tools"] += 1
-            raise TypeError("chat_completion() got an unexpected keyword argument 'tools'")
-        return (answers.pop(0) if answers else "готово"), {}
-
-    monkeypatch.setattr(agent_routes, "chat_completion", completion)
-    monkeypatch.setattr(agent_routes, "chat_stream", lambda *a, **k: iter(()))
-
-    events = _ndjson(admin_client.post("/api/agent/stream", json={"message": "найди asyncio"}))
-
-    assert calls["with_tools"] == 1                     # попробовали ровно один раз
-    assert any(event["type"] == "step" and "JSON-протокол" in event["text"] for event in events)
-    assert fake_search == ["asyncio"]
-    assert "библиотека" in _answer(events)
-    # провайдер запомнен как «без tools» и больше не проверяется
-    assert ("groq", "llama-3.3-70b") in agent_routes._NATIVE_TOOL_BLOCKED
-
-
-def test_agent_retries_when_tool_arguments_are_broken(admin_client, sandbox, fake_search,
-                                                      native_provider, monkeypatch):
-    broken = _normalized("call_1", "search", {}, arguments_error="аргументы не JSON")
+def test_tool_agent_gets_one_retry_after_unknown_block(admin_client, sandbox, monkeypatch):
+    """Агент с инструментами получает отказ и отвечает словами."""
     seen = []
-    _stub_native(monkeypatch, [
-        {"tool_calls": [broken]},
-        {"tool_calls": [_normalized("call_2", "answer", {"text": "повторил и ответил"})]},
-    ], seen)
-
-    events = _ndjson(admin_client.post("/api/agent/stream", json={"message": "найди asyncio"}))
-
-    assert fake_search == []                            # инструмент не выполнялся
-    assert any(event["type"] == "step" and "Не разобрал аргументы" in event["text"] for event in events)
-    tool_messages = [item for item in seen[1]["messages"] if item.get("role") == "tool"]
-    assert tool_messages and "ОШИБКА" in tool_messages[0]["content"]
-    assert "повторил" in _answer(events)
+    script(monkeypatch, ["```no_such_tool\nx\n```", "Инструмента нет — объясню словами"], seen)
+    events = ndjson(admin_client.post("/api/agent/stream",
+                                      json={"message": "проверь файлы в рабочей папке"}))
+    assert not events_of(events, "tool")
+    assert answer_of(events) == "Инструмента нет — объясню словами"
+    assert "no_such_tool" in model_text(seen, -1)
 
 
-def test_agent_native_mode_can_be_disabled_by_env(admin_client, sandbox, fake_search,
-                                                  native_provider, monkeypatch):
-    monkeypatch.setenv("AGENT_NATIVE_TOOLS", "0")
-    monkeypatch.setattr(agent_routes, "NATIVE_TOOLS_ENABLED", False)
-    answers = ['{"action":"search","query":"asyncio"}', "ответ по JSON [1]"]
-    monkeypatch.setattr(agent_routes, "chat_completion",
-                        lambda messages, **kwargs: ((answers.pop(0) if answers else "готово"), {}))
-    monkeypatch.setattr(agent_routes, "chat_stream", lambda *a, **k: iter(()))
-
-    events = _ndjson(admin_client.post("/api/agent/stream", json={"message": "найди asyncio"}))
-
-    assert fake_search == ["asyncio"]
-    assert "JSON" in _answer(events)
+def test_block_payload_is_passed_verbatim(admin_client, sandbox, monkeypatch):
+    """Содержимое блока не «чинится»: что модель написала, то и выполняется."""
+    seen = []
+    script(monkeypatch, ["```bash\necho привет\n```", "Готово"], seen)
+    events = ndjson(admin_client.post("/api/agent/stream", json={"message": "выполни echo привет"}))
+    tool = events_of(events, "tool")[0]
+    assert "привет" in tool["output"]

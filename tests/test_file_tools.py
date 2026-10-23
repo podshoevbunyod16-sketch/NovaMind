@@ -11,13 +11,15 @@ import pytest
 import routes.agent as agent_routes
 import tool_registry
 
+from tests.agent_helpers import answer_of, events_of, model_text, ndjson, script
+
 
 def _ndjson(response):
-    return [json.loads(line) for line in response.get_data(as_text=True).splitlines() if line.strip()]
+    return ndjson(response)
 
 
 def _answer(events):
-    return "".join(event["token"] for event in events if event["type"] == "token")
+    return answer_of(events)
 
 
 @pytest.fixture(autouse=True)
@@ -134,48 +136,84 @@ def test_file_tree_lists_workspace(sandbox, as_admin):
 
 # ══════════════ действия агента ══════════════
 
-def test_agent_edits_file_via_edit_action(admin_client, sandbox, monkeypatch):
+def test_agent_edits_file_via_file_edit(admin_client, sandbox, monkeypatch):
+    """file_edit меняет только нужный фрагмент и показывает diff."""
     (sandbox / "app.py").write_text("VERSION = '1.0'\n", encoding="utf-8")
-    _stub(monkeypatch, [
-        '{"action":"edit","path":"app.py","old":"1.0","new":"2.0"}',
-        '{"action":"answer","text":"Обновил версию"}',
-        '{"action":"answer","text":"Обновил версию"}',
+    script(monkeypatch, [
+        '```file_edit\n{"path": "app.py", "old": "VERSION = \'1.0\'", "new": "VERSION = \'2.0\'"}\n```',
+        "Обновил версию",
     ])
 
     events = _ndjson(admin_client.post("/api/agent/stream",
                                        json={"message": "обнови версию в app.py до 2.0"}))
     assert "VERSION = '2.0'" in (sandbox / "app.py").read_text(encoding="utf-8")
-    tool = next(event for event in events if event["type"] == "tool" and event["name"] == "edit")
-    assert "-VERSION = '1.0'" in tool["output"]
+    tool = next(event for event in events if event["type"] == "tool" and event["name"] == "file_edit")
+    assert "- VERSION = '1.0'" in tool["output"] and "+ VERSION = '2.0'" in tool["output"]
     assert "Обновил версию" in _answer(events)
 
 
+def test_file_edit_refuses_ambiguous_or_missing_fragment(admin_client, sandbox, monkeypatch):
+    (sandbox / "app.py").write_text("x = 1\nx = 1\n", encoding="utf-8")
+    seen = []
+    script(monkeypatch, [
+        '```file_edit\n{"path": "app.py", "old": "x = 1", "new": "x = 2"}\n```',
+        '```file_edit\n{"path": "app.py", "old": "нет такого", "new": "x = 3"}\n```',
+        "Файл не тронут",
+    ], seen)
+
+    events = _ndjson(admin_client.post("/api/agent/stream",
+                                       json={"message": "поправь переменную в файле app.py"}))
+    assert (sandbox / "app.py").read_text(encoding="utf-8") == "x = 1\nx = 1\n"
+    tools = events_of(events, "tool")
+    assert [tool["code"] for tool in tools] == [1, 1]
+    assert "неоднозначна" in tools[0]["output"]
+    assert "нет фрагмента" in tools[1]["output"]
+
+
 def test_agent_write_existing_file_returns_hint(admin_client, sandbox, monkeypatch):
+    """Полная перезапись существующего файла запрещена — модель получает подсказку."""
     (sandbox / "app.py").write_text("старое содержимое\n", encoding="utf-8")
-    _stub(monkeypatch, [
-        '{"action":"write","path":"app.py","content":"новое содержимое"}',
-        '{"action":"answer","text":"Нужна точечная правка"}',
-        '{"action":"answer","text":"Нужна точечная правка"}',
+    script(monkeypatch, [
+        "```python:app.py\nновое содержимое\n```",
+        "Нужна точечная правка",
     ])
 
     events = _ndjson(admin_client.post("/api/agent/stream",
-                                       json={"message": "перепиши app.py"}))
+                                       json={"message": "перепиши файл app.py"}))
     assert (sandbox / "app.py").read_text(encoding="utf-8") == "старое содержимое\n"
-    assert any(event["type"] == "step" and "file_edit" in event["text"] for event in events)
+    tool = events_of(events, "tool")[0]
+    assert tool["code"] == 1 and "file_edit" in tool["output"]
+    assert "Нужна точечная правка" in _answer(events)
 
 
-def test_agent_greps_and_shows_tree(admin_client, sandbox, monkeypatch):
-    (sandbox / "main.py").write_text("def hello():\n    return 1\n", encoding="utf-8")
-    _stub(monkeypatch, [
-        '{"action":"grep","pattern":"hello"}',
-        '{"action":"tree"}',
-        '{"action":"answer","text":"Нашёл функцию"}',
-        '{"action":"answer","text":"Нашёл функцию"}',
+def test_agent_creates_new_file_and_lists_it(admin_client, sandbox, monkeypatch):
+    script(monkeypatch, [
+        "```python:notes/todo.md\n- первая задача\n```",
+        "```bash\nls notes\n```",
+        "Создал notes/todo.md",
     ])
 
     events = _ndjson(admin_client.post("/api/agent/stream",
-                                       json={"message": "найди функцию hello в проекте"}))
+                                       json={"message": "создай файл со списком задач в папке notes"}))
+    assert (sandbox / "notes" / "todo.md").read_text(encoding="utf-8") == "- первая задача\n"
+    tools = events_of(events, "tool")
+    assert tools[0]["name"] == "python" and "todo.md" in tools[0]["command"]
+    assert "todo.md" in tools[1]["output"]
+
+
+def test_agent_greps_and_lists_tree(admin_client, sandbox, monkeypatch):
+    """Поиск по содержимому и структура папки — через песочницу (bash)."""
+    (sandbox / "main.py").write_text("def hello():\n    return 1\n", encoding="utf-8")
+    script(monkeypatch, [
+        "```bash\ngrep -n hello main.py\n```",
+        "```bash\nls -R\n```",
+        "Нашёл функцию",
+    ])
+
+    events = _ndjson(admin_client.post("/api/agent/stream",
+                                       json={"message": "найди функцию hello в коде проекта"}))
     tools = [event["name"] for event in events if event["type"] == "tool"]
-    assert "grep" in tools and "tree" in tools
-    assert "main.py:1" in next(e["output"] for e in events
-                               if e["type"] == "tool" and e["name"] == "grep")
+    assert tools == ["bash", "bash"]
+    assert "1:def hello():" in events_of(events, "tool")[0]["output"]
+    assert "main.py" in events_of(events, "tool")[1]["output"]
+    assert "Нашёл функцию" in _answer(events)

@@ -7,6 +7,7 @@ import database
 import groq_rotation
 import routes.agent as agent_routes
 import usage_stats
+from tests.agent_helpers import script
 
 
 def _ndjson(response):
@@ -177,7 +178,7 @@ def test_parse_retry_after():
 # ══════════════ сквозная проверка через агента ══════════════
 
 def test_agent_result_reports_usage(google_client, sandbox, monkeypatch):
-    _stub_model(monkeypatch, ["Привет! Чем помочь?"])
+    script(monkeypatch, ["Привет! Чем помочь?"])
     events = _ndjson(google_client.post("/api/agent/stream", json={"message": "привет"}))
     usage_events = [event for event in events if event["type"] == "usage"]
     assert usage_events, "поток должен содержать событие usage"
@@ -195,4 +196,5 @@ def test_usage_endpoint(client):
     payload = client.get("/api/usage").get_json()
     assert payload["chat"]["total_tokens"] == 150
     assert payload["chat"]["turns"] == 1
+    assert payload["totals"] == payload["chat"]      # обратная совместимость
     assert "warning" in payload["groq"]

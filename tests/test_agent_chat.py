@@ -1,14 +1,16 @@
 """Агент в главном чате: доступ, история, инструменты, медиа и офлайн-режим.
 
-Это регрессионные тесты на то, что раньше было сломано:
+Регрессионные тесты на то, что раньше было сломано:
 
   * агент был выключен по умолчанию (AGENT_ENABLED=0) и требовал входа;
-  * «быстрый ответ» проглатывал JSON-действие — инструмент не выполнялся,
-    а в чат попадал сырой JSON;
+  * «быстрый ответ» проглатывал действие — инструмент не выполнялся;
   * без TERMINAL_ENABLED=1 отключался и поиск в интернете;
   * ходы агента не попадали в историю чата;
   * статусы генерации медиа не доходили до интерфейса;
   * офлайн-«модель» отвечала заглушкой «вопрос принят и разобран».
+
+Действия модели оформляются блоками AgenticSeek (``agenticseek/core/agent.py``):
+```web_search``, ```bash``, ```image`` и так далее.
 """
 import json
 
@@ -17,32 +19,7 @@ import pytest
 import local_llm
 import media_agent
 import routes.agent as agent_routes
-import routes.terminal as term_routes
-import tool_registry
-
-
-def _ndjson(response):
-    return [json.loads(line) for line in response.get_data(as_text=True).splitlines() if line.strip()]
-
-
-def _answer(events):
-    return "".join(event["token"] for event in events if event["type"] == "token")
-
-
-def _stub_stream(monkeypatch, answers, seen=None):
-    queue = list(answers)
-
-    def fake_stream(messages, **kwargs):
-        if seen is not None:
-            seen.append({"messages": list(messages), "system": kwargs.get("system", "")})
-        text = queue.pop(0) if queue else "готово"
-        yield "token", text
-        yield "done", ""
-
-    monkeypatch.setattr(agent_routes, "chat_stream", fake_stream)
-    monkeypatch.setattr(agent_routes, "chat_completion",
-                        lambda messages, **kw: ((queue.pop(0) if queue else ""), {}))
-    return queue
+from tests.agent_helpers import answer_of, events_of, model_text, ndjson, script
 
 
 @pytest.fixture
@@ -66,28 +43,26 @@ def fake_search(monkeypatch):
 
 def test_guest_agent_can_search_without_login(client, sandbox, monkeypatch, fake_search):
     """Гость получает агента: поиск работает, рабочая папка — нет."""
-    _stub_stream(monkeypatch, [
-        '{"action":"search","query":"asyncio"}',
+    script(monkeypatch, [
+        "Ищу в интернете.\n```web_search\nasyncio\n```",
         "asyncio — это библиотека [1]",
     ])
-    events = _ndjson(client.post("/api/agent/stream", json={"message": "найди asyncio"}))
+    events = ndjson(client.post("/api/agent/stream", json={"message": "найди asyncio"}))
     assert fake_search and fake_search[0]["query"] == "asyncio"
-    tools = [event for event in events if event["type"] == "tool"]
-    assert tools and tools[0]["name"] == "search"
+    tools = events_of(events, "tool")
+    assert tools and tools[0]["name"] == "web_search"
     result = next(event for event in events if event["type"] == "result")
     assert result["linux"] is False
-    assert "asyncio" in _answer(events)
+    assert "asyncio" in answer_of(events)
 
 
 def test_guest_agent_refuses_workspace_but_explains(client, sandbox, monkeypatch):
     """Команда в песочнице гостю недоступна, но ответ всё равно приходит."""
-    _stub_stream(monkeypatch, [
-        '{"action":"run","command":"ls"}',
-        "Файлы доступны только после входа.",
-    ])
-    events = _ndjson(client.post("/api/agent/stream", json={"message": "покажи файлы"}))
-    assert not [event for event in events if event["type"] == "tool"]
-    assert "войдите" in _answer(events).lower() or "доступны только" in _answer(events).lower()
+    script(monkeypatch, ["Файлы доступны только после входа в аккаунт."])
+    events = ndjson(client.post("/api/agent/stream", json={"message": "покажи файлы"}))
+    assert not events_of(events, "tool")
+    reply = answer_of(events).lower()
+    assert "войд" in reply or "доступны только" in reply
 
 
 def test_status_reports_capabilities_without_login(client):
@@ -95,36 +70,37 @@ def test_status_reports_capabilities_without_login(client):
     assert status["enabled"] is True and status["available"] is True
     assert status["tools"] is False and status["guest"] is True
     assert status["search"] is True
+    assert status["engine"] == "agenticseek"
     assert "TERMINAL_ENABLED" in status["workspace_hint"]
 
 
 # ══════════════ быстрый путь не теряет действия ══════════════
 
-def test_fast_answer_never_returns_raw_json(google_client, monkeypatch, fake_search):
-    """Короткий вопрос + ответ-действие: действие выполняется, JSON не утекает."""
-    _stub_stream(monkeypatch, [
-        '{"action":"search","query":"погода"}',
+def test_search_block_is_executed_and_not_shown_as_text(google_client, monkeypatch, fake_search):
+    """Ответ с блоком поиска: блок выполняется, а в чат идёт только текст."""
+    script(monkeypatch, [
+        "```web_search\nпогода Худжанд\n```",
         "Сегодня тепло.",
     ])
-    events = _ndjson(google_client.post("/api/agent/stream", json={"message": "что нового"}))
-    assert any(event["type"] == "tool" for event in events)
-    answer = _answer(events)
-    assert "{" not in answer and "Сегодня тепло" in answer
+    events = ndjson(google_client.post("/api/agent/stream", json={"message": "найди погоду"}))
+    assert events_of(events, "tool")
+    answer = answer_of(events)
+    assert "```" not in answer and "Сегодня тепло" in answer
 
 
-def test_fast_path_still_answers_simple_question_in_one_call(google_client, monkeypatch):
-    queue = _stub_stream(monkeypatch, ["Привет! Чем помочь?", "лишний"])
-    events = _ndjson(google_client.post("/api/agent/stream", json={"message": "привет"}))
+def test_simple_question_is_answered_in_one_call(google_client, monkeypatch):
+    queue = script(monkeypatch, ["Привет! Чем помочь?", "лишний"])
+    events = ndjson(google_client.post("/api/agent/stream", json={"message": "привет"}))
     assert queue == ["лишний"]
-    assert _answer(events) == "Привет! Чем помочь?"
-    assert not any(event["type"] in ("tool", "plan") for event in events)
+    assert answer_of(events) == "Привет! Чем помочь?"
+    assert not events_of(events, "tool") and not events_of(events, "plan")
 
 
 # ══════════════ история ══════════════
 
 def test_agent_turn_is_saved_to_chat_history(google_client, monkeypatch):
-    _stub_stream(monkeypatch, ["Запомнил: меня зовут Бунёд."])
-    _ndjson(google_client.post("/api/agent/stream", json={"message": "меня зовут Бунёд"}))
+    script(monkeypatch, ["Запомнил: меня зовут Бунёд."])
+    ndjson(google_client.post("/api/agent/stream", json={"message": "меня зовут Бунёд"}))
     history = google_client.get("/api/history").get_json()["history"]
     assert any(m["role"] == "user" and "Бунёд" in m["content"] for m in history)
     assert any(m["role"] == "assistant" and "Запомнил" in m["content"] for m in history)
@@ -132,91 +108,95 @@ def test_agent_turn_is_saved_to_chat_history(google_client, monkeypatch):
 
 def test_agent_remembers_previous_turns_through_database(google_client, monkeypatch):
     seen = []
-    _stub_stream(monkeypatch, ["Запомнил."], seen)
-    _ndjson(google_client.post("/api/agent/stream", json={"message": "меня зовут Бунёд"}))
-    _stub_stream(monkeypatch, ["Тебя зовут Бунёд."], seen)
-    _ndjson(google_client.post("/api/agent/stream", json={"message": "как меня зовут?"}))
-    previous = " ".join(message["content"] for message in seen[-1]["messages"])
-    assert "Бунёд" in previous
+    script(monkeypatch, ["Запомнил."], seen)
+    ndjson(google_client.post("/api/agent/stream", json={"message": "меня зовут Бунёд"}))
+    script(monkeypatch, ["Тебя зовут Бунёд."], seen)
+    ndjson(google_client.post("/api/agent/stream", json={"message": "как меня зовут?"}))
+    assert "Бунёд" in model_text(seen, -1)
 
 
 # ══════════════ инструменты и флаги результата ══════════════
 
 def test_linux_flag_is_true_only_after_workspace_action(admin_client, monkeypatch, sandbox):
-    _stub_stream(monkeypatch, ['{"action":"run","command":"pwd"}', "Готово."])
-    events = _ndjson(admin_client.post("/api/agent/stream", json={"message": "где я?"}))
+    script(monkeypatch, ["```bash\npwd\n```", "Готово."])
+    events = ndjson(admin_client.post("/api/agent/stream", json={"message": "запусти pwd"}))
     result = next(event for event in events if event["type"] == "result")
-    assert result["linux"] is True and "run" in result["tools"]
+    assert result["linux"] is True and "bash" in result["tools"]
 
 
-def test_git_action_runs_through_registry(admin_client, monkeypatch, sandbox):
-    _stub_stream(monkeypatch, ['{"action":"git","command":"status --short"}', "Проверил git."])
-    events = _ndjson(admin_client.post("/api/agent/stream", json={"message": "проверь git"}))
+def test_git_command_runs_through_the_sandbox(admin_client, monkeypatch, sandbox):
+    script(monkeypatch, ["```bash\ngit status --short\n```", "Проверил git."])
+    events = ndjson(admin_client.post("/api/agent/stream", json={"message": "проверь git"}))
     tool = next(event for event in events if event["type"] == "tool")
     assert tool["command"].startswith("git status")
     result = next(event for event in events if event["type"] == "result")
-    assert "git" in result["tools"]
+    assert "bash" in result["tools"]
 
 
 def test_workspace_tools_are_hidden_from_guest_prompt(client, sandbox, monkeypatch):
     seen = []
-    _stub_stream(monkeypatch, ["Ответ без файлов"], seen)
-    _ndjson(client.post("/api/agent/stream", json={"message": "что в папке?"}))
-    system = seen[0]["system"]
-    assert '"action":"run"' not in system and '"action":"write"' not in system
-    assert "TERMINAL_ENABLED=0" in system
-
-
-def test_registry_blocks_workspace_tools_without_login(client, sandbox):
-    tool_registry.bootstrap_default_tools()
-    with client.application.test_request_context("/api/agent/stream"):
-        result = tool_registry.call_tool("file_write", path="hack.txt", content="x")
-    assert result["ok"] is False
-    assert result["error"]["type"] == "unauthorized"
+    script(monkeypatch, ["Ответ без файлов"], seen)
+    ndjson(client.post("/api/agent/stream", json={"message": "что в папке?"}))
+    system = model_text(seen)
+    # В промпте есть примеры блоков, поэтому проверяем список инструментов
+    # запуска: у гостя нет файлов и терминала, но поиск и задачи остаются.
+    tools_block = system.split("ДОСТУПНЫЕ ИНСТРУМЕНТЫ", 1)[-1]
+    assert "```web_search" in tools_block
+    for hidden in ("```bash", "```python", "```file_finder"):
+        assert hidden not in tools_block
+    assert "Рабочая папка:" in system      # папка названа, но инструментов нет
 
 
 # ══════════════ медиа ══════════════
 
-def test_media_generation_reports_real_statuses(google_client, monkeypatch):
+def _fake_generate(monkeypatch, result, errors=None, calls=None):
     def fake_generate(kind, prompt, options=None, wanted_model="", on_status=None):
+        if calls is not None:
+            calls.append(prompt)
         if on_status:
             on_status("Отправка запроса к Pollinations (flux)")
             on_status("Провайдер вернул ответ, сохраняю файл")
-        return ({"kind": kind, "url": "/media/x.png", "filename": "x.png",
-                 "model_name": "Pollinations Flux"}, 
-                {"id": "flux", "name": "Pollinations Flux", "provider_name": "Pollinations"}, [])
-
+        return result, ({"id": "flux", "name": "Pollinations Flux"} if result else None), errors or []
     monkeypatch.setattr(media_agent, "generate", fake_generate)
-    _stub_stream(monkeypatch, ['{"action":"image","prompt":"закат"}', "Готово."])
-    events = _ndjson(google_client.post("/api/agent/stream", json={"message": "нарисуй закат"}))
-    steps = [event["text"] for event in events if event["type"] == "step"]
+
+
+def test_media_generation_reports_real_statuses(google_client, monkeypatch):
+    _fake_generate(monkeypatch, {"kind": "image", "url": "/media/x.png",
+                                 "filename": "x.png", "model_name": "Pollinations Flux"})
+    events = ndjson(google_client.post("/api/agent/stream", json={"message": "нарисуй закат"}))
+    steps = [event["text"] for event in events_of(events, "step")]
     assert any("Отправка запроса" in text for text in steps)
     assert any("сохраняю файл" in text for text in steps)
-    media = next(event for event in events if event["type"] == "media")
+    media = events_of(events, "media")[0]
     assert media["media"]["url"] == "/media/x.png"
 
 
 def test_media_is_marked_in_history_for_reload(google_client, monkeypatch):
-    def fake_generate(kind, prompt, options=None, wanted_model="", on_status=None):
-        return ({"kind": kind, "url": "/media/x.png", "filename": "x.png",
-                 "model_name": "Pollinations Flux"},
-                {"id": "flux", "name": "Pollinations Flux", "provider_name": "Pollinations"}, [])
-
-    monkeypatch.setattr(media_agent, "generate", fake_generate)
-    _stub_stream(monkeypatch, ['{"action":"image","prompt":"маяк"}', "Готово."])
-    _ndjson(google_client.post("/api/agent/stream", json={"message": "нарисуй маяк"}))
+    _fake_generate(monkeypatch, {"kind": "image", "url": "/media/x.png",
+                                 "filename": "x.png", "model_name": "Pollinations Flux"})
+    ndjson(google_client.post("/api/agent/stream", json={"message": "нарисуй маяк"}))
     history = google_client.get("/api/history").get_json()["history"]
     markers = [m for m in history if m["content"].startswith("MEDIA_RESULT:")]
     assert markers and "/media/x.png" in markers[0]["content"]
 
 
+def test_media_request_does_not_ask_the_model(client, sandbox, monkeypatch):
+    """Промпт уже в сообщении: модель для генерации не нужна (экономия запросов)."""
+    calls, seen = [], []
+    _fake_generate(monkeypatch, {"kind": "image", "url": "/media/y.png"}, calls=calls)
+    script(monkeypatch, ["этот ответ не должен использоваться"], seen)
+    events = ndjson(client.post("/api/agent/stream", json={"message": "нарисуй закат"}))
+    assert seen == [] and calls and calls[0] == "нарисуй закат"
+    assert answer_of(events).startswith("Готово")
+
+
 # ══════════════ совместимость: /send_stream с agent=true ══════════════
 
 def test_send_stream_can_delegate_to_agent(client, sandbox, monkeypatch, fake_search):
-    _stub_stream(monkeypatch, ['{"action":"search","query":"курс"}', "Курс найден."])
-    events = _ndjson(client.post("/send_stream", json={"message": "какой курс", "agent": True}))
-    assert any(event["type"] == "tool" for event in events)
-    assert _answer(events) == "Курс найден."
+    script(monkeypatch, ["```web_search\nкурс доллара\n```", "Курс найден."])
+    events = ndjson(client.post("/send_stream", json={"message": "какой курс", "agent": True}))
+    assert events_of(events, "tool")
+    assert answer_of(events) == "Курс найден."
 
 
 # ══════════════ офлайн-режим: реальные операции, а не заглушка ══════════════
@@ -259,47 +239,46 @@ def test_offline_datetime_is_real():
 
 def test_offline_agent_searches_when_model_is_absent(client, sandbox, fake_search):
     """Без языковой модели «найди …» всё равно идёт в настоящий поиск."""
-    events = _ndjson(client.post("/api/agent/stream", json={"message": "найди asyncio"}))
+    events = ndjson(client.post("/api/agent/stream", json={"message": "найди asyncio"}))
     assert fake_search, "поиск не вызывался"
     assert fake_search[0]["query"] == "asyncio", fake_search
-    assert any(event["type"] == "tool" and event.get("name") == "search" for event in events)
+    assert any(event["type"] == "tool" and event.get("name") == "web_search"
+               for event in events)
     result = next(event for event in events if event["type"] == "result")
     assert result["offline"] is True and result["searched"] is True
-    assert "docs.python.org/asyncio" in _answer(events)
+    assert "docs.python.org/asyncio" in answer_of(events)
 
 
 def test_offline_agent_keeps_honest_answer_when_search_is_empty(client, sandbox, monkeypatch):
-    monkeypatch.setattr(agent_routes, "nova_search", lambda query, limit=8: ([], {"backend": "none"}))
-    events = _ndjson(client.post("/api/agent/stream", json={"message": "найди неизвестно-что"}))
+    monkeypatch.setattr(agent_routes, "nova_search",
+                        lambda query, limit=8: ([], {"backend": "none"}))
+    events = ndjson(client.post("/api/agent/stream", json={"message": "найди неизвестно-что"}))
     assert any(event["type"] == "step" and "ничего не дал" in event["text"] for event in events)
-    assert "языковой модели нет" in _answer(events).lower()
+    assert "языковой модели нет" in answer_of(events).lower()
 
 
 def test_offline_intent_never_hijacks_a_working_model(client, sandbox, fake_search, monkeypatch):
     """Если модель ответила по-настоящему, офлайн-ветка в дело не лезет."""
-    _stub_stream(monkeypatch, ["asyncio — это библиотека для асинхронности."])
-    events = _ndjson(client.post("/api/agent/stream", json={"message": "найди asyncio"}))
+    script(monkeypatch, ["asyncio — это библиотека для асинхронности."])
+    events = ndjson(client.post("/api/agent/stream", json={"message": "найди asyncio"}))
     assert not fake_search, "поиск запустился, хотя модель ответила сама"
-    assert "библиотека для асинхронности" in _answer(events)
+    assert "библиотека для асинхронности" in answer_of(events)
 
 
 # ══════════════ офлайн-медиа и служебные сообщения ══════════════
 
 def test_offline_media_request_says_why_and_tries_once(client, sandbox, monkeypatch):
     attempts = []
-
-    def generate(kind, prompt, options=None, wanted_model="", on_status=None):
-        attempts.append(prompt)
-        return None, None, ["Нет доступных моделей (image). Подключить: POLLINATIONS_API_KEY"]
-
-    monkeypatch.setattr(media_agent, "generate", generate)
-    events = _ndjson(client.post("/api/agent/stream", json={"message": "нарисуй кота"}))
-    reply = _answer(events)
+    _fake_generate(monkeypatch, None,
+                   errors=["Нет доступных моделей (image). Подключить: POLLINATIONS_API_KEY"],
+                   calls=attempts)
+    events = ndjson(client.post("/api/agent/stream", json={"message": "нарисуй кота"}))
+    reply = answer_of(events)
     assert "Не получилось создать" in reply and "POLLINATIONS_API_KEY" in reply
     assert "языковой модели нет" not in reply.lower()
-    assert attempts == ["кота"], attempts            # промпт без «нарисуй», попытка одна
-    failures = [event for event in events
-                if event["type"] == "step" and "Не получилось создать" in event["text"]]
+    assert len(attempts) == 1, attempts
+    failures = [event for event in events_of(events, "step")
+                if "Не получилось создать" in event["text"]]
     assert len(failures) == 1 and "Нет доступных моделей" in failures[0]["text"]
 
 

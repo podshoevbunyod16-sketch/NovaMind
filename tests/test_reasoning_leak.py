@@ -114,61 +114,82 @@ def test_quote_of_the_question_is_not_salvaged():
     assert agent.salvage_quoted_answer(text, GOAL) == ""
 
 
-# ══════════════ повторный синтез ══════════════
+# ══════════════ восстановление ответа движком ══════════════
 
-def test_synthesize_retries_after_leak():
-    replies = [(LEAK, {}), (GOOD, {})]
-    with mock.patch.object(agent, "chat_completion", side_effect=replies) as chat:
-        answer = agent._synthesize(GOAL, {"notes": [("поиск", "данные")], "sources": []}, "p", "m")
-    assert answer == GOOD
-    assert chat.call_count == 2          # второй запрос — со строгой инструкцией
+def _engine(monkeypatch, answers, seen=None):
+    """Движок без Flask: маршрут не нужен, ответ уходит в ``engine.answer``."""
+    from agenticseek.engine import AgentEngine, EngineContext
+    from routes.agent import final_answer_text, salvage_quoted_answer
+    from tests.agent_helpers import script
+
+    script(monkeypatch, answers, seen)
+    import routes.agent as agent_routes
+    return AgentEngine(EngineContext(
+        goal=GOAL, complete=agent_routes.chat_completion, emit=lambda event: None,
+        provider="groq", model="test-model",
+        finalize=lambda text: final_answer_text(text, GOAL),
+        salvage_answer=lambda text: salvage_quoted_answer(text, GOAL)))
 
 
-def test_synthesize_salvages_quote_when_both_attempts_leak():
-    with mock.patch.object(agent, "chat_completion", return_value=(LEAK, {})):
-        answer = agent._synthesize(GOAL, {"notes": [("поиск", "данные")], "sources": []}, "p", "m")
-    assert answer.startswith("Tesla Roadster: первое поколение")
-    assert "Then explanation" not in answer
+def test_engine_retries_after_leak(monkeypatch):
+    """Рассуждение в ответе → один строгий повтор и чистый ответ пользователю."""
+    seen = []
+    engine = _engine(monkeypatch, [LEAK, GOOD], seen)
+    events = list(engine.stream())
+
+    assert engine.answer == GOOD
+    assert engine.state.status == "ok"
+    assert len(seen) == 2                      # второй запрос — со строгой инструкцией
+    assert "только готовым ответом" in seen[1]["system"]
+    assert any("прошу чистый ответ" in str(event.get("text"))
+               for event in events if event["type"] == "step")
 
 
-# ══════════════ быстрый путь главного чата ══════════════
+def test_engine_salvages_quote_when_both_attempts_leak(monkeypatch):
+    """Оба ответа — рассуждение: достаём готовую цитату, а не отдаём пустоту."""
+    engine = _engine(monkeypatch, [LEAK])
+    list(engine.stream())
+
+    assert engine.answer.startswith("Tesla Roadster: первое поколение")
+    assert "Then explanation" not in engine.answer
+    assert "We need" not in engine.answer
+
+
+def test_engine_reports_no_answer_when_nothing_to_salvage(monkeypatch):
+    """Спасать нечего — честное сообщение вместо пустого ответа."""
+    engine = _engine(monkeypatch, ["We need think about this question but there is nothing."])
+    list(engine.stream())
+
+    assert engine.state.status == "error"
+    assert "Не удалось получить ответ" in engine.answer
+
+
+# ══════════════ поток чата ══════════════
 
 def test_simple_question_does_not_show_reasoning(admin_client, monkeypatch):
     """Именно этот сценарий был на скриншоте: короткий вопрос и «мыслящий» текст."""
-    replies = [(LEAK, {}), (GOOD, {})]
+    from tests.agent_helpers import answer_of, events_of, script
 
-    def completion(messages, **kwargs):
-        return replies.pop(0) if replies else (GOOD, {})
-
-    monkeypatch.setattr(agent, "chat_completion", completion)
-    monkeypatch.setattr(agent, "chat_stream", lambda *args, **kwargs: iter(()))
-
-    response = admin_client.post("/api/agent/stream", json={"message": GOAL})
-    events = _ndjson(response)
+    script(monkeypatch, [LEAK, GOOD])
+    events = _ndjson(admin_client.post("/api/agent/stream", json={"message": GOAL}))
     result = next(event for event in events if event["type"] == "result")
 
-    assert result.get("fast") is True
     assert result["reply"] == GOOD
-    assert "We need" not in _answer(events)
-    assert "They supplied" not in _answer(events)
+    assert result["status"] == "ok"
+    assert answer_of(events) == GOOD
+    assert "We need" not in answer_of(events)
+    assert "They supplied" not in answer_of(events)
 
 
 def test_fast_path_salvages_quoted_answer_when_retry_also_leaks(admin_client, monkeypatch):
     """Даже если модель дважды ответила рассуждением, пользователь получает ответ."""
-    replies = [(LEAK, {}), (LEAK, {})]
+    from tests.agent_helpers import answer_of, script
 
-    def completion(messages, **kwargs):
-        return replies.pop(0) if replies else (LEAK, {})
-
-    monkeypatch.setattr(agent, "chat_completion", completion)
-    monkeypatch.setattr(agent, "chat_stream", lambda *args, **kwargs: iter(()))
-
-    response = admin_client.post("/api/agent/stream", json={"message": GOAL})
-    events = _ndjson(response)
+    script(monkeypatch, [LEAK])
+    events = _ndjson(admin_client.post("/api/agent/stream", json={"message": GOAL}))
     result = next(event for event in events if event["type"] == "result")
 
-    assert result.get("fast") is True
     assert result["reply"].startswith("Tesla Roadster: первое поколение")
-    answer = _answer(events)
+    answer = answer_of(events)
     assert "Then explanation" not in answer
     assert "We need" not in answer

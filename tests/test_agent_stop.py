@@ -12,6 +12,7 @@ import pytest
 
 import routes.agent as agent_routes
 import routes.terminal as term_routes
+from tests.agent_helpers import events_of
 
 
 def _ndjson(response):
@@ -81,34 +82,33 @@ def test_stream_returns_run_id_and_finishes_it(admin_client, sandbox, monkeypatc
 
 
 def test_stream_stops_between_steps_and_saves_partial(admin_client, sandbox, monkeypatch):
-    """Пользователь нажал «Стоп» во время поиска — второй запрос к модели не идёт."""
+    """«Стоп» во время первого шага: второй запрос к модели уже не идёт."""
     calls = {"model": 0}
 
     def search(query, limit=8):
         # имитируем нажатие кнопки: взводим флаг текущего запуска
         for record in agent_routes._ACTIVE_RUNS.values():
             record["cancel"].set()
-        return [{"title": "asyncio", "url": "https://docs.python.org/asyncio",
-                 "snippet": "библиотека", "host": "docs.python.org"}], {
-            "backend": "test", "results": [{"title": "asyncio",
-                                            "url": "https://docs.python.org/asyncio"}],
-            "trace": [{"backend": "test", "ok": True, "ms": 1}]}
+        results = [{"title": "asyncio", "url": "https://docs.python.org/asyncio",
+                    "snippet": "библиотека", "host": "docs.python.org"}]
+        return results, {"backend": "test", "results": results}
 
     def completion(messages, **kwargs):
         calls["model"] += 1
-        return '{"action":"search","query":"asyncio"}', {}
+        return "```web_search\nasyncio\n```", {"provider": "test"}
 
     monkeypatch.setattr(agent_routes, "nova_search", search)
+    monkeypatch.setattr(agent_routes, "resolve_target",
+                        lambda provider=None, model=None: ("groq", "test-model", {}))
     monkeypatch.setattr(agent_routes, "chat_completion", completion)
-    monkeypatch.setattr(agent_routes, "chat_stream", lambda *a, **k: iter(()))
 
     events = _ndjson(admin_client.post("/api/agent/stream", json={"message": "найди asyncio"}))
     result = next(event for event in events if event["type"] == "result")
 
     assert result["stopped"] is True and result["status"] == "stopped"
     assert "Остановлено" in _answer(events)
-    assert calls["model"] == 1                 # цикл вышел до второго запроса
-    assert any(event["type"] == "step" and "Остановлено" in event["text"] for event in events)
+    assert calls["model"] == 1              # цикл вышел до второго запроса
+    assert any("Остановлено" in event["text"] for event in events_of(events, "step"))
 
 
 def test_stop_before_first_step_makes_no_model_or_tool_calls(admin_client, sandbox, monkeypatch):
@@ -116,10 +116,11 @@ def test_stop_before_first_step_makes_no_model_or_tool_calls(admin_client, sandb
 
     def completion(messages, **kwargs):
         calls["model"] += 1
-        return "не должно вызываться", {}
+        return "не должно вызываться", {"provider": "test"}
 
+    monkeypatch.setattr(agent_routes, "resolve_target",
+                        lambda provider=None, model=None: ("groq", "test-model", {}))
     monkeypatch.setattr(agent_routes, "chat_completion", completion)
-    monkeypatch.setattr(agent_routes, "chat_stream", lambda *a, **k: iter(()))
     original = agent_routes.register_run
 
     def register_and_stop():
@@ -137,15 +138,33 @@ def test_stop_before_first_step_makes_no_model_or_tool_calls(admin_client, sandb
     assert "Остановлено" in result["reply"]
 
 
-def test_perform_skips_action_when_cancelled():
-    cancel = threading.Event()
-    cancel.set()
-    state = {"notes": [], "sources": [], "tool_steps": 0}
-    generator = agent_routes._perform({"action": "run", "command": "ls"}, "run", True, state,
-                                      cancel=cancel)
-    with pytest.raises(StopIteration) as stop:
-        next(generator)
-    assert "Остановлено" in str(stop.value.value)
+def test_cancelled_run_does_not_execute_the_block(admin_client, sandbox, monkeypatch):
+    """Флаг отмены проверяется перед выполнением блока, а не после."""
+    calls = {"model": 0}
+    seen = []
+
+    def completion(messages, **kwargs):
+        calls["model"] += 1
+        seen.append(messages)
+        return "```bash\nsleep 5\n```", {"provider": "test"}
+
+    monkeypatch.setattr(agent_routes, "resolve_target",
+                        lambda provider=None, model=None: ("groq", "test-model", {}))
+    monkeypatch.setattr(agent_routes, "chat_completion", completion)
+    original = agent_routes.register_run
+
+    def register_and_stop():
+        run_id, cancel = original()
+        cancel.set()
+        return run_id, cancel
+
+    monkeypatch.setattr(agent_routes, "register_run", register_and_stop)
+    started = time.time()
+
+    events = _ndjson(admin_client.post("/api/agent/stream", json={"message": "запусти sleep 5"}))
+    assert time.time() - started < 5
+    assert events_of(events, "tool") == []
+    assert next(e for e in events if e["type"] == "result")["status"] == "stopped"
 
 
 # ══════════════ процессы shell ══════════════

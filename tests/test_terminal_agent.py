@@ -162,33 +162,9 @@ def test_task_requires_title(client):
     assert client.post("/api/tasks", json={"title": "   "}).status_code == 400
 
 
-# ══════════════ агент ══════════════
+# ══════════════ агент (движок AgenticSeek) ══════════════
 
-def _ndjson(response):
-    return [json.loads(line) for line in response.get_data(as_text=True).splitlines() if line.strip()]
-
-
-def _stub_model(monkeypatch, answers):
-    """Модель отвечает заранее подготовленными строками по очереди (потоком)."""
-    queue = list(answers)
-
-    def fake_completion(messages, **kwargs):
-        return (queue.pop(0) if queue else "готово"), {}
-
-    def fake_stream(messages, **kwargs):
-        text = queue.pop(0) if queue else "готово"
-        # режем на куски, как настоящий поток
-        for index in range(0, len(text), 7):
-            yield "token", text[index:index + 7]
-        yield "done", ""
-
-    monkeypatch.setattr(agent_routes, "chat_completion", fake_completion)
-    monkeypatch.setattr(agent_routes, "chat_stream", fake_stream)
-    return queue
-
-
-def _answer(events):
-    return "".join(event["token"] for event in events if event["type"] == "token")
+from tests.agent_helpers import answer_of, events_of, model_text, ndjson, script
 
 
 def test_agent_status_reports_tools(admin_client):
@@ -196,14 +172,14 @@ def test_agent_status_reports_tools(admin_client):
     assert status["enabled"] is True and status["tools"] is True
     assert status["available"] is True
     assert status["max_steps"] >= 1
+    assert status["engine"] == "agenticseek"
 
 
 def test_agent_status_explains_disabled_env(google_client, monkeypatch):
-    monkeypatch.setenv("TERMINAL_ENABLED", "0")
     monkeypatch.setenv("AGENT_ENABLED", "0")
     status = google_client.get("/api/agent/status").get_json()
     assert status["available"] is False
-    assert "TERMINAL_ENABLED=1" in status["hint"]
+    assert "AGENT_ENABLED=1" in status["hint"]
 
 
 def test_agent_requires_enable_flag(google_client, monkeypatch, sandbox):
@@ -212,11 +188,7 @@ def test_agent_requires_enable_flag(google_client, monkeypatch, sandbox):
 
 
 def test_agent_works_for_guests_but_workspace_requires_login(client, sandbox):
-    """Агент доступен всем, а файлы/терминал — только вошедшим.
-
-    Раньше /api/agent/stream отвечал 403 без входа, и незалогиненный
-    пользователь получал обычный текстовый чат без инструментов.
-    """
+    """Агент доступен всем, а файлы/терминал — только вошедшим."""
     response = client.post("/api/agent/stream", json={"message": "привет"})
     response.get_data()          # поток нужно дочитать, иначе останется открытый контекст
     assert response.status_code == 200
@@ -225,254 +197,191 @@ def test_agent_works_for_guests_but_workspace_requires_login(client, sandbox):
     assert status["tools"] is False and status["guest"] is True
 
 
-def test_simple_question_is_answered_in_one_streamed_call(google_client, monkeypatch, sandbox):
-    """Простой вопрос: ни плана, ни команд — сразу поток текста."""
-    queue = _stub_model(monkeypatch, ["Привет! Чем помочь?", "лишний ответ"])
-    events = _ndjson(google_client.post("/api/agent/stream", json={"message": "привет"}))
+def test_simple_question_is_answered_in_one_call(google_client, monkeypatch, sandbox):
+    """Простой вопрос: ни плана, ни команд — один запрос к модели."""
+    queue = script(monkeypatch, ["Привет! Чем помочь?", "лишний ответ"])
+    events = ndjson(google_client.post("/api/agent/stream", json={"message": "привет"}))
     kinds = [event["type"] for event in events]
-    assert "tool" not in kinds and "plan" not in kinds and "stage" not in kinds
-    assert _answer(events) == "Привет! Чем помочь?"
-    assert queue == ["лишний ответ"]           # ровно один запрос к модели
+    assert "tool" not in kinds and "plan" not in kinds
+    assert answer_of(events) == "Привет! Чем помочь?"
+    assert queue == ["лишний ответ"]
     assert events[-1]["type"] == "done"
 
 
 def test_agent_runs_command_then_answers(admin_client, monkeypatch, sandbox):
-    _stub_model(monkeypatch, [
-        '{"action":"plan","steps":["запустить hello.py","ответить"]}',
-        '{"action":"run","command":"python3 hello.py","thought":"проверю вывод"}',
+    script(monkeypatch, [
+        "Сначала проверю вывод.\n```bash\npython3 hello.py\n```",
         "Скрипт отработал: привет из папки",
     ])
-    events = _ndjson(admin_client.post("/api/agent/stream", json={"message": "запусти hello.py"}))
-    kinds = [event["type"] for event in events]
-
-    assert kinds[0] == "stage"
-    assert "plan" in kinds
-    plan = next(event for event in events if event["type"] == "plan")
-    assert "1. запустить hello.py" in plan["text"]
-    assert any(event["type"] == "step" and event["text"] == "проверю вывод" for event in events)
-    tool = next(event for event in events if event["type"] == "tool")
+    (sandbox / "hello.py").write_text("print('Привет из папки')", encoding="utf-8")
+    events = ndjson(admin_client.post("/api/agent/stream", json={"message": "запусти hello.py"}))
+    assert events[0]["type"] == "stage"
+    tool = events_of(events, "tool")[0]
     assert tool["code"] == 0 and "Привет" in tool["output"]
-    assert "Скрипт отработал" in _answer(events)
+    assert "Скрипт отработал" in answer_of(events)
     result = next(event for event in events if event["type"] == "result")
-    assert result["steps"] == 2
+    assert result["steps"] >= 1
     assert events[-1]["type"] == "done"
 
 
-def test_json_answer_action_is_printed_as_text(admin_client, monkeypatch, sandbox):
-    _stub_model(monkeypatch, ['```json\n{"action":"answer","text":"Готово, всё работает"}\n```'])
-    events = _ndjson(admin_client.post("/api/agent/stream", json={"message": "проверь"}))
-    assert _answer(events) == "Готово, всё работает"
+def test_legacy_json_action_is_never_shown_to_user(admin_client, monkeypatch, sandbox):
+    """Старый протокол удалён: JSON-действие не попадает в чат как ответ."""
+    script(monkeypatch, ['{"action":"answer","text":"Готово, всё работает"}'])
+    events = ndjson(admin_client.post("/api/agent/stream", json={"message": "проверь"}))
+    assert "{" not in answer_of(events)
+    result = next(event for event in events if event["type"] == "result")
+    assert result["status"] in ("ok", "error")
 
 
-def test_code_answer_is_not_mistaken_for_action(admin_client, monkeypatch, sandbox):
+def test_code_answer_is_not_executed_for_casual_chat(admin_client, monkeypatch, sandbox):
+    """В обычном разговоре код в ответе — это текст, а не действие."""
     reply = "```python\nprint('hi')\n```\nЭтот код печатает hi."
-    _stub_model(monkeypatch, [reply])
-    events = _ndjson(admin_client.post("/api/agent/stream", json={"message": "код"}))
-    assert not [event for event in events if event["type"] == "tool"]
-    assert _answer(events) == reply
-
-
-def test_text_then_action_is_retracted_and_executed(admin_client, monkeypatch, sandbox):
-    """Модель начала с фразы, а потом выдала JSON — фразу убираем, действие выполняем."""
-    _stub_model(monkeypatch, [
-        'Ок: {"action":"run","command":"ls","thought":"посмотрю файлы в рабочей папке"}',
-        "В папке есть hello.py",
-    ])
-    events = _ndjson(admin_client.post("/api/agent/stream", json={"message": "что в папке?"}))
-    kinds = [event["type"] for event in events]
-    assert "retract" in kinds
-    assert kinds.index("retract") < kinds.index("tool")
-    after = events[kinds.index("retract"):]
-    assert _answer(after).endswith("В папке есть hello.py")
+    script(monkeypatch, [reply])
+    events = ndjson(admin_client.post("/api/agent/stream", json={"message": "привет"}))
+    assert not events_of(events, "tool")
+    assert answer_of(events) == reply
 
 
 def test_agent_writes_file_then_runs_it(admin_client, monkeypatch, sandbox):
-    _stub_model(monkeypatch, [
-        '{"action":"write","path":"calc.py","content":"print(6 * 7)"}',
-        '{"action":"run","command":"python3 calc.py"}',
+    script(monkeypatch, [
+        "```python:calc.py\nprint(6 * 7)\n```",
+        "```bash\npython3 calc.py\n```",
         "Ответ: 42",
     ])
-    events = _ndjson(admin_client.post("/api/agent/stream", json={"message": "посчитай 6*7 в python"}))
-    tools = [event for event in events if event["type"] == "tool"]
-    assert [tool["name"] for tool in tools] == ["write", "run"]
-    assert tools[1]["output"].strip() == "42"
-    assert (sandbox / "calc.py").read_text() == "print(6 * 7)"
-    assert _answer(events) == "Ответ: 42"
+    events = ndjson(admin_client.post("/api/agent/stream",
+                                      json={"message": "напиши скрипт calc.py и посчитай 6*7"}))
+    tools = events_of(events, "tool")
+    assert [tool["name"] for tool in tools][:2] == ["python", "bash"]
+    assert "42" in tools[1]["output"].strip()
+    assert (sandbox / "calc.py").read_text(encoding="utf-8").strip() == "print(6 * 7)"
+    assert answer_of(events) == "Ответ: 42"
 
 
 def test_agent_creates_and_closes_task(admin_client, monkeypatch, sandbox):
-    _stub_model(monkeypatch, [
-        '{"action":"task","title":"Проверить песочницу","detail":"создать файл"}',
-        '{"action":"write","path":"notes/agent.md","content":"готово"}',
-        '{"action":"task_done","note":"файл создан"}',
+    script(monkeypatch, [
+        '```task\n{"title": "Проверить песочницу", "detail": "создать файл"}\n```',
+        '```python:notes/agent.md\nготово\n```',
+        '```task_done\n{"note": "файл создан"}\n```',
         "Задача выполнена",
     ])
-    events = _ndjson(admin_client.post("/api/agent/stream", json={"message": "создай заметку"}))
+    events = ndjson(admin_client.post("/api/agent/stream",
+                                      json={"message": "создай заметку в рабочей папке"}))
     result = next(event for event in events if event["type"] == "result")
-
     assert result["task_id"]
-    task = admin_client.get("/api/tasks").get_json()["tasks"]
-    created = next(item for item in task if item["id"] == result["task_id"])
+    tasks = admin_client.get("/api/tasks").get_json()["tasks"]
+    created = next(item for item in tasks if item["id"] == result["task_id"])
     assert created["source"] == "agent"
     assert created["status"] == "done"
     assert (sandbox / "notes" / "agent.md").exists()
-    assert any(step["title"] == "Записал notes/agent.md" for step in created["steps"])
+    assert "Задача выполнена" in answer_of(events)
 
 
 def test_agent_respects_step_limit(admin_client, monkeypatch, sandbox):
+    """Лимит шагов движка: после него агент честно останавливается."""
     monkeypatch.setattr(agent_routes, "MAX_STEPS", 2)
-    _stub_model(monkeypatch, [
-        '{"action":"run","command":"ls"}',
-        '{"action":"run","command":"ls"}',
-        "хватит, вот итог",                  # после лимита — только текст
+    script(monkeypatch, [
+        "```bash\nls\n```",
+        "```bash\npwd\n```",
+        "```bash\nwhoami\n```",
+        "хватит, вот итог",
     ])
-    events = _ndjson(admin_client.post("/api/agent/stream", json={"message": "покрути"}))
+    events = ndjson(admin_client.post("/api/agent/stream", json={"message": "покрути команды"}))
     result = next(event for event in events if event["type"] == "result")
-    assert result["steps"] <= 2
-    assert sum(1 for event in events if event["type"] == "tool") <= 2
-    assert any(event["type"] == "step" and "Шаги закончились" in event["text"] for event in events)
-    assert "итог" in _answer(events)
+    assert result["steps"] == 2
+    assert len(events_of(events, "tool")) == 2
+    assert any("лимит шагов" in event["text"].lower() for event in events_of(events, "step"))
+    assert result["status"] == "stopped"
 
 
 def test_agent_failed_command_goes_back_to_model(admin_client, monkeypatch, sandbox):
     seen = []
-
-    def fake_stream(messages, **kwargs):
-        seen.append(messages[-1]["content"])
-        text = '{"action":"run","command":"python3 nope.py"}' if len(seen) == 1 else "Файла нет — создам его"
-        yield "token", text
-        yield "done", ""
-
-    monkeypatch.setattr(agent_routes, "chat_stream", fake_stream)
-    events = _ndjson(admin_client.post("/api/agent/stream", json={"message": "запусти nope.py"}))
-    tool = next(event for event in events if event["type"] == "tool")
+    script(monkeypatch, [
+        "```bash\npython3 nope.py\n```",
+        "Файла нет — создам его",
+    ], seen)
+    events = ndjson(admin_client.post("/api/agent/stream", json={"message": "запусти nope.py"}))
+    tool = events_of(events, "tool")[0]
     assert tool["code"] != 0
-    assert "код выхода" in seen[1] and "nope.py" in seen[1]
+    feedback = model_text(seen)
+    assert "nope.py" in feedback and ("код" in feedback or "No such file" in feedback)
 
 
 def test_agent_remembers_chat_history(admin_client, monkeypatch, sandbox):
-    captured = []
-
-    def fake_stream(messages, **kwargs):
-        captured.append(list(messages))
-        yield "token", "ответ"
-        yield "done", ""
-
-    monkeypatch.setattr(agent_routes, "chat_stream", fake_stream)
+    seen = []
+    script(monkeypatch, ["ответ"], seen)
     admin_client.post("/api/agent/stream", json={"message": "меня зовут Бунёд"}).get_data()
     admin_client.post("/api/agent/stream", json={"message": "как меня зовут?"}).get_data()
-    second = captured[-1]
-    assert any("Бунёд" in message["content"] for message in second[:-1])
-    assert second[-1]["content"] == "как меня зовут?"
+    assert "Бунёд" in model_text(seen, -1)
 
 
-def test_agent_empty_stream_falls_back_to_completion(admin_client, monkeypatch, sandbox):
-    def empty_stream(messages, **kwargs):
-        yield "error", "обрыв"
-        yield "done", ""
-
-    monkeypatch.setattr(agent_routes, "chat_stream", empty_stream)
-    monkeypatch.setattr(agent_routes, "chat_completion", lambda messages, **kw: ("Ответ без потока", {}))
-    events = _ndjson(admin_client.post("/api/agent/stream", json={"message": "привет"}))
-    assert _answer(events) == "Ответ без потока"
+def test_model_failure_is_reported_honestly(admin_client, monkeypatch, sandbox):
+    """Модель недоступна: пользователь получает ошибку, а не зависание."""
+    monkeypatch.setattr(agent_routes, "resolve_target",
+                        lambda provider=None, model=None: ("groq", "test-model", {}))
+    monkeypatch.setattr(agent_routes, "chat_completion",
+                        lambda messages, **kwargs: (None, "quota exceeded"))
+    events = ndjson(admin_client.post("/api/agent/stream", json={"message": "привет"}))
+    assert events_of(events, "error")
+    result = next(event for event in events if event["type"] == "result")
+    assert result["status"] == "error"
+    assert "Модель не ответила" in answer_of(events)
+    assert events[-1]["type"] == "done"
 
 
 def test_agent_blocked_tool_is_reported_to_model(admin_client, monkeypatch):
     monkeypatch.setattr(agent_routes, "tools_enabled", lambda: False)
-    # без инструментов агент не крутит цикл, а сразу отвечает
-    _stub_model(monkeypatch, [
-        '{"action":"answer","text":"Инструменты недоступны — отвечу по памяти"}',
-    ])
-    events = _ndjson(admin_client.post("/api/agent/stream", json={"message": "что у нас в папке?"}))
-    assert not [event for event in events if event["type"] == "tool"]
-
-    answer = "".join(event["token"] for event in events if event["type"] == "token")
-    assert "Инструменты недоступны" in answer or "по памяти" in answer
+    seen = []
+    script(monkeypatch, ["Инструменты недоступны — отвечу по памяти"], seen)
+    events = ndjson(admin_client.post("/api/agent/stream", json={"message": "что у нас в папке?"}))
+    assert not events_of(events, "tool")
+    assert "по памяти" in answer_of(events)
+    assert "```bash" not in model_text(seen).split("ДОСТУПНЫЕ")[-1]
 
 
-# ══════════════ агент: ответ приходит всегда ══════════════
-
-def _stub_real_model(monkeypatch, answers):
-    """Как настоящий chat_completion: при успехе второе значение — непустой словарь meta."""
-    queue = list(answers)
-
-    def fake_completion(messages, **kwargs):
-        if not queue:
-            return None, "нет больше ответов"
-        return queue.pop(0), {"provider": "test", "model": "m", "offline": False}
-
-    monkeypatch.setattr(agent_routes, "chat_completion", fake_completion)
-    return queue
-
-
-def _fake_search(monkeypatch):
-    results = [{"title": "Список стран по ВВП", "url": "https://example.org/gdp", "snippet": "…", "host": "example.org"}]
-    monkeypatch.setattr(agent_routes, "nova_search", lambda query, limit=6: (
-        results, {"backend": "wiki", "elapsed_ms": 5, "query": query, "results": results, "count": 1, "trace": []}))
-
-
-def test_agent_answer_survives_real_meta_dict(admin_client, monkeypatch, sandbox):
+def test_meta_dict_is_not_mistaken_for_error(admin_client, monkeypatch, sandbox):
     """Регрессия: непустой meta не должен считаться ошибкой и съедать ответ."""
-    _stub_real_model(monkeypatch, ["План: ответить", "Просто текстовый ответ модели"])
-    events = _ndjson(admin_client.post("/api/agent/stream", json={"message": "привет"}))
-    assert any(event["type"] == "plan" for event in events)
-    answer = "".join(event["token"] for event in events if event["type"] == "token")
-    assert "Просто текстовый ответ" in answer
+    monkeypatch.setattr(agent_routes, "resolve_target",
+                        lambda provider=None, model=None: ("groq", "test-model", {}))
+    monkeypatch.setattr(agent_routes, "chat_completion",
+                        lambda messages, **kwargs: ("Просто текстовый ответ модели",
+                                                    {"provider": "test", "model": "m"}))
+    events = ndjson(admin_client.post("/api/agent/stream", json={"message": "привет"}))
+    assert "Просто текстовый ответ" in answer_of(events)
 
 
-def test_agent_step_limit_still_gives_answer_from_findings(admin_client, monkeypatch, sandbox):
-    """Модель только ищет и не отвечает — ответ собирается по найденному."""
-    monkeypatch.setattr(agent_routes, "MAX_STEPS", 2)
-    _fake_search(monkeypatch)
-    _stub_real_model(monkeypatch, [
-        "План: поискать",
-        '{"action":"search","query":"самая богатая страна"}',
-        '{"action":"search","query":"самая бедная страна"}',
-        "Самая богатая — Люксембург, самая бедная — Бурунди.",     # финальный запрос
+def test_web_search_sources_reach_result(admin_client, monkeypatch, sandbox):
+    results = [{"title": "Список стран по ВВП", "url": "https://example.org/gdp",
+                "snippet": "…", "host": "example.org"}]
+    monkeypatch.setattr(agent_routes, "nova_search", lambda query, limit=6: (
+        results, {"backend": "wiki", "query": query, "results": results, "count": 1}))
+    script(monkeypatch, [
+        "```web_search\nВВП стран\n```",
+        "Самая богатая — Люксембург.",
     ])
-    events = _ndjson(admin_client.post("/api/agent/stream", json={"message": "богатая и бедная страна"}))
-    answer = "".join(event["token"] for event in events if event["type"] == "token")
-    assert "Люксембург" in answer
-    assert "лимит шагов" not in answer.lower()
-    sources = next(event for event in events if event["type"] == "sources")
+    events = ndjson(admin_client.post("/api/agent/stream",
+                                      json={"message": "найди ВВП стран"}))
+    sources = events_of(events, "sources")[0]
     assert sources["sources"][0]["url"] == "https://example.org/gdp"
+    result = next(event for event in events if event["type"] == "result")
+    assert result["searched"] is True and "Люксембург" in answer_of(events)
 
 
-def test_agent_skips_repeated_action(admin_client, monkeypatch, sandbox):
-    _fake_search(monkeypatch)
-    _stub_real_model(monkeypatch, [
-        "План: искать",
-        '{"action":"search","query":"вопрос"}',
-        '{"action":"search","query":"вопрос"}',
-        '{"action":"answer","text":"Ответ по найденному"}',
-        # самопроверка перед финалом (этап 5) — модель подтверждает ответ
-        '{"action":"answer","text":"Ответ по найденному"}',
-    ])
-    events = _ndjson(admin_client.post("/api/agent/stream", json={"message": "вопрос"}))
-    assert sum(1 for event in events if event["type"] == "tool") == 1
-    assert "Ответ по найденному" in "".join(e["token"] for e in events if e["type"] == "token")
+def test_repeated_block_is_not_executed_twice(admin_client, monkeypatch, sandbox):
+    """Третий одинаковый блок уже не выполняется: модель получает отказ."""
+    seen = []
+    script(monkeypatch, [
+        "```bash\nls\n```",
+        "```bash\nls\n```",
+        "```bash\nls\n```",
+        "Готово: в папке пусто",
+    ], seen)
+    events = ndjson(admin_client.post("/api/agent/stream", json={"message": "покажи файлы"}))
+    assert len(events_of(events, "tool")) == 2
+    assert "не повторяй" in model_text(seen, -1).lower()
+    assert "Готово" in answer_of(events)
 
 
-def test_agent_strips_think_and_parses_multiline_json(admin_client, monkeypatch, sandbox):
-    _stub_real_model(monkeypatch, [
-        "План: коротко",
-        '<think>надо подумать {"action":"ls"}</think>{"action":"answer","text":"строка 1\nстрока 2"}',
-    ])
-    events = _ndjson(admin_client.post("/api/agent/stream", json={"message": "привет"}))
-    answer = "".join(event["token"] for event in events if event["type"] == "token")
-    assert answer == "строка 1\nстрока 2"
-
-
-def test_agent_nova_search_via_run_collects_sources(admin_client, monkeypatch, sandbox):
-    """Модель вызвала `nova search` командой run — источники и заметки всё равно копятся."""
-    _fake_search(monkeypatch)
-    import routes.terminal as terminal
-    monkeypatch.setattr(terminal, "nova_search", agent_routes.nova_search)
-    _stub_real_model(monkeypatch, [
-        "План: искать",
-        '{"action":"run","command":"nova search страны ввп"}',
-        '{"action":"answer","text":"Готово"}',
-    ])
-    events = _ndjson(admin_client.post("/api/agent/stream", json={"message": "страны"}))
-    assert any(event["type"] == "sources" for event in events)
-
+def test_think_blocks_and_multiline_answers_are_preserved(admin_client, monkeypatch, sandbox):
+    script(monkeypatch, ["<think>надо подумать</think>строка 1\nстрока 2"])
+    events = ndjson(admin_client.post("/api/agent/stream", json={"message": "привет"}))
+    assert answer_of(events) == "строка 1\nстрока 2"

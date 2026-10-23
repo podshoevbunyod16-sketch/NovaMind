@@ -7,6 +7,7 @@ import pytest
 
 import database
 import routes.agent as agent_routes
+from tests.agent_helpers import answer_of, events_of, script
 import scheduler
 
 
@@ -236,8 +237,8 @@ def _stub_model(monkeypatch, answers):
 
 
 def test_agent_creates_schedule_via_tool(admin_client, sandbox, db, monkeypatch):
-    _stub_model(monkeypatch, [
-        '{"action":"schedule","prompt":"сводка новостей","cron":"0 9 * * *"}',
+    script(monkeypatch, [
+        '```schedule\n{"prompt": "сводка новостей", "cron": "0 9 * * *"}\n```',
         "Готово: каждое утро в 9 буду присылать сводку.",
     ])
     events = _ndjson(admin_client.post("/api/agent/stream",
@@ -245,13 +246,16 @@ def test_agent_creates_schedule_via_tool(admin_client, sandbox, db, monkeypatch)
     assert any(event["type"] == "schedule" for event in events)
     jobs = database.list_jobs(owner="admin")
     assert len(jobs) == 1 and jobs[0]["expr"] == "0 9 * * *"
+    assert "сводку" in answer_of(events)
 
 
 def test_agent_schedule_needs_expression(admin_client, sandbox, db, monkeypatch):
-    _stub_model(monkeypatch, [
-        '{"action":"schedule","prompt":"отчёт"}',
+    script(monkeypatch, [
+        '```schedule\n{"prompt": "отчёт"}\n```',
         "Не хватает расписания.",
     ])
-    events = _ndjson(admin_client.post("/api/agent/stream", json={"message": "поставь отчёт по расписанию"}))
+    events = _ndjson(admin_client.post("/api/agent/stream",
+                                       json={"message": "поставь отчёт по расписанию"}))
     assert not any(event["type"] == "schedule" for event in events)
     assert database.list_jobs(owner="admin") == []
+    assert events_of(events, "tool")[0]["code"] == 1
