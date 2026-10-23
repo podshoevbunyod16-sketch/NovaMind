@@ -45,11 +45,13 @@ def isolated_env(tmp_path, monkeypatch):
     import security
     security.login_limiter.clear()
     security.agent_limiter.clear()
+    security.tts_limiter.clear()
 
     yield
 
     security.login_limiter.clear()
     security.agent_limiter.clear()
+    security.tts_limiter.clear()
 
     config.save_selected_media_model({})
     mg.reset_catalog_cache()

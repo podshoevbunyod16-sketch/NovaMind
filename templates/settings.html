@@ -6,7 +6,7 @@
   <meta name="theme-color" content="#070713">
   <title>Настройки AI — Khirad</title>
   <link rel="stylesheet" href="/static/liquid-glass.css">
-  <link rel="stylesheet" href="/static/settings.css">
+  <link rel="stylesheet" href="/static/settings.css?v=acc3">
 </head>
 <body>
 <div class="lg-grain" aria-hidden="true"></div>
@@ -24,145 +24,294 @@
     <main class="settings-content">
 
       <nav class="settings-nav" aria-label="Разделы настроек">
-        <a href="#skills-section">🧩 Skills</a>
+        <a href="#provider-section">🤖 Провайдеры</a>
         <a href="#mcp-section">🔗 MCP</a>
-        <a href="#provider-section">🤖 Провайдер</a>
+        <a href="#skills-section">🧩 Скиллы</a>
         <a href="#media-section">🎨 Медиа</a>
         <a href="#search-section">🔎 Поиск</a>
+        <a href="#speech-section">🔊 Озвучка</a>
         <a href="#language-section">🌐 Язык</a>
       </nav>
 
-      <section class="health-card skills-section" id="skills-section">
-        <div class="catalog-heading">
-          <div>
-            <div class="eyebrow">SKILLS</div>
-            <h2>Навыки NovaMind</h2>
-            <p>Сохраняйте инструкции и ресурсы, чтобы агент использовал их в следующих запросах.</p>
-          </div>
-          <button class="outline-btn" id="refreshSkills" type="button">↻ Обновить список</button>
-        </div>
-        <div class="skill-add-tabs" role="tablist">
-          <button class="skill-add-tab active" type="button" data-skill-tab="zip">ZIP-архив</button>
-          <button class="skill-add-tab" type="button" data-skill-tab="text">Текст SKILL.md</button>
-          <a class="skill-add-tab skill-chat-link" href="/chat?skill=create">Создать через главный чат</a>
-        </div>
-        <div class="skill-add-panel" id="skillZipPanel">
-          <input id="skillZip" type="file" accept=".zip,application/zip">
-          <button class="refresh-btn" id="uploadSkillZip" type="button">Загрузить ZIP</button>
-          <small>В архиве должен быть один SKILL.md с полями name и description.</small>
-        </div>
-        <div class="skill-add-panel" id="skillTextPanel" hidden>
-          <input id="skillTextName" placeholder="Имя skill, например research-helper" maxlength="64">
-          <textarea id="skillTextContent" rows="10" placeholder="---\nname: research-helper\ndescription: ...\n---\n\n# Инструкции"></textarea>
-          <button class="refresh-btn" id="saveSkillText" type="button">Сохранить skill</button>
-        </div>
-        <div class="catalog-meta"><span id="skillsStatus">Загружаю skills…</span><span>Хранятся в user_skills/</span></div>
-        <div class="model-grid" id="skillsGrid"><div class="empty-card loading-card">Загрузка skills…</div></div>
-      </section>
+      <!-- ══════════════ ПРОВАЙДЕРЫ ══════════════ -->
+      <section class="acc" data-accordion="providers" id="provider-section">
+        <button class="acc-head" type="button" data-accordion-toggle aria-expanded="false">
+          <span class="acc-ico" aria-hidden="true">🤖</span>
+          <span class="acc-titles">
+            <span class="acc-title">Провайдеры</span>
+            <span class="acc-sub">Ключи, модели, настоящее состояние подключения</span>
+          </span>
+          <span class="acc-state" data-acc-state>Свёрнуто</span>
+          <span class="caret" aria-hidden="true">▼</span>
+        </button>
+        <div class="acc-panel" data-accordion-panel>
+          <div class="acc-body">
+            <div class="catalog-heading">
+              <div>
+                <h2>Выберите движок для чата</h2>
+                <p>Список моделей запрашивается напрямую у провайдера. Ключи остаются на сервере и не передаются в браузер.</p>
+              </div>
+              <button class="refresh-btn" id="refreshAll" type="button">↻ Обновить всё</button>
+            </div>
 
+            <div class="provider-grid" id="providerGrid">
+              <div class="loading-card">Загружаю провайдеров…</div>
+            </div>
 
+            <div class="catalog-heading catalog-heading--inner">
+              <div>
+                <div class="eyebrow">CATALOG</div>
+                <h2>Доступные модели</h2>
+                <p id="catalogStatus">Выберите провайдера</p>
+              </div>
+              <button class="outline-btn" id="refreshModels" type="button">↻ Обновить список</button>
+            </div>
 
+            <div class="filters" aria-label="Фильтры моделей">
+              <label class="search-field"><span>⌕</span><input id="modelSearch" type="search" placeholder="Поиск модели…"></label>
+              <select id="priceFilter" aria-label="Цена"><option value="all">Цена: все</option><option value="free">Только бесплатные</option><option value="paid">Только платные</option></select>
+              <select id="sortFilter" aria-label="Сортировка"><option value="recommended">Сначала рекомендуемые</option><option value="context">Большой контекст</option><option value="parameters">Огромные веса</option><option value="free">Сначала бесплатные</option><option value="price">Ниже цена</option><option value="newest">Новые модели</option></select>
+              <select id="modalityFilter" aria-label="Тип модели"><option value="all">Тип: любой</option><option value="text">Текст</option><option value="vision">Текст + изображения</option></select>
+              <select id="contextFilter" aria-label="Контекст"><option value="0">Контекст: любой</option><option value="32000">От 32K токенов</option><option value="100000">От 100K токенов</option><option value="200000">От 200K токенов</option></select>
+            </div>
 
-     <section class="health-card mcp-section" id="mcp-section">
-        <div class="catalog-heading">
-          <div>
-            <div class="eyebrow">MODEL CONTEXT PROTOCOL</div>
-            <h2>Каталог MCP-серверов</h2>
-            <p>Подключайте Streamable HTTP MCP-серверы через API-ключ, Bearer/OAuth, Google OAuth, Basic Auth или без авторизации. Секреты о>
-          </div>
-          <button class="outline-btn" id="refreshMcp" type="button">↻ Обновить каталог</button>
-        </div>
-        <div class="mcp-connect-form">
-          <input id="mcpName" placeholder="Название сервера" maxlength="80">
-          <input id="mcpUrl" type="url" placeholder="https://example.com/mcp" required>
-          <select id="mcpAuth"><option value="none">Без авторизации</option><option value="api_key">API-ключ (X-API-Key)</option><option val>
-          <input id="mcpSecret" type="password" placeholder="Ключ или токен (не показывается)" autocomplete="off">
-          <button class="refresh-btn" id="connectMcp" type="button">Подключить и проверить</button>
-        </div>
-        <div class="catalog-meta"><span id="mcpStatus">Загружаю каталог…</span><span>Поддерживается MCP Streamable HTTP</span></div>
-        <div class="model-grid" id="mcpGrid"><div class="empty-card loading-card">Загрузка MCP-каталога…</div></div>
-      </section>
-
-
-
-
-      <section class="hero-card" id="provider-section">
-        <div>
-          <div class="eyebrow">ПРОВАЙДЕРЫ И МОДЕЛИ</div>
-          <h2>Выберите движок для чата</h2>
-          <p>Список моделей проверяется напрямую через API провайдера. Ключи остаются только на backend и не передаются в браузер.</p>
-        </div>
-        <button class="refresh-btn" id="refreshAll" type="button">↻ Обновить всё</button>
-      </section>
-
-      <section class="provider-grid" id="providerGrid">
-        <div class="loading-card">Загружаю провайдеров…</div>
-      </section>
-
-      <section class="catalog-section">
-        <div class="catalog-heading">
-          <div>
-            <div class="eyebrow">CATALOG</div>
-            <h2>Доступные модели</h2>
-            <p id="catalogStatus">Выберите провайдера</p>
-          </div>
-          <button class="outline-btn" id="refreshModels" type="button">↻ Обновить список</button>
-        </div>
-
-        <div class="filters" aria-label="Фильтры моделей">
-          <label class="search-field"><span>⌕</span><input id="modelSearch" type="search" placeholder="Поиск модели…"></label>
-          <select id="priceFilter" aria-label="Цена"><option value="all">Цена: все</option><option value="free">Только бесплатные</option><option value="paid">Только платные</option></select>
-          <select id="sortFilter" aria-label="Сортировка"><option value="recommended">Сначала рекомендуемые</option><option value="context">Большой контекст</option><option value="parameters">Огромные веса</option><option value="free">Сначала бесплатные</option><option value="price">Ниже цена</option><option value="newest">Новые модели</option></select>
-          <select id="modalityFilter" aria-label="Тип модели"><option value="all">Тип: любой</option><option value="text">Текст</option><option value="vision">Текст + изображения</option></select>
-          <select id="contextFilter" aria-label="Контекст"><option value="0">Контекст: любой</option><option value="32000">От 32K токенов</option><option value="100000">От 100K токенов</option><option value="200000">От 200K токенов</option></select>
-        </div>
-
-        <div class="catalog-meta"><span id="modelCount">0 моделей</span><span>Нажмите «Выбрать», чтобы использовать модель в чате</span></div>
-        <div class="model-grid" id="modelGrid"><div class="empty-card">Модели ещё не загружены</div></div>
-      </section>
-
-      <section class="media-section" id="media-section">
-        <div class="catalog-heading">
-          <div>
-            <div class="eyebrow">GENERATIVE MEDIA</div>
-            <h2>Модели для генерации</h2>
-            <p>Живой каталог для изображений, аудио и видео с анализом бесплатного тарифа и стоимости.</p>
-          </div>
-          <button class="outline-btn" id="refreshMedia" type="button">↻ Проверить API</button>
-        </div>
-        <div class="media-tabs" id="mediaTabs">
-          <button type="button" class="media-tab active" data-media-type="image">🖼️ Изображения</button>
-          <button type="button" class="media-tab" data-media-type="audio">🔊 Аудио</button>
-          <button type="button" class="media-tab" data-media-type="video">🎬 Видео</button>
-        </div>
-        <div class="catalog-meta"><span id="mediaCount">0 моделей</span><span id="mediaStatus">Загрузка…</span></div>
-        <div class="model-grid" id="mediaGrid"><div class="empty-card">Загружаю media-модели…</div></div>
-      </section>
-
-      <section class="health-card" id="search-section">
-        <div class="catalog-heading">
-          <div>
-            <div class="eyebrow">WEB SEARCH DIAGNOSTICS</div>
-            <h2>Поиск в интернете</h2>
-            <p id="healthStatus">Проверяю поисковые бэкенды…</p>
-          </div>
-          <button class="outline-btn" id="refreshHealth" type="button">↻ Проверить</button>
-        </div>
-        <div class="health-grid" id="healthGrid"><div class="empty-card loading-card">Проверка бэкендов…</div></div>
-      </section>
-
-      <section class="health-card" id="language-section">
-        <div class="catalog-heading">
-          <div>
-            <div class="eyebrow">INTERFACE LANGUAGE</div>
-            <h2>Язык интерфейса</h2>
-            <p>Выберите язык: интерфейс, подсказки и сообщения переключаются сразу.</p>
+            <div class="catalog-meta"><span id="modelCount">0 моделей</span><span>Нажмите «Выбрать», чтобы использовать модель в чате</span></div>
+            <div class="model-grid" id="modelGrid"><div class="empty-card">Модели ещё не загружены</div></div>
           </div>
         </div>
-        <div style="display:flex;gap:10px;flex-wrap:wrap;" id="langGrid">
-          <button class="outline-btn" type="button" data-lang="tg">Тоҷикӣ</button>
-          <button class="outline-btn" type="button" data-lang="ru">Русский</button>
-          <button class="outline-btn" type="button" data-lang="en">English</button>
+      </section>
+
+      <!-- ══════════════ MCP ══════════════ -->
+      <section class="acc" data-accordion="mcp" id="mcp-section">
+        <button class="acc-head" type="button" data-accordion-toggle aria-expanded="false">
+          <span class="acc-ico" aria-hidden="true">🔗</span>
+          <span class="acc-titles">
+            <span class="acc-title">MCP-серверы</span>
+            <span class="acc-sub">Model Context Protocol: транспорт, статус, инструменты</span>
+          </span>
+          <span class="acc-state" data-acc-state>Свёрнуто</span>
+          <span class="caret" aria-hidden="true">▼</span>
+        </button>
+        <div class="acc-panel" data-accordion-panel>
+          <div class="acc-body">
+            <div class="catalog-heading">
+              <div>
+                <h2>Каталог MCP-серверов</h2>
+                <p>Подключайте Streamable HTTP MCP-серверы: API-ключ, Bearer/OAuth, Basic Auth или без авторизации. Секреты хранятся только на сервере. Подключение происходит лишь по вашей команде и с проверкой initialize.</p>
+              </div>
+              <button class="outline-btn" id="refreshMcp" type="button">↻ Обновить каталог</button>
+            </div>
+            <div class="mcp-connect-form">
+              <input id="mcpName" placeholder="Название сервера" maxlength="80">
+              <input id="mcpUrl" type="url" placeholder="https://example.com/mcp" required>
+              <select id="mcpAuth" aria-label="Авторизация MCP">
+                <option value="none">Без авторизации</option>
+                <option value="api_key">API-ключ (X-API-Key)</option>
+                <option value="bearer">Bearer token</option>
+                <option value="google_oauth">Google OAuth</option>
+                <option value="oauth">OAuth 2.0 token</option>
+                <option value="basic">Basic Auth</option>
+              </select>
+              <input id="mcpSecret" type="password" placeholder="Ключ или токен (не показывается)" autocomplete="off">
+              <button class="refresh-btn" id="connectMcp" type="button">Подключить и проверить</button>
+            </div>
+            <div class="catalog-meta"><span id="mcpStatus">Загружаю каталог…</span><span>Транспорт: Streamable HTTP</span></div>
+            <div class="model-grid" id="mcpGrid"><div class="empty-card loading-card">Загрузка MCP-каталога…</div></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ══════════════ СКИЛЛЫ ══════════════ -->
+      <section class="acc" data-accordion="skills" id="skills-section">
+        <button class="acc-head" type="button" data-accordion-toggle aria-expanded="false">
+          <span class="acc-ico" aria-hidden="true">🧩</span>
+          <span class="acc-titles">
+            <span class="acc-title">Скиллы</span>
+            <span class="acc-sub">Инструкции и ресурсы, которые агент использует в работе</span>
+          </span>
+          <span class="acc-state" data-acc-state>Свёрнуто</span>
+          <span class="caret" aria-hidden="true">▼</span>
+        </button>
+        <div class="acc-panel" data-accordion-panel>
+          <div class="acc-body">
+            <div class="catalog-heading">
+              <div>
+                <h2>Навыки NovaMind</h2>
+                <p>Сохраняйте инструкции и ресурсы, чтобы агент использовал их в следующих запросах. Скиллы — отдельная категория: они не подключают MCP-серверы и не меняют провайдеров.</p>
+              </div>
+              <button class="outline-btn" id="refreshSkills" type="button">↻ Обновить список</button>
+            </div>
+            <div class="skill-add-tabs" role="tablist">
+              <button class="skill-add-tab active" type="button" data-skill-tab="zip" role="tab">ZIP-архив</button>
+              <button class="skill-add-tab" type="button" data-skill-tab="text" role="tab">Текст SKILL.md</button>
+              <a class="skill-add-tab skill-chat-link" href="/chat?skill=create">Создать через главный чат</a>
+            </div>
+            <div class="skill-add-panel" id="skillZipPanel">
+              <input id="skillZip" type="file" accept=".zip,application/zip">
+              <button class="refresh-btn" id="uploadSkillZip" type="button">Загрузить ZIP</button>
+              <small>В архиве должен быть один SKILL.md с полями name и description.</small>
+            </div>
+            <div class="skill-add-panel" id="skillTextPanel" hidden>
+              <input id="skillTextName" placeholder="Имя skill, например research-helper" maxlength="64">
+              <textarea id="skillTextContent" rows="10" placeholder="---&#10;name: research-helper&#10;description: ...&#10;---&#10;&#10;# Инструкции"></textarea>
+              <button class="refresh-btn" id="saveSkillText" type="button">Сохранить skill</button>
+            </div>
+            <div class="catalog-meta"><span id="skillsStatus">Загружаю skills…</span><span>Хранятся в user_skills/</span></div>
+            <div class="model-grid" id="skillsGrid"><div class="empty-card loading-card">Загрузка skills…</div></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ══════════════ МЕДИА ══════════════ -->
+      <section class="acc" data-accordion="media" id="media-section">
+        <button class="acc-head" type="button" data-accordion-toggle aria-expanded="false">
+          <span class="acc-ico" aria-hidden="true">🎨</span>
+          <span class="acc-titles">
+            <span class="acc-title">Медиа-модели</span>
+            <span class="acc-sub">Изображения, аудио и видео: тариф и доступность API</span>
+          </span>
+          <span class="acc-state" data-acc-state>Свёрнуто</span>
+          <span class="caret" aria-hidden="true">▼</span>
+        </button>
+        <div class="acc-panel" data-accordion-panel>
+          <div class="acc-body">
+            <div class="catalog-heading">
+              <div>
+                <h2>Модели для генерации</h2>
+                <p>Живой каталог для изображений, аудио и видео с анализом бесплатного тарифа и стоимости.</p>
+              </div>
+              <button class="outline-btn" id="refreshMedia" type="button">↻ Проверить API</button>
+            </div>
+            <div class="media-tabs" id="mediaTabs">
+              <button type="button" class="media-tab active" data-media-type="image">🖼️ Изображения</button>
+              <button type="button" class="media-tab" data-media-type="audio">🔊 Аудио</button>
+              <button type="button" class="media-tab" data-media-type="video">🎬 Видео</button>
+            </div>
+            <div class="catalog-meta"><span id="mediaCount">0 моделей</span><span id="mediaStatus">Загрузка…</span></div>
+            <div class="model-grid" id="mediaGrid"><div class="empty-card">Загружаю media-модели…</div></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ══════════════ ПОИСК ══════════════ -->
+      <section class="acc" data-accordion="search" id="search-section">
+        <button class="acc-head" type="button" data-accordion-toggle aria-expanded="false">
+          <span class="acc-ico" aria-hidden="true">🔎</span>
+          <span class="acc-titles">
+            <span class="acc-title">Поиск в интернете</span>
+            <span class="acc-sub">Какие поисковые бэкенды реально отвечают</span>
+          </span>
+          <span class="acc-state" data-acc-state>Свёрнуто</span>
+          <span class="caret" aria-hidden="true">▼</span>
+        </button>
+        <div class="acc-panel" data-accordion-panel>
+          <div class="acc-body">
+            <div class="catalog-heading">
+              <div>
+                <h2>Поиск в интернете</h2>
+                <p id="healthStatus">Проверяю поисковые бэкенды…</p>
+              </div>
+              <button class="outline-btn" id="refreshHealth" type="button">↻ Проверить</button>
+            </div>
+            <div class="health-grid" id="healthGrid"><div class="empty-card loading-card">Проверка бэкендов…</div></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ══════════════ ОЗВУЧКА ══════════════ -->
+      <section class="acc" data-accordion="speech" id="speech-section">
+        <button class="acc-head" type="button" data-accordion-toggle aria-expanded="false">
+          <span class="acc-ico" aria-hidden="true">🔊</span>
+          <span class="acc-titles">
+            <span class="acc-title">Озвучка</span>
+            <span class="acc-sub">Голос, провайдер и автоматическое чтение ответов</span>
+          </span>
+          <span class="acc-state" data-acc-state>Свёрнуто</span>
+          <span class="caret" aria-hidden="true">▼</span>
+        </button>
+        <div class="acc-panel" data-accordion-panel>
+          <div class="acc-body" id="speechPanel">
+            <div class="catalog-heading">
+              <div>
+                <h2>Автоматически озвучивать ответы ИИ</h2>
+                <p>Один ответ озвучивается один раз, после завершения генерации. Ручная озвучка работает независимо от этого переключателя.</p>
+              </div>
+              <label class="switch" title="Автоматически озвучивать ответы ИИ">
+                <input type="checkbox" id="autoSpeakToggle" role="switch" aria-checked="false"
+                       aria-label="Автоматически озвучивать ответы ИИ">
+                <span class="switch-track" aria-hidden="true"><span class="switch-knob"></span></span>
+                <span class="switch-label" data-switch-label>Выключено</span>
+              </label>
+            </div>
+
+            <div class="speech-status" id="speechStatusCard">
+              <span class="lg-dot" id="speechDot"></span>
+              <div>
+                <strong id="speechHeadline">Проверяю TTS-провайдера…</strong>
+                <small id="speechDetails">Запрос к серверу…</small>
+              </div>
+              <button class="outline-btn" id="refreshSpeech" type="button">↻ Проверить</button>
+            </div>
+
+            <div class="speech-grid">
+              <label class="speech-field">Провайдер
+                <select id="speechProvider"><option value="">Автоматически</option></select>
+              </label>
+              <label class="speech-field">Голос
+                <select id="speechVoice"><option value="">По умолчанию</option></select>
+              </label>
+              <label class="speech-field">Язык озвучки
+                <select id="speechLang">
+                  <option value="">Определять по тексту</option>
+                  <option value="ru">Русский</option>
+                  <option value="en">English</option>
+                </select>
+              </label>
+              <label class="speech-check">
+                <input type="checkbox" id="readCodeToggle">
+                <span>Читать вслух блоки кода</span>
+              </label>
+            </div>
+
+            <div class="speech-actions">
+              <button class="refresh-btn" id="saveSpeech" type="button">Сохранить настройки озвучки</button>
+              <button class="outline-btn" id="testSpeech" type="button">▶ Прослушать пример</button>
+              <button class="outline-btn" id="stopSpeech" type="button">⏹ Остановить</button>
+            </div>
+            <p class="speech-note" id="speechNote">
+              Озвучка идёт через TTS-провайдера на сервере. Если провайдер не настроен,
+              кнопка честно переключается на браузерный синтез речи — без ключей и без
+              выдачи его за ответ модели.
+            </p>
+          </div>
+        </div>
+      </section>
+
+      <!-- ══════════════ ЯЗЫК (последний раздел) ══════════════ -->
+      <section class="acc" data-accordion="language" id="language-section">
+        <button class="acc-head" type="button" data-accordion-toggle aria-expanded="false">
+          <span class="acc-ico" aria-hidden="true">🌐</span>
+          <span class="acc-titles">
+            <span class="acc-title">Язык интерфейса</span>
+            <span class="acc-sub">Переводятся кнопки, подсказки, ошибки и озвучка</span>
+          </span>
+          <span class="acc-state" data-acc-state>Свёрнуто</span>
+          <span class="caret" aria-hidden="true">▼</span>
+        </button>
+        <div class="acc-panel" data-accordion-panel>
+          <div class="acc-body">
+            <div class="catalog-heading">
+              <div>
+                <h2>Язык интерфейса</h2>
+                <p>Выберите язык: интерфейс, подсказки и сообщения переключаются сразу. Сообщения пользователя и ответы ИИ не переводятся.</p>
+              </div>
+            </div>
+            <div class="lang-grid" id="langGrid">
+              <button class="outline-btn" type="button" data-lang="tg">Тоҷикӣ</button>
+              <button class="outline-btn" type="button" data-lang="ru">Русский</button>
+              <button class="outline-btn" type="button" data-lang="en">English</button>
+            </div>
+          </div>
         </div>
       </section>
 
@@ -174,9 +323,12 @@
     </main>
   </div>
   <div class="toast" id="toast" role="status"></div>
-  <script src="/static/i18n.js"></script>
-  <script src="/static/settings.js?v=skills1"></script>
-  <script src="/static/mcp-settings.js?v=3"></script>
-  <script src="/static/skills-settings.js?v=1"></script>
+  <script src="/static/i18n.js?v=lang2"></script>
+  <script src="/static/accordion.js"></script>
+  <script src="/static/tts.js"></script>
+  <script src="/static/settings.js?v=acc2"></script>
+  <script src="/static/mcp-settings.js?v=acc2"></script>
+  <script src="/static/skills-settings.js?v=acc2"></script>
+  <script src="/static/speech-settings.js?v=1"></script>
 </body>
 </html>

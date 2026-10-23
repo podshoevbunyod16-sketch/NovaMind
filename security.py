@@ -123,8 +123,20 @@ class RateLimiter(_SlidingWindow):
         return _env_int("AGENT_RATE_WINDOW", 3600)
 
 
+class TTSRateLimiter(RateLimiter):
+    """Отдельный лимит на озвучку: TTS дороже обычного текста у провайдеров."""
+
+    def limit_for(self, signed_in: bool) -> int:
+        return _env_int("TTS_RATE_USER" if signed_in else "TTS_RATE_GUEST",
+                        120 if signed_in else 30)
+
+    def window(self) -> int:
+        return _env_int("TTS_RATE_WINDOW", 3600)
+
+
 login_limiter = LoginLimiter()
 agent_limiter = RateLimiter()
+tts_limiter = TTSRateLimiter()
 
 # Внутренние запуски агента (планировщик, Telegram-бот) идут в том же
 # процессе и не должны съедать лимит пользователя. Отличаем их секретным
@@ -135,6 +147,19 @@ INTERNAL_RUN_TOKEN = secrets.token_hex(16)
 def is_internal_run(request) -> bool:
     """Запрос сделан нашим же процессом (планировщик, бот), а не браузером."""
     return (request.headers.get("X-Internal-Token") or "") == INTERNAL_RUN_TOKEN
+
+
+def tts_rate_check(request, signed_in: bool, key_suffix: str = ""):
+    """Лимит запросов к озвучке. Возвращает (allowed, retry_after, limit, remaining)."""
+    if os.getenv("TTS_RATE_LIMIT", "1") != "1":
+        return True, 0, 0, 0
+    limit = tts_limiter.limit_for(signed_in)
+    window = tts_limiter.window()
+    if limit <= 0:
+        return True, 0, 0, 0
+    scope = f"tts:user:{key_suffix}" if signed_in and key_suffix else f"tts:ip:{client_ip(request)}"
+    allowed, retry_after, remaining = tts_limiter.hit(scope, limit, window)
+    return allowed, retry_after, limit, remaining
 
 
 def agent_rate_check(request, signed_in: bool, key_suffix: str = ""):

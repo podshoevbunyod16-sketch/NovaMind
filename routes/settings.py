@@ -55,6 +55,21 @@ def settings_skill_zip():
         return jsonify({"error": str(exc)}), 400
 
 
+@settings_bp.route('/api/settings/skills/<skill_id>/enabled', methods=['POST'])
+def settings_skill_enabled(skill_id):
+    """Включить или выключить навык. Выключенный навык не попадает в промпт агента."""
+    data = request.get_json(silent=True) or {}
+    if 'enabled' not in data:
+        return jsonify({"error": "Укажите enabled: true или false"}), 400
+    try:
+        item = skills_registry.set_enabled(skill_id, bool(data.get('enabled')))
+        return jsonify({"success": True, "skill": item})
+    except FileNotFoundError as exc:
+        return jsonify({"error": str(exc)}), 404
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+
 @settings_bp.route('/api/settings/skills/<skill_id>', methods=['DELETE'])
 def settings_skill_delete(skill_id):
     try:

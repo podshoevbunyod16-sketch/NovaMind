@@ -71,9 +71,54 @@ def _write_skill(name: str, markdown: str, source_dir: Path | None = None) -> di
     return {"id": name, "name": meta["name"], "description": meta["description"], "path": str(target)}
 
 
+#: Файл со списком выключенных навыков. Скилл остаётся на диске, но не
+#: попадает в промпт агента — это и есть «выключить».
+DISABLED_FILE = ".disabled.json"
+
+
+def _disabled() -> set[str]:
+    path = SKILLS_DIR / DISABLED_FILE
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return set()
+    return {str(item) for item in data if isinstance(item, str)} if isinstance(data, list) else set()
+
+
+def _write_disabled(values: set[str]) -> None:
+    SKILLS_DIR.mkdir(parents=True, exist_ok=True)
+    path = SKILLS_DIR / DISABLED_FILE
+    path.write_text(json.dumps(sorted(values), ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def is_enabled(skill_id: str) -> bool:
+    return _safe_name(skill_id) not in _disabled()
+
+
+def set_enabled(skill_id: str, enabled: bool) -> dict[str, Any]:
+    """Включает или выключает навык. Возвращает обновлённую запись."""
+    name = _safe_name(skill_id)
+    if not (SKILLS_DIR / name / "SKILL.md").is_file():
+        raise FileNotFoundError("Skill не найден")
+    disabled = _disabled()
+    if enabled:
+        disabled.discard(name)
+    else:
+        disabled.add(name)
+    _write_disabled(disabled)
+    return next(item for item in list_skills() if item["id"] == name)
+
+
+def _tools_of(meta: dict[str, str]) -> list[str]:
+    """Инструменты, которые навык объявляет в frontmatter (``tools: a, b``)."""
+    raw = str(meta.get("tools") or meta.get("requires") or "")
+    return [item.strip() for item in re.split(r"[,\s]+", raw) if item.strip()]
+
+
 def list_skills() -> list[dict[str, Any]]:
     if not SKILLS_DIR.exists():
         return []
+    disabled = _disabled()
     items = []
     for directory in sorted(SKILLS_DIR.iterdir()):
         skill_file = directory / "SKILL.md"
@@ -84,11 +129,14 @@ def list_skills() -> list[dict[str, Any]]:
             meta = _validate_markdown(text)
             items.append({"id": directory.name, "name": meta["name"],
                           "description": meta["description"], "path": str(directory),
-                          "updated": skill_file.stat().st_mtime})
+                          "updated": skill_file.stat().st_mtime,
+                          "enabled": directory.name not in disabled,
+                          "tools": _tools_of(meta)})
         except (OSError, ValueError) as exc:
             items.append({"id": directory.name, "name": directory.name,
                           "description": f"Ошибка skill: {exc}", "path": str(directory),
-                          "invalid": True})
+                          "invalid": True, "enabled": directory.name not in disabled,
+                          "tools": []})
     return items
 
 
@@ -99,7 +147,8 @@ def get_skill(skill_id: str) -> dict[str, Any]:
         raise FileNotFoundError("Skill не найден")
     text = path.read_text(encoding="utf-8")
     meta = _validate_markdown(text)
-    return {"id": name, "name": meta["name"], "description": meta["description"], "content": text}
+    return {"id": name, "name": meta["name"], "description": meta["description"],
+            "content": text, "enabled": is_enabled(name), "tools": _tools_of(meta)}
 
 
 def save_text(name: str, markdown: str) -> dict[str, Any]:
@@ -137,13 +186,17 @@ def delete_skill(skill_id: str) -> None:
     target = SKILLS_DIR / name
     if target.exists():
         shutil.rmtree(target)
+    disabled = _disabled()
+    if name in disabled:
+        disabled.discard(name)
+        _write_disabled(disabled)
 
 
 def prompt_context(max_chars: int = 18_000) -> str:
     blocks = []
     remaining = max_chars
     for item in list_skills():
-        if item.get("invalid"):
+        if item.get("invalid") or not item.get("enabled", True):
             continue
         try:
             skill = get_skill(item["id"])

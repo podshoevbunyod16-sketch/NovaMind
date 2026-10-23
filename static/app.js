@@ -175,6 +175,7 @@ if (!localStorage.getItem('nova_user_nick')) {
 
 // ========== ВЫХОД ==========
 function logout() {
+  if (window.NovaSpeech) window.NovaSpeech.onChatChanged();
   ['nova_user_nick', 'nova_user_code', 'nova_is_admin', 'nova_google_login', 'nova_user_avatar']
     .forEach((key) => localStorage.removeItem(key));
   window.location.href = '/';
@@ -1023,15 +1024,24 @@ function createAssistantTurn(options = {}) {
 
       actionsEl.innerHTML = `
         <button type="button" data-act="copy" title="Скопировать ответ">📋 Копировать</button>
-        <button type="button" data-act="speak" title="Озвучить ответ">🔊 Озвучить</button>
+        ${speakButtonHtml()}
         <button type="button" data-act="regen" title="Ответить заново">↻ Заново</button>`;
       actionsEl.querySelector('[data-act="copy"]').addEventListener('click', () => {
         copyText(answerText || bubble.innerText);
       });
-      actionsEl.querySelector('[data-act="speak"]').addEventListener('click', () => speakText(answerText));
+      bindSpeakButton(actionsEl, wrap, () => answerText);
       actionsEl.querySelector('[data-act="regen"]').addEventListener('click', () => {
         if (lastUserMessage) sendMessage(lastUserMessage);
       });
+
+      // Автоозвучка: ровно один раз на завершённый ответ, никогда — для
+      // истории, ошибки или остановленной генерации (проверяется в контроллере).
+      if (window.NovaSpeech) {
+        window.NovaSpeech.onTurnFinished(wrap, answerText, {
+          stopped: Boolean(meta.stopped), auto: true,
+        }).catch?.(() => {});
+      }
+      updateComposerSpeak();
 
       if (!historyReplay && answerText) {
         historyAddMessage('ai', answerText, {
@@ -1065,6 +1075,7 @@ function createAssistantTurn(options = {}) {
       actionsEl.querySelector('[data-act="regen"]').addEventListener('click', () => {
         if (lastUserMessage) sendMessage(lastUserMessage);
       });
+      updateComposerSpeak();
       scrollToBottom();
     },
 
@@ -1099,6 +1110,77 @@ function sourceItemHtml(source, index) {
     </a>`;
 }
 
+
+// ══════════════════════════════════════════
+// ОЗВУЧКА ОТВЕТОВ (кнопки у сообщений и под полем ввода)
+// ══════════════════════════════════════════
+
+/** Разметка кнопки озвучки: одна на сообщение, состояние — в data-speech-state. */
+function speakButtonHtml() {
+  return '<button type="button" data-act="speak" data-speech-state="idle"'
+    + ' title="Озвучить ответ" aria-label="Озвучить ответ">'
+    + '<span data-speech-icon>🔊</span> <span data-speech-label>Озвучить</span></button>';
+}
+
+/** Привязывает кнопку к конкретному ответу — не к «последнему сообщению в чате». */
+function bindSpeakButton(container, element, getText) {
+  const button = container.querySelector('[data-act="speak"]');
+  if (!button || !window.NovaSpeech) return;
+  window.NovaSpeech.bindButton(button, element, getText);
+}
+
+/** Кнопка под полем ввода: озвучивает последний готовый ответ, иначе disabled. */
+function updateComposerSpeak() {
+  const button = document.getElementById('btn-speak');
+  if (!button) return;
+  const element = lastAssistantElement();
+  const playing = window.NovaSpeech && window.NovaSpeech._state().current;
+  const same = Boolean(playing && element && playing.element === element);
+  button.disabled = !element || !lastAssistantText();
+  button.classList.toggle('active', Boolean(same));
+  button.dataset.speechState = same
+    ? (playing.paused ? 'paused' : 'playing') : 'idle';
+  const label = button.querySelector('#speakBtnText');
+  if (label) {
+    label.textContent = same
+      ? (playing.paused ? 'Продолжить' : 'Стоп')
+      : 'Озвучить';
+  }
+  button.title = same ? 'Остановить озвучку' : 'Озвучить последний ответ';
+}
+
+/** Клик по кнопке под полем ввода. */
+function speakLastAnswer() {
+  resetSpeechIdleTimer();
+  if (!window.NovaSpeech) {
+    showNotification('Озвучка не загрузилась', 'warn');
+    return;
+  }
+  const element = lastAssistantElement();
+  if (!element) {
+    showNotification('Пока нечего озвучивать', 'warn');
+    return;
+  }
+  const text = lastAssistantText();
+  if (!text) return;
+  window.NovaSpeech.toggle(element, () => text).catch?.(() => {});
+}
+
+/** Раз в несколько секунд обновляем подпись кнопки под полем ввода. */
+let speechIdleTimer = null;
+function resetSpeechIdleTimer() {
+  if (speechIdleTimer) { clearInterval(speechIdleTimer); speechIdleTimer = null; }
+  speechIdleTimer = setInterval(updateComposerSpeak, 500);
+  setTimeout(() => {
+    if (speechIdleTimer) { clearInterval(speechIdleTimer); speechIdleTimer = null; }
+    updateComposerSpeak();
+  }, 4000);
+}
+
+if (typeof window !== 'undefined') {
+  window.addEventListener('nova-speech', () => updateComposerSpeak());
+}
+
 function hostFromUrl(url) {
   try { return new URL(url).hostname.replace(/^www\./, ''); }
   catch (_) { return String(url || '').slice(0, 40); }
@@ -1125,19 +1207,38 @@ function fallbackCopy(value) {
   area.remove();
 }
 
-let speechUtterance = null;
-function speakText(text) {
-  if (!('speechSynthesis' in window)) {
-    showNotification('Браузер не поддерживает озвучку', 'warn');
-    return;
+/**
+ * Озвучка: единая точка входа — `static/tts.js` (window.NovaSpeech).
+ *
+ * Здесь осталась только тонкая обёртка для старых вызовов: сам синтез, очередь,
+ * состояния кнопок и остановка живут в контроллере, чтобы не было второй
+ * независимой системы озвучки.
+ */
+function speakText(text, element = null) {
+  if (!window.NovaSpeech) {
+    showNotification('Озвучка не загрузилась', 'warn');
+    return Promise.resolve(false);
   }
-  window.speechSynthesis.cancel();
-  const clean = String(text || '').replace(/[*#`|]/g, '').slice(0, 4000);
-  speechUtterance = new SpeechSynthesisUtterance(clean);
-  speechUtterance.lang = 'ru-RU';
-  speechUtterance.rate = 1.02;
-  window.speechSynthesis.speak(speechUtterance);
-  showNotification('🔊 Читаю ответ…', 'info');
+  const target = element || lastAssistantElement();
+  if (!target) {
+    showNotification('Пока нечего озвучивать', 'warn');
+    return Promise.resolve(false);
+  }
+  return window.NovaSpeech.speak(target, text, { auto: false });
+}
+
+/** Последний ответ ИИ в текущем диалоге (для кнопки под полем ввода). */
+function lastAssistantElement() {
+  const turns = chatContainer.querySelectorAll('.message.ai');
+  return turns.length ? turns[turns.length - 1] : null;
+}
+
+/** Текст последнего ответа ИИ — из пузыря, если контроллер не отдал свой. */
+function lastAssistantText() {
+  const element = lastAssistantElement();
+  if (!element) return '';
+  const answer = element.querySelector('.answer');
+  return String((answer && answer.textContent) || '').trim();
 }
 
 // ══════════════════════════════════════════
@@ -1447,6 +1548,7 @@ async function sendMessage(text) {
   } finally {
     isTyping = false;
     setSendBusy(false);
+    updateComposerSpeak();
   }
 }
 
@@ -1555,7 +1657,7 @@ function appendMessage(role, content, meta = null) {
       ${isAI && meta?.model ? `<div class="msg-meta"><span>модель: ${escapeHtml(String(meta.model))}${meta.elapsed_ms ? ' · ' + (meta.elapsed_ms / 1000).toFixed(1) + ' c' : ''}</span></div>` : ''}
       ${isAI ? `<div class="msg-actions">
         <button type="button" data-act="copy">📋 Копировать</button>
-        <button type="button" data-act="speak">🔊 Озвучить</button>
+        ${speakButtonHtml()}
       </div>` : ''}
     </div>`;
 
@@ -1563,7 +1665,7 @@ function appendMessage(role, content, meta = null) {
 
   const answerText = String(content || '');
   wrap.querySelector('[data-act="copy"]')?.addEventListener('click', () => copyText(answerText));
-  wrap.querySelector('[data-act="speak"]')?.addEventListener('click', () => speakText(answerText));
+  if (isAI) bindSpeakButton(wrap, wrap, () => answerText);
   wrap.querySelector('.sources-head')?.addEventListener('click', (event) => {
     event.currentTarget.parentElement.classList.toggle('min');
   });
@@ -1956,6 +2058,7 @@ function setActive(el) {
 
 // ========== ЧАТ ==========
 function newChat() {
+  if (window.NovaSpeech) window.NovaSpeech.onChatChanged();
   const store = historyLoad();
   store.activeId = null;
   historySave(store);
@@ -1971,9 +2074,13 @@ function newChat() {
     historyReplay = false;
   }
   renderChatList();
+  // Кнопка озвучки смотрит на последний ответ: после очистки она снова неактивна.
+  updateComposerSpeak();
 }
 
 function clearChat() {
+  if (window.NovaSpeech) window.NovaSpeech.onChatChanged();
+  updateComposerSpeak();
   newChat();
   fetch('/api/history/clear', { method: 'DELETE' }).catch(() => {});
   showNotification('Чат очищен', 'info');
@@ -2149,6 +2256,8 @@ function loadChat(chatId) {
   store.activeId = chatId;
   historySave(store);
 
+  // Новый диалог — другая озвучка: старый голос и очередь сбрасываются.
+  if (window.NovaSpeech) window.NovaSpeech.onChatChanged();
   historyReplay = true;
   try {
     chatContainer.innerHTML = '';
@@ -2166,6 +2275,7 @@ function loadChat(chatId) {
   msgCount = (chat.messages || []).length;
   renderChatList();
   closeSidebar();
+  updateComposerSpeak();
   scrollToBottom();
   attachServerTraces(chat);
 }
@@ -2240,6 +2350,8 @@ function deleteChat(chatId) {
 }
 
 function startNewChat() {
+  if (window.NovaSpeech) window.NovaSpeech.onChatChanged();
+  updateComposerSpeak();
   newChat();
   closeSidebar();
   if (input) input.focus();
@@ -2491,6 +2603,9 @@ document.addEventListener('click', (event) => {
   refreshAiStatus();
   checkHealth(false);
   renderChatList();
+  updateComposerSpeak();
+  // Озвучка: подтягиваем настройки и статус провайдера один раз при загрузке.
+  if (window.NovaSpeech) window.NovaSpeech.init().catch(() => {});
 
   window.addEventListener('online', () => {
     showNotification('Соединение восстановлено', 'ok');

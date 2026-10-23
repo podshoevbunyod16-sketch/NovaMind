@@ -14,6 +14,7 @@ from .coding_agent import coding_agent_bp
 from .diagnostics import diagnostics_bp
 from .memory import memory_bp
 from .schedule import schedule_bp
+from .tts import tts_bp
 
 ALL_BLUEPRINTS = [
     chat_bp,
@@ -30,4 +31,5 @@ ALL_BLUEPRINTS = [
     diagnostics_bp,
     memory_bp,
     schedule_bp,
+    tts_bp,
 ]

@@ -146,6 +146,33 @@ media_selection: dict = {}
 # ---------- Язык интерфейса (i18n: tg | ru | en) ----------
 ui_language: str = "tg"
 
+# ---------- Озвучка ответов (TTS) ----------
+# Одно место хранения: те же runtime_settings.json, что и модель/язык.
+# UI хранит копию только как резерв, если сервер недоступен.
+speech_settings: dict = {
+    "auto_speak": False,   # озвучивать ответ ИИ автоматически
+    "provider": "",        # "" — выбрать доступного провайдера автоматически
+    "model": "",           # "" — модель по умолчанию у провайдера
+    "voice": "",           # "" — голос по умолчанию у провайдера
+    "read_code": False,    # читать вслух блоки кода (по умолчанию — нет)
+    "lang": "",            # "" — язык определяется по тексту ответа
+}
+
+
+def normalize_speech_settings(value) -> dict:
+    """Приводит настройки озвучки к известной схеме (без потери значений)."""
+    base = dict(speech_settings)
+    if not isinstance(value, dict):
+        return base
+    if "auto_speak" in value:
+        base["auto_speak"] = bool(value.get("auto_speak"))
+    if "read_code" in value:
+        base["read_code"] = bool(value.get("read_code"))
+    for key in ("provider", "model", "voice", "lang"):
+        if key in value:
+            base[key] = str(value.get(key) or "").strip()[:64]
+    return base
+
 # ---------- Кеш моделей ----------
 MODEL_CACHE: dict = {}
 MODEL_CACHE_TTL = 3600  # 1 час
@@ -155,7 +182,7 @@ RUNTIME_SETTINGS_FILE = os.path.join(os.path.dirname(__file__), "runtime_setting
 
 def load_runtime_settings():
     """Загружает сохранённый провайдер/модель между перезапусками."""
-    global current_provider, current_model, system_prompt, media_selection
+    global current_provider, current_model, system_prompt, media_selection, speech_settings
     if os.path.exists(RUNTIME_SETTINGS_FILE):
         try:
             with open(RUNTIME_SETTINGS_FILE, "r", encoding="utf-8") as f:
@@ -175,6 +202,9 @@ def load_runtime_settings():
             saved_lang = s.get("ui_language")
             if saved_lang in ("tg", "ru", "en"):
                 ui_language = saved_lang
+            saved_speech = s.get("speech")
+            if isinstance(saved_speech, dict):
+                globals()["speech_settings"] = normalize_speech_settings(saved_speech)
         except Exception as e:
             logger.warning("Ошибка чтения runtime_settings: %s", e)
 
@@ -186,6 +216,7 @@ def _write_runtime_settings():
             "system_prompt": system_prompt,
             "media_selection": media_selection,
             "ui_language": ui_language,
+            "speech": speech_settings,
         }, f, ensure_ascii=False, indent=2)
 
 def save_selected_model(provider, model):
@@ -207,6 +238,17 @@ def save_selected_media_model(selection):
     except Exception as e:
         logger.warning("Ошибка сохранения медиа-модели: %s", e)
     return media_selection
+
+
+def save_speech_settings(updates: dict | None = None) -> dict:
+    """Сохраняет настройки озвучки (auto_speak, провайдер, голос, язык)."""
+    global speech_settings
+    speech_settings = normalize_speech_settings({**speech_settings, **(updates or {})})
+    try:
+        _write_runtime_settings()
+    except Exception as e:
+        logger.warning("Ошибка сохранения настроек озвучки: %s", e)
+    return dict(speech_settings)
 
 
 def save_ui_language(language: str):

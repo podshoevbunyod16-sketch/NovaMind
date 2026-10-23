@@ -352,7 +352,133 @@
     { ru: 'Ctrl+K — команды · Enter — отправить · Shift+Enter — новая строка · Esc — закрыть', tg: 'Ctrl+K — фармонҳо · Enter — фиристодан · Shift+Enter — сатри нав · Esc — пӯшидан', en: 'Ctrl+K — commands · Enter — send · Shift+Enter — new line · Esc — close' },
     // — служебные —
     { ru: 'бесплатно', tg: 'ройгон', en: 'free' },
-  ];
+
+    // — раскрывающиеся разделы настроек —
+    { ru: 'Провайдеры', tg: 'Провайдерҳо', en: 'Providers' },
+    { ru: 'Ключи, модели, настоящее состояние подключения', tg: 'Калидҳо, моделҳо, ҳолати воқеии пайвастшавӣ', en: 'Keys, models, real connection status' },
+    { ru: 'MCP-серверы', tg: 'Серверҳои MCP', en: 'MCP servers' },
+    { ru: 'Model Context Protocol: транспорт, статус, инструменты', tg: 'Model Context Protocol: нақлиёт, ҳолат, абзорҳо', en: 'Model Context Protocol: transport, status, tools' },
+    { ru: 'Скиллы', tg: 'Маҳоратҳо', en: 'Skills' },
+    { ru: 'Инструкции и ресурсы, которые агент использует в работе', tg: 'Дастурҳо ва захираҳое, ки агент дар кор истифода мебарад', en: 'Instructions and resources the agent uses' },
+    { ru: 'Медиа-модели', tg: 'Моделҳои медиа', en: 'Media models' },
+    { ru: 'Изображения, аудио и видео: тариф и доступность API', tg: 'Тасвир, аудио ва видео: тариф ва дастрасии API', en: 'Image, audio and video: pricing and API availability' },
+    { ru: 'Озвучка', tg: 'Овоздиҳӣ', en: 'Speech' },
+    { ru: 'Голос, провайдер и автоматическое чтение ответов', tg: 'Овоз, провайдер ва хондани худкори ҷавобҳо', en: 'Voice, provider and automatic reading of answers' },
+    { ru: 'Язык интерфейса', tg: 'Забони интерфейс', en: 'Interface language' },
+    { ru: 'Переводятся кнопки, подсказки, ошибки и озвучка', tg: 'Тугмаҳо, маслиҳатҳо, хатогиҳо ва овоздиҳӣ тарҷума мешаванд', en: 'Buttons, hints, errors and speech are translated' },
+    { ru: 'Открыто', tg: 'Кушода', en: 'Open' },
+    { ru: 'Свёрнуто', tg: 'Пӯшида', en: 'Collapsed' },
+
+    // — озвучка: кнопки и состояния —
+    { ru: 'Озвучить', tg: 'Овоз додан', en: 'Speak' },
+    { ru: 'Озвучить ответ', tg: 'Ҷавобро овоз додан', en: 'Speak the answer' },
+    { ru: 'Озвучить ещё раз', tg: 'Боз овоз додан', en: 'Speak again' },
+    { ru: 'Озвучить последний ответ', tg: 'Ҷавоби охиринро овоз додан', en: 'Speak the last answer' },
+    { ru: 'Остановить озвучку', tg: 'Овоздиҳиро қатъ кардан', en: 'Stop speaking' },
+    { ru: 'Готовлю аудио…', tg: 'Аудио омода мекунам…', en: 'Preparing audio…' },
+    { ru: 'Играет — пауза', tg: 'Пахш мешавад — таваққуф', en: 'Playing — pause' },
+    { ru: 'Пауза — продолжить', tg: 'Таваққуф — идома', en: 'Paused — resume' },
+    { ru: 'Ошибка озвучки', tg: 'Хатои овоздиҳӣ', en: 'Speech error' },
+    { ru: 'Браузерная озвучка', tg: 'Овоздиҳии браузер', en: 'Browser speech' },
+    { ru: 'Стоп', tg: 'Қатъ', en: 'Stop' },
+    { ru: 'Продолжить', tg: 'Идома', en: 'Resume' },
+    { ru: 'Нечего озвучивать', tg: 'Чизе барои овоздиҳӣ нест', en: 'Nothing to speak' },
+    { ru: 'Пока нечего озвучивать', tg: 'Ҳоло чизе барои овоздиҳӣ нест', en: 'Nothing to speak yet' },
+    { ru: 'Озвучка не загрузилась', tg: 'Овоздиҳӣ бор нашуд', en: 'Speech is not loaded' },
+    { ru: 'Не удалось прочитать часть аудио', tg: 'Қисми аудиоро хондан муяссар нашуд', en: 'Could not play an audio part' },
+    { ru: 'Браузер не дал продолжить воспроизведение', tg: 'Браузер идомаи пахшро иҷозат надод', en: 'The browser blocked resuming playback' },
+    { ru: 'Браузер заблокировал автозапуск — нажмите кнопку', tg: 'Браузер худкор пахшро манъ кард — тугмаро пахш кунед', en: 'Autoplay was blocked — press the button' },
+
+    // — панель «Озвучка» —
+    { ru: 'Автоматически озвучивать ответы ИИ', tg: 'Ҷавобҳои ИИ-ро худкор овоз диҳед', en: 'Automatically speak AI answers' },
+    { ru: 'Включено', tg: 'Фаъол', en: 'On' },
+    { ru: 'Выключено', tg: 'Хомӯш', en: 'Off' },
+    { ru: 'включён', tg: 'фаъол', en: 'enabled' },
+    { ru: 'выключен', tg: 'хомӯш', en: 'disabled' },
+    { ru: 'Проверяю TTS-провайдера…', tg: 'Провайдери TTS-ро месанҷам…', en: 'Checking the TTS provider…' },
+    { ru: 'Запрос к серверу…', tg: 'Дархост ба сервер…', en: 'Requesting the server…' },
+    { ru: 'Проверить', tg: 'Санҷидан', en: 'Check' },
+    { ru: 'Проверяю…', tg: 'Месанҷам…', en: 'Checking…' },
+    { ru: 'Загружаю…', tg: 'Бор мекунам…', en: 'Loading…' },
+    { ru: 'Озвучка готова: {name}', tg: 'Овоздиҳӣ омода аст: {name}', en: 'Speech is ready: {name}' },
+    { ru: 'TTS-провайдер не настроен', tg: 'Провайдери TTS танзим нашудааст', en: 'TTS provider is not configured' },
+    { ru: 'TTS-провайдер подключён', tg: 'Провайдери TTS пайваст аст', en: 'TTS provider is connected' },
+    { ru: 'Голос', tg: 'Овоз', en: 'Voice' },
+    { ru: 'Провайдер', tg: 'Провайдер', en: 'Provider' },
+    { ru: 'по умолчанию', tg: 'аз рӯи пешфарз', en: 'default' },
+    { ru: 'не настроен', tg: 'танзим нашудааст', en: 'not configured' },
+    { ru: 'недоступен', tg: 'дастнорас', en: 'unavailable' },
+    { ru: 'Автоматически', tg: 'Худкор', en: 'Automatic' },
+    { ru: 'лимит', tg: 'ҳад', en: 'limit' },
+    { ru: 'символов за запрос', tg: 'аломат барои як дархост', en: 'characters per request' },
+    { ru: 'Добавьте ключ провайдера, чтобы включить озвучку.', tg: 'Барои фаъол кардани овоздиҳӣ калиди провайдерро илова кунед.', en: 'Add a provider key to enable speech.' },
+    { ru: 'Озвучка идёт через TTS-провайдера на сервере. Ключи в браузер не передаются.', tg: 'Овоздиҳӣ тавассути провайдери TTS дар сервер мегузарад. Калидҳо ба браузер дода намешаванд.', en: 'Speech goes through the server-side TTS provider. Keys are never sent to the browser.' },
+    { ru: 'Пока провайдер не настроен, кнопка озвучки использует браузерный синтез речи (резерв) — это не модель.', tg: 'То провайдер танзим нашудааст, тугмаи овоздиҳӣ синтези браузерро (эҳтиётӣ) истифода мебарад — ин модель нест.', en: 'While no provider is configured, the speech button uses browser synthesis (fallback) — it is not a model.' },
+    { ru: 'Озвучка идёт через TTS-провайдера на сервере. Если провайдер не настроен, кнопка честно переключается на браузерный синтез речи — без ключей и без выдачи его за ответ модели.', tg: 'Овоздиҳӣ тавассути провайдери TTS дар сервер мегузарад. Агар провайдер танзим нашуда бошад, тугма ба синтези браузер мегузарад — бе калид ва бидуни нишон додани он ҳамчун модели ИИ.', en: 'Speech goes through the server-side TTS provider. If none is configured, the button honestly falls back to browser synthesis — no keys, and it is never presented as a model.' },
+    { ru: 'Настройки озвучки сохранены', tg: 'Танзимоти овоздиҳӣ нигоҳ дошта шуд', en: 'Speech settings saved' },
+    { ru: 'Автоозвучка включена', tg: 'Овоздиҳии худкор фаъол шуд', en: 'Auto-speech enabled' },
+    { ru: 'Автоозвучка выключена', tg: 'Овоздиҳии худкор хомӯш шуд', en: 'Auto-speech disabled' },
+    { ru: 'Озвучка остановлена', tg: 'Овоздиҳӣ қатъ шуд', en: 'Speech stopped' },
+    { ru: '▶ Прослушать пример', tg: '▶ Намунаро шунидан', en: '▶ Play a sample' },
+    { ru: 'Прослушать пример', tg: 'Намунаро шунидан', en: 'Play a sample' },
+    { ru: 'Озвучка работает', tg: 'Овоздиҳӣ кор мекунад', en: 'Speech works' },
+    { ru: 'Провайдер не вернул аудио', tg: 'Провайдер аудио надод', en: 'The provider returned no audio' },
+    { ru: 'Сохранить настройки озвучки', tg: 'Танзимоти овоздиҳиро нигоҳ доштан', en: 'Save speech settings' },
+    { ru: 'Остановить', tg: 'Қатъ кардан', en: 'Stop' },
+    { ru: 'Читать вслух блоки кода', tg: 'Блокҳои кодро бо овоз хондан', en: 'Read code blocks aloud' },
+    { ru: 'Язык озвучки', tg: 'Забони овоздиҳӣ', en: 'Speech language' },
+    { ru: 'Определять по тексту', tg: 'Аз рӯи матн муайян кардан', en: 'Detect from text' },
+    { ru: 'Русский', tg: 'Русӣ', en: 'Russian' },
+
+    // — MCP —
+    { ru: 'подключён', tg: 'пайваст', en: 'connected' },
+    { ru: 'не подключён', tg: 'пайваст нест', en: 'not connected' },
+    { ru: 'Отключить', tg: 'Қатъ кардан', en: 'Disconnect' },
+    { ru: 'Инструменты', tg: 'Абзорҳо', en: 'Tools' },
+    { ru: 'Заполнить форму', tg: 'Формаро пур кардан', en: 'Fill the form' },
+    { ru: 'ШАБЛОН', tg: 'НАМУНА', en: 'TEMPLATE' },
+    { ru: 'MCP отвечает', tg: 'MCP ҷавоб медиҳад', en: 'MCP responds' },
+    { ru: 'MCP не отвечает', tg: 'MCP ҷавоб намедиҳад', en: 'MCP does not respond' },
+    { ru: 'MCP tools/list', tg: 'MCP tools/list', en: 'MCP tools/list' },
+    { ru: 'инструментов', tg: 'абзор', en: 'tools' },
+    { ru: 'MCP-сервер отключён', tg: 'Сервери MCP қатъ шуд', en: 'MCP server disconnected' },
+    { ru: 'Отключить MCP-сервер? Секреты подключения будут удалены.', tg: 'Сервери MCP қатъ карда шавад? Сирри пайвастшавӣ нест мешавад.', en: 'Disconnect the MCP server? Stored credentials will be deleted.' },
+    { ru: 'Укажите URL MCP-сервера', tg: 'URL-и сервери MCP-ро нависед', en: 'Enter the MCP server URL' },
+    { ru: 'Укажите URL MCP-сервера и нажмите «Подключить»', tg: 'URL-и сервери MCP-ро нависед ва «Пайваст кардан»-ро пахш кунед', en: 'Enter the MCP server URL and press “Connect”' },
+    { ru: 'MCP-сервер подключён и прошёл initialize', tg: 'Сервери MCP пайваст шуд ва initialize гузашт', en: 'MCP server connected and passed initialize' },
+    { ru: 'Не удалось загрузить MCP-каталог', tg: 'Каталоги MCP бор нашуд', en: 'Could not load the MCP catalog' },
+    { ru: 'Каталог пуст', tg: 'Каталог холӣ аст', en: 'The catalog is empty' },
+    { ru: 'Подключено', tg: 'Пайвастшуда', en: 'Connected' },
+    { ru: 'шаблонов', tg: 'намуна', en: 'templates' },
+
+    // — скиллы —
+    { ru: 'Доступность', tg: 'Дастрасӣ', en: 'Availability' },
+    { ru: 'Подробнее', tg: 'Муфассал', en: 'Details' },
+    { ru: 'Свернуть', tg: 'Пӯшидан', en: 'Collapse' },
+    { ru: 'Скилл включён', tg: 'Маҳорат фаъол шуд', en: 'Skill enabled' },
+    { ru: 'Скилл выключен: агент его не использует', tg: 'Маҳорат хомӯш шуд: агент онро истифода намебарад', en: 'Skill disabled: the agent will not use it' },
+    { ru: 'Удалить skill', tg: 'Маҳоратро нест кардан', en: 'Delete the skill' },
+    { ru: 'Skill удалён', tg: 'Маҳорат нест шуд', en: 'Skill deleted' },
+    { ru: 'Skill сохранён', tg: 'Маҳорат нигоҳ дошта шуд', en: 'Skill saved' },
+    { ru: 'Выберите ZIP-архив', tg: 'Архиви ZIP-ро интихоб кунед', en: 'Choose a ZIP archive' },
+    { ru: 'ZIP не принят', tg: 'ZIP қабул нашуд', en: 'The ZIP was rejected' },
+    { ru: 'Текст skill не принят', tg: 'Матни маҳорат қабул нашуд', en: 'The skill text was rejected' },
+    { ru: 'Не удалось загрузить skills', tg: 'Маҳоратҳо бор нашуд', en: 'Could not load skills' },
+    { ru: 'Загружаю сохранённые skills…', tg: 'Маҳоратҳои нигоҳдошташударо бор мекунам…', en: 'Loading saved skills…' },
+    { ru: 'всего', tg: 'ҳамагӣ', en: 'total' },
+    { ru: 'включено', tg: 'фаъол', en: 'enabled' },
+    { ru: 'Skills ещё не добавлены', tg: 'Маҳоратҳо ҳоло илова нашудаанд', en: 'No skills added yet' },
+    { ru: 'Skill повреждён или имеет неверный формат.', tg: 'Маҳорат вайрон шудааст ё формати нодуруст дорад.', en: 'The skill is broken or has an invalid format.' },
+    { ru: 'Не удалось удалить skill', tg: 'Маҳоратро нест кардан муяссар нашуд', en: 'Could not delete the skill' },
+    { ru: 'Включить или выключить скилл', tg: 'Маҳоратро фаъол ё хомӯш кардан', en: 'Enable or disable the skill' },
+
+    // — провайдеры: результаты проверки —
+    { ru: 'Проверка не выполнялась', tg: 'Санҷиш иҷро нашудааст', en: 'Not checked yet' },
+    { ru: 'Проверяю ключ и каталог…', tg: 'Калид ва каталогро месанҷам…', en: 'Checking the key and catalog…' },
+    { ru: 'Ключ найден', tg: 'Калид ёфт шуд', en: 'Key found' },
+    { ru: 'Ключ не найден', tg: 'Калид ёфт нашуд', en: 'Key not found' },
+    { ru: 'Нет ключа в .env', tg: 'Дар .env калид нест', en: 'No key in .env' },
+    { ru: 'Ключ найден · каталог доступен', tg: 'Калид ёфт шуд · каталог дастрас аст', en: 'Key found · catalog available' },  ];
 
   // Индексы: любая строка на любом из трёх языков → запись словаря.
   const INDEX = new Map();
@@ -362,6 +488,15 @@
 
   // Шаблонные строки: динамическая часть сохраняется.
   const PATTERNS = [
+    { re: /^Каталог доступен · моделей: (\d+)$/,
+      tg: (m) => `Каталог дастрас аст · моделҳо: ${m[1]}`,
+      en: (m) => `Catalog available · models: ${m[1]}` },
+    { re: /^(.+): моделей (\d+)$/,
+      tg: (m) => `${m[1]}: моделҳо ${m[2]}`,
+      en: (m) => `${m[1]}: models ${m[2]}` },
+    { re: /^Озвучиваю часть (\d+) из (\d+)…$/,
+      tg: (m) => `Қисми ${m[1]} аз ${m[2]}-ро овоз медиҳам…`,
+      en: (m) => `Speaking part ${m[1]} of ${m[2]}…` },
     { re: /^Поисковый запрос: (.+)$/,
       tg: (m) => `Ҷустуҷӯи дархост: ${m[1]}`, en: (m) => `Search query: ${m[1]}` },
     { re: /^Запускаю (\d+) поисковых систем параллельно…$/,
@@ -484,6 +619,9 @@
     if (!value || value === lang) return;
     lang = value;
     try { localStorage.setItem(STORAGE_KEY, value); } catch (_) { /* private mode */ }
+    // Переводим сразу, не дожидаясь перезагрузки: на медленном телефоне
+    // пользователь не должен видеть старый язык после нажатия.
+    scheduleApply();
     // Сообщаем серверу — язык переживёт перезапуск и другие устройства.
     try {
       await fetch('/api/settings/lang', {
@@ -523,6 +661,8 @@
     paintLangButtons();
   }
 
+  // Короткий помощник для JS-модулей (тосты, состояния кнопок, подписи).
+  window.t = translateText;
   window.I18N = { getLang: () => lang, setLang, translateText, apply: scheduleApply };
 
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot);

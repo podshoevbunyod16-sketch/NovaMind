@@ -41,13 +41,22 @@ def _write(data: dict[str, dict[str, Any]]) -> None:
 
 
 def catalog() -> list[dict[str, Any]]:
-    return CATALOG
+    """Шаблоны подключения. Ничего не подключается самим фактом наличия в каталоге."""
+    return [{**item, "transport": "http"} for item in CATALOG]
 
 
 def public_connections() -> list[dict[str, Any]]:
+    """Метаданные подключений без секретов.
+
+    ``transport`` — реальный транспорт клиента: NovaMind говорит с сервером по
+    Streamable HTTP (JSON-RPC поверх POST + SSE-ответы). STDIO-серверы не
+    поддерживаются, и интерфейс не должен делать вид, что они есть.
+    """
     return [{"id": key, "name": value.get("name", key), "url": value.get("url", ""),
              "auth": value.get("auth", "none"), "connected": bool(value.get("connected")),
-             "last_error": value.get("last_error"), "updated_at": value.get("updated_at")}
+             "transport": "http", "last_error": value.get("last_error"),
+             "updated_at": value.get("updated_at"),
+             "tools_count": value.get("tools_count")}
             for key, value in _read().items()]
 
 

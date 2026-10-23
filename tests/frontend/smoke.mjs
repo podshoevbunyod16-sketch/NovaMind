@@ -172,7 +172,22 @@ const mock = {
   confirmRequests: [],
   sendStreamCalls: 0,
   sessionLogins: [],
+  speech: { auto_speak: false, provider: '', voice: 'Puck', lang: '', read_code: false, model: '' },
+  speechRequests: [],
+  speechCancels: [],
+  speechAborted: 0,
+  audioBlocked: false,
 };
+
+// Синтетический поток озвучки: ровно те события, что отдаёт /api/tts/speech
+const ttsStream = (requests) => [
+  { type: 'start', job_id: 'tts-job-1', provider: 'google_ai_studio', provider_name: 'Google AI Studio',
+    model: 'gemini-3.8-flash-tts', voice: 'Puck', lang: 'ru', chunks: 2, mode: 'ai' },
+  { type: 'chunk', index: 0, url: '/media/tts-1.mp3', filename: 'tts-1.mp3', mime: 'audio/mpeg',
+    text: String(requests).slice(0, 40) },
+  { type: 'chunk', index: 1, url: '/media/tts-2.mp3', filename: 'tts-2.mp3', mime: 'audio/mpeg', text: '…' },
+  { type: 'done', chunks: 2, total: 2, job_id: 'tts-job-1' },
+];
 
 // Крошечный API задач в памяти — проверяем, что фронт говорит с ним по-человечески
 const taskStore = new Map();
@@ -231,12 +246,22 @@ const pageHtml = await (await fetch(BASE + '/chat')).text();
 // ровно тем содержимым, которое отдаёт сервер.
 const appJs = await (await fetch(BASE + '/static/app.js')).text();
 const linuxJs = await (await fetch(BASE + '/static/linux.js')).text();
+const ttsJs = await (await fetch(BASE + '/static/tts.js')).text();
 // Функция-заменитель, а не строка: в app.js есть '$' + ... — иначе String.replace
 // принимает «$'» за вставку остатка страницы и ломает инлайн-скрипт.
-const html = pageHtml
-  .replace('<script src="/static/app.js"></script>', () => '<script>' + appJs + '</script>')
-  .replace('<script src="/static/linux.js"></script>', () => '<script>' + linuxJs + '</script>');
+// Скрипты подключаются с версией (?v=…), поэтому встраиваем их по регулярке.
+const html = (() => {
+  let page = pageHtml;
+  const code = { 'app': appJs, 'linux': linuxJs, 'tts': ttsJs };
+  for (const [name, source] of Object.entries(code)) {
+    page = page.replace(
+      new RegExp('<script src="/static/' + name + '\\.js[^"]*"></script>'),
+      () => '<script>' + source + '</script>');
+  }
+  return page;
+})();
 if (!html.includes('window.Linux')) throw new Error('не удалось встроить /static/linux.js в страницу');
+if (!html.includes('window.NovaSpeech')) throw new Error('не удалось встроить /static/tts.js в страницу');
 
 const virtualConsole = new VirtualConsole();
 const consoleErrors = [];
@@ -258,6 +283,27 @@ const dom = new JSDOM(html, {
     window.scrollTo = () => {};
     window.Element.prototype.scrollTo = () => {};
     window.HTMLMediaElement.prototype.play = () => Promise.resolve();
+    // Настоящее аудио в jsdom не играет: подменяем только конструктор Audio,
+    // чтобы вручную управлять событием «дослушали до конца».
+    window.__audios = [];
+    window.Audio = class FakeAudio {
+      constructor(src) {
+        this.src = src;
+        this.paused = true;
+        this.ended = false;
+        this._listeners = {};
+        window.__audios.push(this);
+      }
+      addEventListener(name, cb) { (this._listeners[name] = this._listeners[name] || []).push(cb); }
+      removeEventListener(name, cb) {
+        this._listeners[name] = (this._listeners[name] || []).filter((item) => item !== cb);
+      }
+      play() { this.paused = false; return Promise.resolve(); }
+      pause() { this.paused = true; }
+      removeAttribute() { this.src = ''; }
+      load() {}
+      dispatch(name) { (this._listeners[name] || []).forEach((cb) => cb({ type: name })); }
+    };
     window.speechSynthesis = { cancel() {}, speak() {} };
     window.SpeechSynthesisUtterance = class { constructor(text) { this.text = text; } };
     window.addEventListener('error', (event) => consoleErrors.push('window.onerror: ' + event.message));
@@ -365,6 +411,38 @@ const dom = new JSDOM(html, {
                    async text() { return '{"error":"выключено"}'; } };
         }
         return streamResponse(mock.agentStream);
+      }
+      if (path.startsWith('/api/tts/status')) {
+        return json({
+          available: true, mode: 'ai', provider: 'google_ai_studio', provider_name: 'Google AI Studio',
+          model: 'gemini-3.8-flash-tts', model_name: 'Gemini 3.8 Flash TTS', voice: 'Puck',
+          voices: [{ id: 'Puck', label: 'Puck', provider: 'google_ai_studio', languages: ['ru', 'en'], available: true }],
+          settings: { ...mock.speech }, limits: { max_chars: 8000, chunks: 12 }, error: '',
+        });
+      }
+      if (path.startsWith('/api/tts/settings')) {
+        const method = (options.method || 'GET').toUpperCase();
+        if (method === 'POST') {
+          Object.assign(mock.speech, JSON.parse(options.body || '{}'));
+        }
+        return json({ settings: { ...mock.speech }, status: { available: true } });
+      }
+      if (path.startsWith('/api/tts/speech')) {
+        mock.speechRequests.push(JSON.parse(options.body || '{}'));
+        if (mock.audioBlocked) {
+          return new Promise((resolve, reject) => {
+            options.signal?.addEventListener('abort', () => {
+              mock.speechAborted += 1;
+              const error = new Error('aborted'); error.name = 'AbortError';
+              reject(error);
+            }, { once: true });
+          });
+        }
+        return streamResponse(ttsStream(mock.speechRequests.length));
+      }
+      if (path.startsWith('/api/tts/cancel')) {
+        mock.speechCancels.push(JSON.parse(options.body || '{}'));
+        return json({ cancelled: true });
       }
       if (path.startsWith('/api/tasks')) return tasksApi(path, options);
       if (path.startsWith('/send')) {
@@ -564,18 +642,40 @@ check('консоль чистая', consoleErrors.length === 0, consoleErrors.j
 console.log('\n8) Страница настроек');
 const settingsHtml = await (await fetch(BASE + '/settings')).text();
 const settingsJs = await (await fetch(BASE + '/static/settings.js')).text();
+// Остальные скрипты страницы настроек тоже нужны: аккордеон, панели MCP,
+// скиллов и озвучки живут в отдельных файлах.
+const settingsParts = {};
+for (const file of ['i18n', 'accordion', 'tts', 'mcp-settings', 'skills-settings', 'speech-settings']) {
+  settingsParts[file] = await (await fetch(BASE + '/static/' + file + '.js')).text();
+}
+
+// Счётчики обращений страницы настроек к мокам
+const settingsMock = {
+  skillRequests: [], skillListCalls: 0, speechSettings: [], speechSampleRequests: [],
+  langRequests: [], mcpToolsCalls: 0, mcpTestCalls: 0,
+};
 
 const settingsErrors = [];
 const settingsConsole = new VirtualConsole();
 settingsConsole.on('jsdomError', (error) => settingsErrors.push('jsdomError: ' + error.message));
 settingsConsole.on('error', (...args) => settingsErrors.push('console.error: ' + args.join(' ')));
 
-// settings.js подключается с версией (?v=…), поэтому подставляем по регулярке
-const settingsPage = settingsHtml.replace(
+// Скрипты подключаются с версией (?v=…), поэтому встраиваем их по регулярке.
+let settingsPage = settingsHtml.replace(
   /<script src="\/static\/settings\.js[^"]*"><\/script>/,
-  '<script>' + settingsJs + '</script>');
+  () => '<script>' + settingsJs + '</script>');
+for (const [file, source] of Object.entries(settingsParts)) {
+  settingsPage = settingsPage.replace(
+    new RegExp('<script src="/static/' + file.replace(/[-]/g, '\\-') + '\\.js[^"]*"></script>'),
+    () => '<script>' + source + '</script>');
+}
 if (!settingsPage.includes("const state")) {
   throw new Error('не удалось встроить /static/settings.js в страницу настроек');
+}
+for (const file of ['accordion', 'tts', 'mcp-settings', 'skills-settings', 'speech-settings']) {
+  if (settingsPage.includes('/static/' + file + '.js')) {
+    throw new Error('не удалось встроить /static/' + file + '.js в страницу настроек');
+  }
 }
 const settingsDom = new JSDOM(settingsPage,
   {
@@ -586,10 +686,120 @@ const settingsDom = new JSDOM(settingsPage,
     beforeParse(win) {
       win.TextDecoder = TextDecoder;
       win.requestAnimationFrame = (cb) => setTimeout(cb, 0);
+      // Язык интерфейса уже выбран: i18n не полезет за ним на сервер и не
+      // перезагрузит страницу. Дальше проверим переключение вручную.
+      win.localStorage.setItem('nova_ui_lang', 'ru');
+      win.__confirmations = [];
+      win.confirm = (text) => { win.__confirmations.push(text); return true; };
+      win.__audios = [];
+      win.Audio = class FakeAudio {
+        constructor(src) {
+          this.src = src; this.paused = true; this._listeners = {};
+          win.__audios.push(this);
+        }
+        addEventListener(name, cb) { (this._listeners[name] = this._listeners[name] || []).push(cb); }
+        play() { this.paused = false; return Promise.resolve(); }
+        pause() { this.paused = true; }
+      };
       win.addEventListener('error', (event) => settingsErrors.push('window.onerror: ' + event.message));
-      win.fetch = async (url) => {
+      win.fetch = async (url, options = {}) => {
         const path = String(url).replace(BASE, '');
         const json = (data) => ({ ok: true, status: 200, async json() { return data; } });
+        if (path.startsWith('/api/settings/mcp')) {
+          if (path.endsWith('/tools')) {
+            settingsMock.mcpToolsCalls += 1;
+            return { ok: true, status: 200, async json() {
+              // Ответ как у mcp_registry.request(id, 'tools/list')
+              return { jsonrpc: '2.0', id: 1, result: { tools: [
+                { name: 'search', description: 'Ищет документы' },
+                { name: 'fetch', description: 'Читает страницу' },
+              ] } };
+            } };
+          }
+          if (path.startsWith('/api/settings/mcp/') && !path.endsWith('/test')) {
+            return { ok: true, status: 200, async json() { return { deleted: 'docs' }; } };
+          }
+          if (path.endsWith('/test')) {
+            settingsMock.mcpTestCalls += 1;
+            return { ok: true, status: 200, async json() { return { ok: true, tools: 2 }; } };
+          }
+          if (path.startsWith('/api/settings/mcp/connect')) {
+            return { ok: true, status: 200, async json() { return { ok: true, id: 'docs' }; } };
+          }
+          return { ok: true, status: 200, async json() {
+            return {
+              connections: [
+                { id: 'docs', name: 'Docs MCP', url: 'https://mcp.example.com/mcp',
+                  transport: 'http', auth: 'api_key', connected: true, last_error: '',
+                  last_check: 1761000000, tools_count: 2 },
+                { id: 'legacy', name: 'Legacy MCP', url: 'https://old.example.com/sse',
+                  transport: 'sse', auth: 'none', connected: false,
+                  last_error: 'HTTP 502: сервер не ответил на initialize',
+                  last_check: 1761000000, tools_count: 0 },
+              ],
+              catalog: [{ id: 'github', name: 'GitHub', description: 'GitHub MCP',
+                transport: 'http', auth: 'bearer', url: '' }],
+            };
+          } };
+        }
+        if (path.startsWith('/api/settings/skills')) {
+          if (path.endsWith('/enabled')) {
+            const body = JSON.parse(options.body || '{}');
+            settingsMock.skillRequests.push({ id: path.split('/')[4], enabled: body.enabled });
+            return { ok: true, status: 200, async json() { return { ok: true, enabled: false }; } };
+          }
+          if (path.startsWith('/api/settings/skills/') && path !== '/api/settings/skills') {
+            // Ответ как у настоящего GET /api/settings/skills/<id>: плоский объект.
+            return { ok: true, status: 200, async json() {
+              return { id: 'research', name: 'Research helper', description: 'Ищет и цитирует',
+                       content: '# Research\nИщи источники и цитируй их.', enabled: true,
+                       tools: ['search', 'open'] };
+            } };
+          }
+          settingsMock.skillListCalls += 1;
+          return { ok: true, status: 200, async json() {
+            return { skills: [
+              { id: 'research', name: 'Research helper', description: 'Ищет и цитирует',
+                enabled: true, tools: ['search', 'open'], invalid: false },
+              { id: 'writer', name: 'Writer', description: 'Пишет тексты',
+                enabled: false, tools: ['write'], invalid: false },
+            ] };
+          } };
+        }
+        if (path.startsWith('/api/tts/status')) {
+          return json({
+            available: true, mode: 'ai', provider: 'google_ai_studio', provider_name: 'Google AI Studio',
+            model: 'gemini-3.8-flash-tts', model_name: 'Gemini 3.8 Flash TTS', voice: 'Puck',
+            voices: [{ id: 'Puck', label: 'Puck', provider: 'google_ai_studio',
+              languages: ['ru', 'en'], available: true }],
+            providers: [{ id: 'google_ai_studio', name: 'Google AI Studio', available: true, reason: '' }],
+            settings: { auto_speak: false, provider: '', voice: 'Puck', lang: 'ru', read_code: false },
+            limits: { max_chars: 8000, chunks: 12 }, error: '',
+          });
+        }
+        if (path.startsWith('/api/tts/settings')) {
+          if (options.body) settingsMock.speechSettings.push(JSON.parse(options.body));
+          return json({ settings: { auto_speak: true, provider: '', voice: 'Puck', lang: 'ru', read_code: false,
+            ...(settingsMock.speechSettings[settingsMock.speechSettings.length - 1] || {}) } });
+        }
+        if (path.startsWith('/api/tts/speech')) {
+          settingsMock.speechSampleRequests.push(JSON.parse(options.body || '{}'));
+          return { ok: true, status: 200, async json() { return {}; },
+                   async text() {
+                     return [
+                       JSON.stringify({ type: 'start', job_id: 'job-1', provider: 'google_ai_studio',
+                         provider_name: 'Google AI Studio', chunks: 1, mode: 'ai' }),
+                       JSON.stringify({ type: 'chunk', index: 0, url: '/media/tts-sample.mp3',
+                         mime: 'audio/mpeg', text: 'пример' }),
+                       JSON.stringify({ type: 'done', chunks: 1, total: 1 }),
+                     ].join('\n') + '\n';
+                   } };
+        }
+        if (path.startsWith('/api/settings/lang')) {
+          const body = JSON.parse(options.body || '{}');
+          if (body.language) settingsMock.langRequests.push(body.language);
+          return json({ language: 'ru' });
+        }
         if (path.startsWith('/api/settings/providers')) {
           return json({
             providers: [
@@ -599,6 +809,11 @@ const settingsDom = new JSDOM(settingsPage,
             current_provider: 'local_demo',
             current_model: 'nova-local-1',
           });
+        }
+        if (path.startsWith('/api/settings/models') && path.includes('provider=groq')) {
+          return { ok: false, status: 401, async json() {
+            return { error: 'Groq: HTTP 401 — ключ не принят' };
+          } };
         }
         if (path.startsWith('/api/settings/models')) {
           return json({ provider: 'local_demo', configured: true, models: [
@@ -624,6 +839,7 @@ const settingsDom = new JSDOM(settingsPage,
 await new Promise((resolve) => setTimeout(resolve, 350));
 const sdoc = settingsDom.window.document;
 
+const settingsWait = (ms = 120) => new Promise((resolve) => setTimeout(resolve, ms));
 check('настройки: нет JS-ошибок', settingsErrors.length === 0, settingsErrors.join(' | '));
 check('настройки: liquid-glass подключён', settingsHtml.includes('liquid-glass.css'));
 check('провайдеры отрисованы', sdoc.querySelectorAll('.provider-card').length === 2);
@@ -645,6 +861,191 @@ check('статус поиска объясняет итог',
 check('настройки: кнопки темы нет, тема Aurora',
   !sdoc.getElementById('themeBtn')
   && sdoc.documentElement.getAttribute('data-glass-theme') === 'aurora');
+
+// ── 8б) Раскрывающиеся разделы ──────────────────────────────────────────
+console.log('\n8б) Раскрывающиеся разделы (единый компонент)');
+const accSections = [...sdoc.querySelectorAll('section.acc')];
+check('все разделы — аккордеоны, язык последним',
+  accSections.length === 7 && accSections[accSections.length - 1].dataset.accordion === 'language'
+  && accSections[0].dataset.accordion === 'providers',
+  accSections.map((a) => a.dataset.accordion).join(','));
+check('по умолчанию разделы свёрнуты',
+  accSections.every((a) => a.querySelector('[data-accordion-toggle]').getAttribute('aria-expanded') === 'false'
+    && a.querySelector('[data-accordion-panel]').hidden));
+const providersAcc = sdoc.querySelector('section.acc[data-accordion="providers"]');
+const providersHead = providersAcc.querySelector('[data-accordion-toggle]');
+const providersPanel = providersAcc.querySelector('[data-accordion-panel]');
+check('aria-controls ведёт на свою панель',
+  Boolean(providersPanel.id) && providersHead.getAttribute('aria-controls') === providersPanel.id,
+  providersHead.getAttribute('aria-controls'));
+providersHead.dispatchEvent(new settingsDom.window.MouseEvent('click', { bubbles: true }));
+check('раздел раскрывается кликом по шапке',
+  providersHead.getAttribute('aria-expanded') === 'true' && providersPanel.hidden === false);
+check('состояние раздела запоминается',
+  JSON.parse(settingsDom.window.localStorage.getItem('nova_accordion_state')).providers === true,
+  settingsDom.window.localStorage.getItem('nova_accordion_state'));
+const providerCardsBefore = sdoc.querySelectorAll('#providerGrid .provider-card').length;
+const providerBodyNode = providersPanel.firstElementChild;
+for (let index = 0; index < 4; index += 1) {
+  providersHead.dispatchEvent(new settingsDom.window.MouseEvent('click', { bubbles: true }));
+  providersHead.dispatchEvent(new settingsDom.window.MouseEvent('click', { bubbles: true }));
+}
+check('многократное открытие не дублирует карточки и не пересоздаёт DOM',
+  sdoc.querySelectorAll('#providerGrid .provider-card').length === providerCardsBefore
+  && providersPanel.firstElementChild === providerBodyNode);
+providersHead.dispatchEvent(new settingsDom.window.MouseEvent('click', { bubbles: true }));
+check('повторное закрытие снова прячет панель',
+  providersHead.getAttribute('aria-expanded') === 'false' && providersPanel.hidden === true);
+const settingsCss = await (await fetch(BASE + '/static/settings.css')).text();
+check('стрелка поворачивается через класс is-open',
+  /\.acc\.is-open \.caret\s*\{[^}]*rotate/.test(settingsCss), settingsCss.slice(0, 0));
+check('подпись раздела меняется на «Открыто»/«Свёрнуто»',
+  /is-open/.test(settingsCss) && /transition/.test(settingsCss));
+check('анимация отключается при reduced-motion',
+  /prefers-reduced-motion/.test(await (await fetch(BASE + '/static/settings.css')).text()));
+
+// Отдельная мини-страница: состояние из localStorage применяется при загрузке
+const accMini = new JSDOM('<section class="acc" data-accordion="providers">'
+  + '<button type="button" data-accordion-toggle></button><div data-accordion-panel></div></section>'
+  + '<script>' + settingsParts.accordion + '</script>', {
+  url: BASE + '/settings',
+  runScripts: 'dangerously',
+  beforeParse(win) {
+    win.localStorage.setItem('nova_accordion_state', JSON.stringify({ providers: true }));
+  },
+});
+await settingsWait(60);
+check('открытый раздел восстанавливается после перезагрузки',
+  accMini.window.document.querySelector('[data-accordion-toggle]').getAttribute('aria-expanded') === 'true'
+  && accMini.window.document.querySelector('[data-accordion-panel]').hidden === false);
+accMini.window.close();
+
+// ── 8в) Провайдеры: настоящая проверка подключения ──────────────────────
+console.log('\n8в) Провайдеры: проверка связи с провайдером');
+const groqCheck = sdoc.querySelector('[data-check-provider="groq"]');
+const localCheck = sdoc.querySelector('[data-check-provider="local_demo"]');
+check('у провайдера есть кнопка проверки', Boolean(groqCheck) && Boolean(localCheck));
+groqCheck.dispatchEvent(new settingsDom.window.MouseEvent('click', { bubbles: true }));
+await settingsWait(120);
+check('ошибка провайдера показывается как есть',
+  sdoc.querySelector('.provider-card[data-provider="groq"] [data-provider-state]').textContent
+    .includes('HTTP 401'),
+  sdoc.querySelector('.provider-card[data-provider="groq"] [data-provider-state]').textContent);
+check('карточка с ошибкой помечена', sdoc.querySelector('.provider-card[data-provider="groq"]').classList.contains('is-error'));
+localCheck.dispatchEvent(new settingsDom.window.MouseEvent('click', { bubbles: true }));
+await settingsWait(120);
+check('успешная проверка показывает число моделей',
+  sdoc.querySelector('.provider-card[data-provider="local_demo"] [data-provider-state]').textContent
+    .includes('моделей: 1'),
+  sdoc.querySelector('.provider-card[data-provider="local_demo"] [data-provider-state]').textContent);
+check('кнопка проверки вернулась в исходное состояние', !localCheck.disabled);
+
+// ── 8г) MCP-серверы ─────────────────────────────────────────────────────
+console.log('\n8г) MCP-серверы: транспорт, статус, инструменты');
+check('MCP: подключения и шаблоны отрисованы',
+  sdoc.querySelectorAll('#mcpGrid .mcp-card').length === 3,
+  String(sdoc.querySelectorAll('#mcpGrid .mcp-card').length));
+const docsCard = sdoc.querySelector('[data-mcp-card="docs"]');
+const legacyCard = sdoc.querySelector('[data-mcp-card="legacy"]');
+check('MCP: транспорт показан как HTTP (Streamable)', docsCard.textContent.includes('HTTP (Streamable)'));
+check('MCP: другой транспорт не выдаётся за HTTP', legacyCard.textContent.includes('SSE'));
+check('MCP: подключённый сервер помечен', docsCard.classList.contains('is-connected')
+  && docsCard.textContent.includes('подключён'));
+check('MCP: отключённый сервер и причина видны',
+  legacyCard.classList.contains('is-offline')
+  && legacyCard.querySelector('.mcp-error').textContent.includes('HTTP 502'));
+docsCard.querySelector('[data-mcp-tools="docs"]').dispatchEvent(new settingsDom.window.MouseEvent('click', { bubbles: true }));
+await settingsWait(120);
+check('MCP: список инструментов загружен по кнопке',
+  sdoc.querySelectorAll('[data-mcp-card="docs"] .mcp-tools li').length === 2,
+  String(sdoc.querySelectorAll('[data-mcp-card="docs"] .mcp-tools li').length));
+docsCard.querySelector('[data-mcp-test="docs"]').dispatchEvent(new settingsDom.window.MouseEvent('click', { bubbles: true }));
+await settingsWait(120);
+check('MCP: проверка connection не теряет карточку',
+  Boolean(sdoc.querySelector('[data-mcp-card="docs"]')));
+check('MCP: секрет вводится только в скрытое поле',
+  sdoc.getElementById('mcpSecret').type === 'password');
+
+// ── 8д) Скиллы ──────────────────────────────────────────────────────────
+console.log('\n8д) Скиллы: отдельная категория, включение и выключение');
+const skillCards = [...sdoc.querySelectorAll('#skillsGrid .skill-card')];
+check('скиллы отрисованы отдельными карточками', skillCards.length === 2);
+check('скилл показывает доступность и инструменты',
+  skillCards[0].textContent.includes('включён') && skillCards[0].textContent.includes('search, open'));
+check('выключенный скилл помечен', skillCards[1].classList.contains('is-disabled')
+  && skillCards[1].textContent.includes('выключен'));
+check('переключатель скилла отражает состояние',
+  skillCards[1].querySelector('[data-skill-toggle]').getAttribute('aria-checked') === 'false');
+const researchToggle = sdoc.querySelector('[data-skill-toggle="research"]');
+researchToggle.checked = false;
+researchToggle.dispatchEvent(new settingsDom.window.Event('change', { bubbles: true }));
+await settingsWait(120);
+check('выключение скилла уходит на сервер', settingsMock.skillRequests.length >= 1
+  && settingsMock.skillRequests[0].id === 'research' && settingsMock.skillRequests[0].enabled === false,
+  JSON.stringify(settingsMock.skillRequests));
+check('после выключения список перечитан с сервера', settingsMock.skillListCalls >= 2);
+sdoc.querySelector('[data-skill-details="research"]').dispatchEvent(new settingsDom.window.MouseEvent('click', { bubbles: true }));
+await settingsWait(120);
+check('подробности скилла загружаются по кнопке',
+  sdoc.querySelector('[data-skill-body="research"]').textContent.includes('Ищи источники')
+  && sdoc.querySelector('[data-skill-body="research"]').hidden === false);
+sdoc.querySelector('[data-skill-delete="writer"]').dispatchEvent(new settingsDom.window.MouseEvent('click', { bubbles: true }));
+await settingsWait(120);
+check('удаление спрашивает подтверждение', settingsDom.window.__confirmations.length === 1);
+
+// ── 8е) Озвучка в настройках ────────────────────────────────────────────
+console.log('\n8е) Настройки озвучки: статус, автоозвучка, пример голоса');
+check('статус TTS взят с сервера',
+  sdoc.getElementById('speechHeadline').textContent.includes('Google AI Studio')
+  && sdoc.getElementById('speechDetails').textContent.includes('8000'),
+  sdoc.getElementById('speechHeadline').textContent);
+check('провайдеры и голоса заполнены из ответа сервера',
+  [...sdoc.querySelectorAll('#speechProvider option')].some((o) => o.value === 'google_ai_studio')
+  && [...sdoc.querySelectorAll('#speechVoice option')].some((o) => o.value === 'Puck'));
+const autoToggle = sdoc.getElementById('autoSpeakToggle');
+check('автоозвучка по умолчанию выключена и подписана',
+  autoToggle.checked === false && autoToggle.getAttribute('aria-checked') === 'false'
+  && sdoc.querySelector('[data-switch-label]').textContent === 'Выключено');
+autoToggle.checked = true;
+autoToggle.dispatchEvent(new settingsDom.window.Event('change', { bubbles: true }));
+await settingsWait(120);
+check('включение автоозвучки сохраняется на сервере',
+  settingsMock.speechSettings.length === 1 && settingsMock.speechSettings[0].auto_speak === true,
+  JSON.stringify(settingsMock.speechSettings));
+check('подпись переключателя меняется на «Включено»',
+  sdoc.querySelector('[data-switch-label]').textContent === 'Включено'
+  && autoToggle.getAttribute('aria-checked') === 'true');
+sdoc.getElementById('testSpeech').dispatchEvent(new settingsDom.window.MouseEvent('click', { bubbles: true }));
+await settingsWait(120);
+check('«Прослушать пример» запрашивает реальный синтез',
+  settingsMock.speechSampleRequests.length === 1 && settingsMock.speechSampleRequests[0].text.length > 10);
+check('пример действительно отдан в плеер',
+  settingsDom.window.__audios.some((audio) => audio.src === '/media/tts-sample.mp3'));
+sdoc.getElementById('stopSpeech').dispatchEvent(new settingsDom.window.MouseEvent('click', { bubbles: true }));
+check('кнопка «Остановить» сбрасывает озвучку',
+  settingsDom.window.NovaSpeech._state().current === null);
+
+// ── 8ж) Язык интерфейса ─────────────────────────────────────────────────
+console.log('\n8ж) Переключение языка');
+check('три языка в выборе', sdoc.querySelectorAll('#langGrid [data-lang]').length === 3);
+check('текущий язык подсвечен', sdoc.querySelector('[data-lang="ru"]').classList.contains('active'));
+sdoc.querySelector('[data-lang="en"]').dispatchEvent(new settingsDom.window.MouseEvent('click', { bubbles: true }));
+await settingsWait(150);
+check('язык сохранён локально', settingsDom.window.localStorage.getItem('nova_ui_lang') === 'en',
+  settingsDom.window.localStorage.getItem('nova_ui_lang'));
+check('заголовок переведён на английский',
+  sdoc.querySelector('h1').textContent === 'AI settings', sdoc.querySelector('h1').textContent);
+check('названия разделов переведены',
+  sdoc.querySelector('[data-accordion="providers"] .acc-title').textContent === 'Providers'
+  && sdoc.querySelector('[data-accordion="mcp"] .acc-title').textContent === 'MCP servers'
+  && sdoc.querySelector('[data-accordion="speech"] .acc-title').textContent === 'Speech');
+check('переключатель автоозвучки переведён',
+  sdoc.querySelector('[data-switch-label]').textContent === 'On',
+  sdoc.querySelector('[data-switch-label]').textContent);
+check('язык ушёл на сервер', settingsMock.langRequests.includes('en'), JSON.stringify(settingsMock.langRequests));
+check('переключение языка не ломает страницу',
+  settingsErrors.filter((item) => !item.includes('Not implemented: navigation')).length === 0,
+  settingsErrors.join(' | '));
 
 // ══════════════════════════════════════════════════════════════
 // 9) Окно входа
@@ -994,6 +1395,188 @@ check('без Linux блок шагов называется честно — «
   lastAi().querySelector('.agent-term-title')?.textContent === 'Шаги ИИ');
 
 check('после медиа-сценариев консоль чистая', consoleErrors.length === 0, consoleErrors.join(' | '));
+
+// ══════════════════════════════════════════════════════════════
+// 14) Озвучка ответов: кнопки, состояния, стоп, очередь, автоозвучка
+// ══════════════════════════════════════════════════════════════
+console.log('\n14) Озвучка ответов ИИ');
+const speakButton = document.getElementById('btn-speak');
+const composerKids = speakButton ? [...speakButton.parentElement.children] : [];
+check('кнопка озвучки стоит в поле ввода рядом с микрофоном',
+  Boolean(speakButton) && composerKids.indexOf(speakButton) >= 0
+  && composerKids.indexOf(speakButton) < composerKids.indexOf(document.getElementById('voiceBtn')));
+check('у кнопки озвучки есть подпись и подсказка',
+  document.getElementById('speakBtnText').textContent.length > 0 && speakButton.title.length > 0);
+
+window.newChat();
+await settle(60);
+check('в пустом чате кнопка озвучки недоступна', speakButton.disabled === true);
+
+mock.linux = 'media';
+await window.Linux.loadStatus();
+mock.agentStream = SIMPLE_STREAM;
+document.getElementById('chat-input').value = 'расскажи коротко';
+await window.sendMessage();
+await settle(120);
+const speechTurn = lastAi();
+const speechMsgButton = speechTurn.querySelector('.msg-actions [data-act="speak"]');
+check('в ответе есть своя кнопка озвучки', Boolean(speechMsgButton));
+check('после ответа кнопка под полем ввода доступна', speakButton.disabled === false);
+check('кнопка в состоянии ожидания', speechMsgButton.dataset.speechState === 'idle');
+
+// Ручная озвучка: играет именно этот ответ
+const speechRequestsBefore = mock.speechRequests.length;
+speechMsgButton.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+await settle(80);
+const manualRequest = mock.speechRequests[mock.speechRequests.length - 1];
+check('ручная озвучка идёт на сервер', mock.speechRequests.length === speechRequestsBefore + 1);
+check('озвучивается текст этого ответа, а не последнего в чате',
+  manualRequest.text.includes('Чем помочь') && manualRequest.auto !== true);
+check('текст уходит как есть — подготовку делает сервер',
+  manualRequest.text === 'Привет! Чем помочь?', manualRequest.text);
+check('клиент не передаёт ключи и секреты',
+  !('api_key' in manualRequest) && !('key' in manualRequest) && !('token' in manualRequest));
+check('первая часть сразу отдана в плеер',
+  window.__audios.some((audio) => audio.src === '/media/tts-1.mp3'));
+check('кнопка ответа показывает воспроизведение',
+  speechMsgButton.dataset.speechState === 'playing', speechMsgButton.dataset.speechState);
+check('кнопка под полем ввода стала «Стоп»',
+  speakButton.dataset.speechState === 'playing'
+  && document.getElementById('speakBtnText').textContent === 'Стоп');
+const firstAudio = window.__audios[window.__audios.length - 1];
+firstAudio.ended = true;
+firstAudio.dispatch('ended');
+await settle(40);
+check('вторая часть играет после первой',
+  window.__audios.filter((audio) => audio.src === '/media/tts-2.mp3').length === 1);
+const secondAudio = window.__audios[window.__audios.length - 1];
+secondAudio.ended = true;
+secondAudio.dispatch('ended');
+await settle(40);
+check('после проигрывания кнопка возвращается в ожидание',
+  speechMsgButton.dataset.speechState === 'idle' && window.NovaSpeech._state().current === null);
+
+// Пауза и продолжение
+speechMsgButton.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+await settle(40);
+speechMsgButton.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+await settle(30);
+check('повторный клик ставит на паузу', speechMsgButton.dataset.speechState === 'paused',
+  speechMsgButton.dataset.speechState);
+speechMsgButton.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+await settle(30);
+check('клик на паузе продолжает воспроизведение',
+  speechMsgButton.dataset.speechState === 'playing');
+window.NovaSpeech.stop('test');
+await settle(20);
+
+// Автоозвучка: ровно один раз на завершённый ответ
+await window.NovaSpeech.saveSettings({ auto_speak: true });
+check('автоозвучка включена в контроллере', window.NovaSpeech.autoSpeakEnabled() === true);
+const beforeAuto = mock.speechRequests.length;
+document.getElementById('chat-input').value = 'и ещё раз';
+await window.sendMessage();
+await settle(120);
+const autoRequests = mock.speechRequests.length - beforeAuto;
+check('после ответа автоозвучка сработала один раз', autoRequests === 1,
+  `запросов: ${autoRequests}`);
+check('автоозвучка помечена как автоматическая',
+  mock.speechRequests[mock.speechRequests.length - 1].auto === true);
+const autoTurn = lastAi();
+check('ответ сам начал играть', autoTurn.querySelector('[data-act="speak"]').dataset.speechState === 'playing');
+window.NovaSpeech.onTurnFinished(autoTurn, 'и ещё раз', { auto: true });
+await settle(40);
+check('повторный вызов для того же ответа не запускает второй голос',
+  mock.speechRequests.length - beforeAuto === 1);
+check('автоозвучка не дублирует ручную: ручная кнопка тоже играет', autoTurn.querySelector('[data-act="speak"]')
+  .dataset.speechState === 'playing');
+
+// Выключение автоозвучки гасит авто-воспроизведение
+await window.NovaSpeech.saveSettings({ auto_speak: false });
+await settle(40);
+check('выключение автоозвучки остановило текущее воспроизведение',
+  window.NovaSpeech._state().current === null
+  && autoTurn.querySelector('[data-act="speak"]').dataset.speechState === 'idle');
+check('при остановке отправлена команда отмены на сервер', mock.speechCancels.length >= 1,
+  JSON.stringify(mock.speechCancels));
+
+// Ручное воспроизведение переживает выключение автоозвучки
+const manualTurn = lastAi();
+manualTurn.querySelector('[data-act="speak"]').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+await settle(40);
+await window.NovaSpeech.saveSettings({ auto_speak: false });
+await settle(40);
+check('выключение автоозвучки не убивает ручную озвучку',
+  window.NovaSpeech._state().current !== null);
+window.NovaSpeech.stop('test');
+await settle(20);
+
+// Остановка отменяет незавершённый запрос
+mock.audioBlocked = true;
+const audioCountBeforeStop = window.__audios.length;
+manualTurn.querySelector('[data-act="speak"]').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+await settle(40);
+check('пока аудио готовится, кнопка показывает загрузку',
+  manualTurn.querySelector('[data-act="speak"]').dataset.speechState === 'loading',
+  manualTurn.querySelector('[data-act="speak"]').dataset.speechState);
+const linuxAbortBefore = window.Linux.activeAbort;
+window.NovaSpeech.stop('manual');
+await settle(60);
+check('остановка отменяет незавершённый запрос', mock.speechAborted >= 1);
+check('остановка не оставляет плеер и состояние',
+  window.NovaSpeech._state().current === null
+  && manualTurn.querySelector('[data-act="speak"]').dataset.speechState === 'idle'
+  && window.__audios.length === audioCountBeforeStop);
+check('остановка озвучки не трогает генерацию текста в Linux',
+  window.Linux.activeAbort === linuxAbortBefore);
+mock.audioBlocked = false;
+
+// Один голос за раз: новый запуск останавливает предыдущий
+window.appendMessage('ai', 'Первый развёрнутый ответ для очереди.');
+const queueTurnA = lastAi();
+window.appendMessage('ai', 'Второй ответ, который перебьёт первый.');
+const queueTurnB = lastAi();
+const queueButtonA = queueTurnA.querySelector('[data-act="speak"]');
+const queueButtonB = queueTurnB.querySelector('[data-act="speak"]');
+queueButtonA.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+await settle(40);
+const audioA = window.__audios[window.__audios.length - 1];
+check('первый ответ играет', queueButtonA.dataset.speechState === 'playing',
+  queueButtonA.dataset.speechState);
+const audiosBeforeB = window.__audios.length;
+queueButtonB.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+await settle(50);
+check('новый запуск останавливает предыдущий — один голос за раз',
+  audioA.paused === true
+  && window.__audios.slice(audiosBeforeB).filter((audio) => !audio.paused).length === 1
+  && queueButtonA.dataset.speechState === 'idle'
+  && window.NovaSpeech._state().current.element === queueTurnB,
+  `A на паузе: ${audioA.paused}, новых играют: `
+  + `${window.__audios.slice(audiosBeforeB).filter((audio) => !audio.paused).length}, `
+  + `A: ${queueButtonA.dataset.speechState}`);
+
+// Переключение диалога останавливает озвучку
+window.newChat();
+await settle(40);
+check('смена диалога останавливает озвучку и очередь', window.NovaSpeech._state().current === null);
+
+// Нечего озвучивать — понятная подсказка, без запроса
+const requestsBeforeEmpty = mock.speechRequests.length;
+check('пустой текст не запускает синтез', window.NovaSpeech.onTurnFinished(null, '', {}) === false
+  && mock.speechRequests.length === requestsBeforeEmpty);
+check('остановленный ответ не озвучивается автоматически',
+  window.NovaSpeech.onTurnFinished(document.body, 'ответ', { stopped: true }) === false
+  && mock.speechRequests.length === requestsBeforeEmpty);
+
+// Браузерный синтез — только как честный резерв
+mock.agentStream = SIMPLE_STREAM;
+window.NovaSpeech.saveSettings({ auto_speak: true });
+window.NovaSpeech.loadStatus(true);
+document.getElementById('chat-input').value = 'ещё ответ';
+await window.sendMessage();
+await settle(120);
+check('кнопка снова доступна после нового чата', speakButton.disabled === false);
+check('консоль после сценариев озвучки чистая', consoleErrors.length === 0, consoleErrors.join(' | '));
 
 if (failures.length) {
   console.error(`\n❌ Провалено проверок: ${failures.length} → ${failures.join(', ')}`);

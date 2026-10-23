@@ -38,19 +38,95 @@ async function loadProviders() {
   await loadModels(false);
 }
 function providerName(id) { return state.providers.find((item) => item.id === id)?.name || id; }
+
+const PROVIDER_MARKS = {
+  openrouter: '◈', groq: 'G', cerebras: 'C', google_ai_studio: '✦',
+  pollinations: '✺', local_demo: '◉',
+};
+
+/**
+ * Карточка провайдера: выбор + кнопка реальной проверки.
+ *
+ * Состояние подключения не выдумывается: «ключ найден» приходит с сервера,
+ * а «Проверить» делает настоящий запрос каталога моделей и показывает его
+ * результат (число моделей или дословную ошибку провайдера).
+ */
 function renderProviders() {
   $('providerGrid').innerHTML = state.providers.map((provider) => `
-    <button class="provider-card ${provider.id === state.activeProvider ? 'active' : ''} ${provider.configured ? '' : 'disabled'}" data-provider="${escapeHtml(provider.id)}" type="button">
-      <span class="provider-mark">${provider.id === 'openrouter' ? '◈' : provider.id === 'groq' ? 'G' : provider.id === 'cerebras' ? 'C' : provider.id === 'google_ai_studio' ? '✦' : provider.id === 'pollinations' ? '✺' : provider.id === 'local_demo' ? '◉' : '⌘'}</span>
-      <span class="provider-copy"><strong>${escapeHtml(provider.name)}</strong><small>${escapeHtml(provider.hint || (provider.configured ? 'Ключ найден · каталог доступен' : 'Нет ключа в .env'))}</small></span>
-      <span class="provider-state ${provider.configured ? 'ok' : ''}">${provider.configured ? '●' : '○'}</span>
-    </button>`).join('') || '<div class="empty-card">Провайдеры не найдены</div>';
-  document.querySelectorAll('.provider-card').forEach((button) => button.addEventListener('click', () => {
-    state.activeProvider = button.dataset.provider;
-    renderProviders();
-    loadModels(false).catch((error) => showToast(error.message, 'error'));
-  }));
+    <div class="provider-card ${provider.id === state.activeProvider ? 'active' : ''} ${provider.configured ? '' : 'disabled'}"
+         data-provider="${escapeHtml(provider.id)}" role="button" tabindex="0"
+         aria-pressed="${provider.id === state.activeProvider}">
+      <span class="provider-mark">${PROVIDER_MARKS[provider.id] || '⌘'}</span>
+      <span class="provider-copy">
+        <strong>${escapeHtml(provider.name)}</strong>
+        <small>${escapeHtml(provider.hint || (provider.configured ? 'Ключ найден · каталог доступен' : 'Нет ключа в .env'))}</small>
+        <span class="provider-check" data-provider-state="${escapeHtml(provider.id)}">Проверка не выполнялась</span>
+      </span>
+      <span class="provider-state ${provider.configured ? 'ok' : ''}" title="${provider.configured ? 'Ключ найден' : 'Ключ не найден'}">${provider.configured ? '●' : '○'}</span>
+      <button class="provider-check-btn" type="button" data-check-provider="${escapeHtml(provider.id)}">Проверить</button>
+    </div>`).join('') || '<div class="empty-card">Провайдеры не найдены</div>';
+
+  document.querySelectorAll('.provider-card').forEach((card) => {
+    const select = () => {
+      state.activeProvider = card.dataset.provider;
+      renderProviders();
+      loadModels(false).catch((error) => showToast(error.message, 'error'));
+    };
+    card.addEventListener('click', (event) => {
+      if (event.target.closest('[data-check-provider]')) return;
+      select();
+    });
+    card.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); select(); }
+    });
+  });
+  document.querySelectorAll('[data-check-provider]').forEach((button) => {
+    button.addEventListener('click', (event) => {
+      event.stopPropagation();
+      checkProvider(button.dataset.checkProvider, button);
+    });
+  });
 }
+
+/** Настоящая проверка провайдера: запрос каталога моделей с обновлением. */
+async function checkProvider(providerId, button) {
+  const card = button.closest('.provider-card');
+  const stateEl = card?.querySelector(`[data-provider-state="${providerId}"]`);
+  const old = button.textContent;
+  button.disabled = true;
+  button.textContent = 'Проверяю…';
+  if (stateEl) stateEl.textContent = 'Проверяю ключ и каталог…';
+  try {
+    const response = await fetch(`/api/settings/models?provider=${encodeURIComponent(providerId)}&refresh=1`);
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || data.error) {
+      const message = data.error || `HTTP ${response.status}`;
+      if (stateEl) { stateEl.textContent = message; stateEl.classList.add('error-text'); }
+      card?.classList.add('is-error');
+      showToast(`${providerName(providerId)}: ${message}`, 'error');
+      return;
+    }
+    const count = (data.models || []).length;
+    if (stateEl) {
+      stateEl.textContent = `Каталог доступен · моделей: ${count}`;
+      stateEl.classList.remove('error-text');
+    }
+    card?.classList.remove('is-error');
+    card?.classList.add('is-ok');
+    showToast(`${providerName(providerId)}: моделей ${count}`, 'success');
+    if (state.activeProvider === providerId) {
+      state.models = data.models || [];
+      renderModels();
+    }
+  } catch (error) {
+    if (stateEl) { stateEl.textContent = error.message; stateEl.classList.add('error-text'); }
+    showToast(error.message, 'error');
+  } finally {
+    button.disabled = false;
+    button.textContent = old;
+  }
+}
+
 async function loadModels(force) {
   if (!state.activeProvider) return;
   setCatalogStatus(`Проверяю ${providerName(state.activeProvider)}…`);
@@ -65,6 +141,11 @@ async function loadModels(force) {
     return;
   }
   setCatalogStatus(`${providerName(state.activeProvider)} · каталог получен`);
+  const stateEl = document.querySelector(`[data-provider-state="${state.activeProvider}"]`);
+  if (stateEl) {
+    stateEl.textContent = `Каталог доступен · моделей: ${state.models.length}`;
+    stateEl.classList.remove('error-text');
+  }
   renderModels();
 }
 function modelMatchesModality(model, filter) {
@@ -114,10 +195,16 @@ async function selectModel(model) {
   renderModels();
   showToast(`Выбрано: ${data.model}`);
 }
-$('refreshAll').addEventListener('click', () => loadProviders().catch((error) => showToast(error.message, 'error')));
-$('refreshModels').addEventListener('click', () => loadModels(true).catch((error) => showToast(error.message, 'error')));
-['modelSearch', 'priceFilter', 'sortFilter', 'modalityFilter', 'contextFilter'].forEach((id) => $(id).addEventListener('input', renderModels));
-loadProviders().catch((error) => { setCatalogStatus(error.message, 'error-text'); showToast(error.message, 'error'); });
+function initProviderCatalog() {
+  $('refreshAll')?.addEventListener('click', () => loadProviders().catch((error) => showToast(error.message, 'error')));
+  $('refreshModels')?.addEventListener('click', () => loadModels(true).catch((error) => showToast(error.message, 'error')));
+  ['modelSearch', 'priceFilter', 'sortFilter', 'modalityFilter', 'contextFilter']
+    .forEach((id) => $(id)?.addEventListener('input', renderModels));
+  loadProviders().catch((error) => { setCatalogStatus(error.message, 'error-text'); showToast(error.message, 'error'); });
+}
+if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', initProviderCatalog);
+else initProviderCatalog();
+window.showToast = showToast;
 
 /* ========== GENERATIVE MEDIA CATALOG ========== */
 const mediaState = {type:'image', models:[]};

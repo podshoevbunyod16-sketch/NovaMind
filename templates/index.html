@@ -6,7 +6,7 @@
   <meta name="theme-color" content="#070713" />
   <title>NovaMind · Liquid Glass</title>
   <link rel="stylesheet" href="/static/liquid-glass.css">
-  <link rel="stylesheet" href="/static/style.css?v=bubble3">
+  <link rel="stylesheet" href="/static/style.css?v=speech1">
 </head>
 <body>
 
@@ -199,6 +199,12 @@
         <textarea id="chat-input" placeholder="Напишите сообщение..." rows="1" data-default-placeholder="Напишите сообщение..." onkeydown="handleKey(event)" oninput="autoResize(this); document.getElementById('sendBtn').disabled = !this.value.trim()"></textarea>
 
         <div class="input-actions">
+          <button class="speak-btn" id="btn-speak" type="button" onclick="speakLastAnswer()"
+                  title="Озвучить последний ответ" aria-label="Озвучить последний ответ" disabled>
+            <span data-speech-icon aria-hidden="true">🔊</span>
+            <span class="speak-btn-text" id="speakBtnText">Озвучить</span>
+          </button>
+
           <button class="voice-btn" id="voiceBtn" onclick="toggleVoice()" title="Голосовой ввод">
             <svg id="voiceIcon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
@@ -274,8 +280,9 @@
   <!-- Куда складываются уведомления -->
   <div class="lg-toast-stack" id="toastStack"></div>
 
-  <script src="/static/i18n.js"></script>
-  <script src="/static/app.js"></script>
+  <script src="/static/i18n.js?v=lang2"></script>
+  <script src="/static/tts.js?v=speech1"></script>
+  <script src="/static/app.js?v=speech2"></script>
   <script src="/static/linux.js"></script>
   <script src="/static/memory.js"></script>
 </body>

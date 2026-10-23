@@ -1,0 +1,228 @@
+/**
+ * static/speech-settings.js — панель «Озвучка» в настройках.
+ *
+ * Всё, что здесь есть, связано с сервером:
+ *  • статус (`/api/tts/status`) — реально ли настроен TTS-провайдер;
+ *  • переключатель автоозвучки и выбор голоса — `POST /api/tts/settings`,
+ *    который пишет `runtime_settings.json` (тот же файл, что модель и язык);
+ *  • «Прослушать пример» — настоящий запрос синтеза короткой фразы, чтобы
+ *    пользователь услышал голос до того, как включит автоозвучку.
+ */
+(() => {
+  'use strict';
+
+  const $ = (id) => document.getElementById(id);
+  const toast = (message, type = '') => (window.showToast
+    ? window.showToast(message, type)
+    : console.log(message));
+  const t = (text) => (window.I18N && window.I18N.translateText ? window.I18N.translateText(text) : text);
+  const settings = { current: {}, status: null, provider: '', voice: '', lang: '' };
+
+  function paintSwitch(enabled) {
+    const toggle = $('autoSpeakToggle');
+    if (!toggle) return;
+    toggle.checked = Boolean(enabled);
+    toggle.setAttribute('aria-checked', enabled ? 'true' : 'false');
+    const label = toggle.closest('.switch')?.querySelector('[data-switch-label]');
+    if (label) label.textContent = enabled ? t('Включено') : t('Выключено');
+  }
+
+  function fillProviders(status) {
+    const select = $('speechProvider');
+    if (!select) return;
+    const current = settings.current.provider || '';
+    select.replaceChildren();
+    const auto = document.createElement('option');
+    auto.value = '';
+    auto.textContent = t('Автоматически');
+    select.appendChild(auto);
+    (status.providers || []).forEach((provider) => {
+      const option = document.createElement('option');
+      option.value = provider.id;
+      option.textContent = provider.available
+        ? `${provider.name}`
+        : `${provider.name} — ${t('не настроен')}`;
+      option.dataset.available = provider.available ? '1' : '0';
+      select.appendChild(option);
+    });
+    select.value = current;
+  }
+
+  function fillVoices(status) {
+    const select = $('speechVoice');
+    if (!select) return;
+    const provider = $('speechProvider')?.value || '';
+    const current = settings.current.voice || '';
+    select.replaceChildren();
+    const auto = document.createElement('option');
+    auto.value = '';
+    auto.textContent = t('По умолчанию');
+    select.appendChild(auto);
+    (status.voices || [])
+      .filter((voice) => !provider || voice.provider === provider)
+      .forEach((voice) => {
+        const option = document.createElement('option');
+        option.value = voice.id;
+        option.textContent = voice.available ? voice.label : `${voice.label} (${t('недоступен')})`;
+        option.disabled = !voice.available;
+        select.appendChild(option);
+      });
+    select.value = current;
+  }
+
+  function paintStatus(status) {
+    settings.status = status;
+    const dot = $('speechDot');
+    const headline = $('speechHeadline');
+    const details = $('speechDetails');
+    const note = $('speechNote');
+    if (!headline) return;
+    const available = Boolean(status && status.available);
+    if (dot) {
+      dot.classList.toggle('ok', available);
+      dot.classList.toggle('err', !available);
+      dot.title = available ? t('TTS-провайдер подключён') : t('TTS-провайдер не настроен');
+    }
+    if (available) {
+      headline.textContent = t('Озвучка готова: {name}')
+        .replace('{name}', `${status.provider_name} · ${status.model_name || status.model}`);
+      details.textContent = `${t('Голос')}: ${status.voice || t('по умолчанию')} · `
+        + `${t('лимит')}: ${status.limits?.max_chars || '—'} ${t('символов за запрос')}`;
+    } else {
+      headline.textContent = t('TTS-провайдер не настроен');
+      details.textContent = status?.error || t('Добавьте ключ провайдера, чтобы включить озвучку.');
+    }
+    if (note) {
+      note.textContent = available
+        ? t('Озвучка идёт через TTS-провайдера на сервере. Ключи в браузер не передаются.')
+        : t('Пока провайдер не настроен, кнопка озвучки использует браузерный синтез речи (резерв) — это не модель.');
+    }
+    const toggle = $('autoSpeakToggle');
+    if (toggle) {
+      toggle.disabled = false;
+      toggle.title = available
+        ? t('Автоматически озвучивать ответы ИИ')
+        : t('Провайдер не настроен: автоозвучка будет браузерной');
+    }
+    fillProviders(status || {});
+    fillVoices(status || {});
+  }
+
+  async function loadStatus(force = false) {
+    try {
+      const response = await fetch('/api/tts/status');
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const status = await response.json();
+      settings.current = status.settings || {};
+      settings.lang = settings.current.lang || '';
+      paintSwitch(settings.current.auto_speak);
+      if ($('readCodeToggle')) $('readCodeToggle').checked = Boolean(settings.current.read_code);
+      if ($('speechLang')) $('speechLang').value = settings.lang;
+      paintStatus(status);
+      if (window.NovaSpeech && force) window.NovaSpeech.loadStatus(true);
+      return status;
+    } catch (error) {
+      const headline = $('speechHeadline');
+      if (headline) headline.textContent = t('Не удалось проверить TTS: {error}')
+        .replace('{error}', error.message);
+      const dot = $('speechDot');
+      if (dot) { dot.classList.add('err'); dot.classList.remove('ok'); }
+      return null;
+    }
+  }
+
+  async function save(patch, message = 'Настройки озвучки сохранены') {
+    try {
+      const response = await fetch('/api/tts/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(patch),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+      settings.current = data.settings || { ...settings.current, ...patch };
+      // Клиент держит ту же копию: /api/tts/settings — источник истины.
+      if (window.NovaSpeech) {
+        window.NovaSpeech.loadSettings(true).catch(() => {});
+      }
+      if (message) toast(message);
+      paintSwitch(settings.current.auto_speak);
+      return settings.current;
+    } catch (error) {
+      toast(error.message, 'error');
+      return null;
+    }
+  }
+
+  async function playSample() {
+    const text = t('Привет! Это пример озвучки ответов в NovaMind. Голос можно выбрать в настройках.');
+    const button = $('testSpeech');
+    if (button) { button.disabled = true; button.textContent = t('Готовлю аудио…'); }
+    try {
+      const response = await fetch('/api/tts/speech', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          text,
+          voice: settings.current.voice || '',
+          provider: settings.current.provider || '',
+          read_code: Boolean(settings.current.read_code),
+          lang: settings.current.lang || '',
+        }),
+      });
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({}));
+        throw new Error(data.error || `HTTP ${response.status}`);
+      }
+      const raw = await response.text();
+      const events = raw.split('\n').filter(Boolean).map((line) => {
+        try { return JSON.parse(line); } catch (_) { return null; }
+      }).filter(Boolean);
+      const chunks = events.filter((event) => event.type === 'chunk');
+      const failure = events.find((event) => event.type === 'error');
+      if (!chunks.length) throw new Error(failure?.error || t('Провайдер не вернул аудио'));
+      const audio = new Audio(chunks[0].url);
+      await audio.play().catch(() => {});
+      const first = events.find((event) => event.type === 'start') || {};
+      toast(`${t('Озвучка работает')}: ${first.provider_name || first.provider || 'TTS'}`);
+    } catch (error) {
+      toast(error.message, 'error');
+    } finally {
+      if (button) { button.disabled = false; button.textContent = t('▶ Прослушать пример'); }
+    }
+  }
+
+  function init() {
+    if (!$('speechSectionOwner') && !document.getElementById('speech-section')) return;
+    loadStatus();
+    $('refreshSpeech')?.addEventListener('click', () => loadStatus(true));
+    $('autoSpeakToggle')?.addEventListener('change', (event) => {
+      const enabled = Boolean(event.target.checked);
+      paintSwitch(enabled);
+      save({ auto_speak: enabled },
+        enabled ? t('Автоозвучка включена') : t('Автоозвучка выключена'));
+    });
+    $('speechProvider')?.addEventListener('change', (event) => {
+      settings.current.provider = event.target.value;
+      fillVoices(settings.status || {});
+    });
+    $('saveSpeech')?.addEventListener('click', () => save({
+      provider: $('speechProvider')?.value || '',
+      voice: $('speechVoice')?.value || '',
+      lang: $('speechLang')?.value || '',
+      read_code: Boolean($('readCodeToggle')?.checked),
+    }));
+    $('testSpeech')?.addEventListener('click', playSample);
+    $('stopSpeech')?.addEventListener('click', () => {
+      if (window.NovaSpeech) window.NovaSpeech.stop('settings');
+      if (typeof window.speechSynthesis !== 'undefined') {
+        try { window.speechSynthesis.cancel(); } catch (_) { /* нет поддержки */ }
+      }
+      toast(t('Озвучка остановлена'));
+    });
+    if (window.NovaSpeech) window.NovaSpeech.loadSettings().catch(() => {});
+  }
+
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
+  else init();
+})();

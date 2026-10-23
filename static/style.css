@@ -1326,3 +1326,47 @@ button, input, select, textarea, .stage, .sources-head, .msg-actions {
   white-space: nowrap;
 }
 .usage-chip:hover { color: var(--text, #e6e9ef); }
+
+/* ══════════════════════════════════════════
+   ОЗВУЧКА ОТВЕТОВ
+   Кнопка «Озвучить» есть у каждого ответа ИИ и под полем ввода.
+   Состояния — в data-speech-state: idle / loading / playing / paused / error.
+   ══════════════════════════════════════════ */
+.speak-btn {
+  display: inline-flex; align-items: center; gap: 5px;
+  height: 36px; padding: 0 11px; border-radius: var(--r-pill);
+  background: var(--glass-fill); border: 1px solid var(--glass-border-soft);
+  color: var(--text-2); font: 600 11px/1 inherit; cursor: pointer;
+  transition: all var(--t) var(--ease);
+  white-space: nowrap;
+}
+.speak-btn:hover:not(:disabled) { background: var(--glass-fill-2); color: var(--text-1); }
+.speak-btn:disabled { opacity: .45; cursor: default; }
+.speak-btn.active, .speak-btn[data-speech-state="playing"] {
+  color: var(--text-1);
+  border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+}
+.speak-btn[data-speech-state="loading"] { color: var(--text-2); }
+.speak-btn[data-speech-state="paused"] { border-style: dashed; }
+.speak-btn-text { font-size: 11px; }
+
+.msg-actions button[data-speech-state="playing"] {
+  color: var(--text-1);
+  border-color: color-mix(in srgb, var(--accent) 60%, transparent);
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+}
+.msg-actions button[data-speech-state="loading"] { opacity: .8; }
+.msg-actions button[data-speech-state="error"] {
+  color: var(--err);
+  border-color: color-mix(in srgb, var(--err) 45%, transparent);
+}
+.msg-actions button[data-speech-state="fallback"] { font-style: italic; }
+
+@media (max-width: 480px) {
+  /* На телефоне подпись кнопки под полем ввода скрываем: остаётся иконка. */
+  .speak-btn { padding: 0 9px; }
+  .speak-btn .speak-btn-text { display: none; }
+  /* Действия у сообщения на телефоне видны всегда: иначе до озвучки не добраться. */
+  .msg-actions { opacity: 1; transform: none; flex-wrap: wrap; }
+}
