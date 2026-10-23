@@ -127,13 +127,13 @@ MEDIA_MODEL_REGISTRY = [
     },
     # ── Groq: аудио (бесплатный тариф с лимитами, карта не нужна) ──
     {
-        "id": "playai-tts", "name": "PlayAI TTS (Groq)",
+        "id": "canopylabs/orpheus-v1-english", "name": "Orpheus English TTS (Groq)",
         "provider": "groq", "media_type": "audio",
         "pricing_status": PRICING_FREE,
         "pricing_note": "Бесплатный тариф Groq с лимитами RPM/RPD; банковская карта не требуется.",
         "pricing_source": GROQ_MODELS_SOURCE, "pricing_verified_at": PRICING_VERIFIED_AT,
         "description": "Синтез речи через OpenAI-compatible endpoint /v1/audio/speech.",
-        "backend": "groq_tts", "options": {"voice": "Fritz-PlayAI", "format": "wav"},
+        "backend": "groq_tts", "options": {"voice": "autumn", "format": "wav"},
         "checks_provider_catalog": True,
     },
     # ── Pollinations: без ключа, бесплатно ──
@@ -792,6 +792,20 @@ def generate_google_audio(model: dict, prompt: str, options=None, on_status=None
     blob, mime = _extract_inline_data(data)
     if not blob:
         return None, "Google AI Studio не вернул аудиоданные (в ответе нет inlineData)."
+    mime_low = (mime or "").lower()
+    if blob[:4] != b"RIFF" and ("l16" in mime_low or "pcm" in mime_low or not mime_low):
+        # Gemini отдаёт сырой PCM 16 бит, моно. Браузер такой не проиграет,
+        # поэтому оборачиваем его в WAV-заголовок.
+        import io, wave
+        found = re.search(r"rate=(\d+)", mime_low)
+        rate = int(found.group(1)) if found else 24000
+        buf = io.BytesIO()
+        with wave.open(buf, "wb") as wav:
+            wav.setnchannels(1)
+            wav.setsampwidth(2)
+            wav.setframerate(rate)
+            wav.writeframes(blob)
+        blob, mime = buf.getvalue(), "audio/wav"
     return save_media("audio", blob, mime or "audio/wav", prefix="gemini_tts"), None
 
 
@@ -804,7 +818,7 @@ def generate_groq_audio(model: dict, prompt: str, options=None, on_status=None):
     payload = {
         "model": model["id"],
         "input": prompt,
-        "voice": options.get("voice") or "Fritz-PlayAI",
+        "voice": options.get("voice") or "autumn",
         "response_format": options.get("format") or "wav",
     }
     _report(on_status, f"Отправка запроса к Groq /audio/speech ({model['id']})")

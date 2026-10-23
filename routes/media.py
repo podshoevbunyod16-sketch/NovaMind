@@ -564,8 +564,8 @@ def media_tts():
         model = _legacy_model("google_ai_studio", model_id, "audio", "google_tts",
                               {"voice": data.get("voice") or "Kore"})
     elif mg.provider_connected("groq"):
-        model = _legacy_model("groq", "playai-tts", "audio", "groq_tts",
-                              {"voice": data.get("voice") or "Fritz-PlayAI"})
+        model = _legacy_model("groq", "canopylabs/orpheus-v1-english", "audio", "groq_tts",
+                              {"voice": data.get("voice") or "autumn"})
     else:
         model = _legacy_model("pollinations", "openai-audio", "audio", "pollinations_audio",
                               {"voice": data.get("voice") or "nova"})

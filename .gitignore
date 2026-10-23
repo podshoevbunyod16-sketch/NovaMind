@@ -22,3 +22,4 @@ uploads/
 .env.*
 !.env.example
 mcp_connections.json
+.npm/

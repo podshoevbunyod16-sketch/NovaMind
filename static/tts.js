@@ -492,6 +492,10 @@
   /** Хук после завершения ответа: автоматическая озвучка ровно один раз. */
   function onTurnFinished(element, text, meta = {}) {
     if (!element || !String(text || '').trim()) return false;
+    if (state.stream && state.stream.element === element) {
+      if (meta.stopped || meta.error) { stop('stopped'); return false; }
+      return streamEnd(element, text);
+    }
     if (meta.stopped || meta.error) return false;         // остановили или ошибка
     if (!autoSpeakEnabled()) return false;
     return speak(element, text, { auto: true });
@@ -511,6 +515,235 @@
     loadStatus();
   }
 
+
+  // ───────── потоковая озвучка: речь идёт, пока ответ ещё печатается ─────────
+  const STREAM_MIN_CHARS = 350;   // меньше запросов к провайдеру и ровнее речь
+  state.stream = null;
+
+  function streamAlive(s) {
+    return Boolean(s) && state.current === s.current && state.generation === s.generation;
+  }
+
+  /** Конец предложения/абзаца, где можно резать текст (не внутри ```-блока). */
+  function streamCut(text, from) {
+    if (text.length - from < STREAM_MIN_CHARS) return -1;
+    const tail = text.slice(from);
+    const re = /(?:[.!?…]+["»”)\]]*|\n{2,})(?=\s)/g;
+    let cut = -1;
+    let match;
+    while ((match = re.exec(tail)) !== null) {
+      const end = from + match.index + match[0].length;
+      if (end - from < STREAM_MIN_CHARS) continue;
+      const fences = (text.slice(0, end).match(/```/g) || []).length;
+      if (fences % 2 === 0) cut = end;
+    }
+    return cut;
+  }
+
+  function streamStart(element) {
+    stop('replaced');
+    const controller = new AbortController();
+    const current = {
+      element, controller, queue: [], audio: null, jobId: '',
+      paused: false, mode: 'ai', auto: true, chunksPlayed: 0, text: '', idle: false,
+    };
+    state.current = current;
+    state.spoken.add(element);
+    const s = {
+      element, current, controller, generation: state.generation,
+      sent: 0, pending: [], fetching: false, ended: false,
+    };
+    state.stream = s;
+    paint(element, 'loading', { icon: '⏳' });
+    return s;
+  }
+
+  function streamCheckDone(s) {
+    if (!streamAlive(s) || !s.ended || s.fetching || s.pending.length) return;
+    const c = s.current;
+    if (c.queue.length || (c.audio && !c.idle)) return;
+    state.current = null;
+    state.stream = null;
+    paint(s.element, 'idle', { icon: '🔊', title: 'Озвучить ещё раз' });
+    emit({ state: 'finished', element: s.element, chunks: c.chunksPlayed });
+  }
+
+  function streamFail(s, message) {
+    s.pending.length = 0;
+    if (!streamAlive(s)) return;
+    const c = s.current;
+    if (c.audio || c.queue.length || c.chunksPlayed) {   // часть речи уже есть — не рвём её
+      emit({ state: 'chunk-error', element: s.element, error: message });
+      return;
+    }
+    state.current = null;
+    state.stream = null;
+    try { s.controller.abort(); } catch (_) { /* уже завершён */ }
+    paint(s.element, 'error', { title: message, icon: '⚠️' });
+    emit({ state: 'error', element: s.element, error: message });
+  }
+
+  function streamPlayNext(s) {
+    if (!streamAlive(s)) return;
+    const c = s.current;
+    const next = c.queue.shift();
+    if (!next) {
+      c.idle = true;
+      streamCheckDone(s);
+      return;
+    }
+    c.idle = false;
+    const audio = state.audioFactory(next.url);
+    c.audio = audio;
+    c.paused = false;
+    const advance = () => {
+      if (!streamAlive(s)) return;
+      c.chunksPlayed += 1;
+      streamPlayNext(s);
+    };
+    audio.addEventListener('ended', advance);
+    audio.addEventListener('error', () => {
+      if (!streamAlive(s)) return;
+      paint(s.element, 'error', { title: 'Не удалось прочитать часть аудио' });
+      stopAudio(audio);
+      advance();
+    });
+    paint(s.element, 'playing');
+    const playing = audio.play();
+    if (playing && playing.catch) {
+      playing.catch(() => {
+        if (!streamAlive(s)) return;
+        paint(s.element, 'error', { title: 'Браузер заблокировал автозапуск — нажмите кнопку' });
+        emit({ state: 'blocked', element: s.element });
+      });
+    }
+  }
+
+  function streamHandle(s, event) {
+    const c = s.current;
+    switch (event.type) {
+      case 'start':
+        c.jobId = event.job_id || c.jobId;
+        emit({ state: 'start', element: s.element, ...event });
+        break;
+      case 'chunk':
+        c.queue.push({ url: event.url, index: event.index });
+        emit({ state: 'chunk', element: s.element, ...event });
+        if (c.idle || !c.audio) streamPlayNext(s);
+        break;
+      case 'chunk_error':
+        emit({ state: 'chunk-error', element: s.element, error: event.error, index: event.index });
+        break;
+      case 'error':
+        streamFail(s, event.error || 'Озвучка недоступна');
+        break;
+      default: break;
+    }
+  }
+
+  async function streamFetch(s, segment) {
+    try {
+      const response = await fetch('/api/tts/speech', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          text: segment,
+          voice: state.settings.voice || '',
+          provider: state.settings.provider || '',
+          model: state.settings.model || '',
+          read_code: Boolean(state.settings.read_code),
+          lang: state.settings.lang || '',
+          auto: true,
+        }),
+        signal: s.controller.signal,
+      });
+      if (!response.ok) {
+        const raw = await response.text().catch(() => '');
+        let message = `HTTP ${response.status}`;
+        try { message = JSON.parse(raw).error || message; } catch (_) { /* не JSON */ }
+        throw new Error(message);
+      }
+      if (!response.body || !response.body.getReader) {
+        throw new Error('Браузер не поддерживает потоковый ответ');
+      }
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      while (true) {
+        const { value, done } = await reader.read();
+        if (!streamAlive(s)) { try { reader.cancel(); } catch (_) { /* ok */ } return; }
+        buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
+        for (const line of lines) {
+          const event = safeParse(line);
+          if (event) streamHandle(s, event);
+        }
+        if (done) break;
+      }
+      if (buffer.trim()) {
+        const event = safeParse(buffer);
+        if (event) streamHandle(s, event);
+      }
+    } catch (error) {
+      if (!streamAlive(s) || error.name === 'AbortError') return;
+      streamFail(s, error.message || 'Озвучка недоступна');
+    }
+  }
+
+  async function streamPump(s) {
+    if (s.fetching) return;
+    s.fetching = true;
+    try {
+      while (streamAlive(s) && s.pending.length) {
+        await streamFetch(s, s.pending.shift());
+      }
+    } finally {
+      s.fetching = false;
+      streamCheckDone(s);
+    }
+  }
+
+  function streamQueue(s, text) {
+    const clean = String(text || '').trim();
+    if (!clean) return;
+    s.pending.push(clean);
+    streamPump(s);
+  }
+
+  /** Вызывается на каждый токен ответа: озвучивает готовые предложения. */
+  function streamFeed(element, fullText) {
+    if (!element || !autoSpeakEnabled()) return false;
+    const text = String(fullText || '');
+    let s = state.stream;
+    if (!s || s.element !== element) {
+      if (state.spoken.has(element) || text.length < STREAM_MIN_CHARS) return false;
+      s = streamStart(element);
+    } else if (!streamAlive(s)) {
+      return false;               // остановили вручную — для этого ответа больше не стартуем
+    }
+    const cut = streamCut(text, s.sent);
+    if (cut > 0) {
+      streamQueue(s, text.slice(s.sent, cut));
+      s.sent = cut;
+    }
+    return true;
+  }
+
+  /** Ответ дописан: озвучиваем остаток и завершаем поток. */
+  function streamEnd(element, fullText) {
+    const s = state.stream;
+    if (!s || s.element !== element) return false;
+    if (!streamAlive(s)) { state.stream = null; return false; }
+    const text = String(fullText || '');
+    const rest = text.slice(s.sent);
+    s.sent = text.length;
+    s.ended = true;
+    streamQueue(s, rest);
+    streamCheckDone(s);
+    return true;
+  }
+
   window.NovaSpeech = {
     init,
     speak,
@@ -520,6 +753,8 @@
     pause,
     resume,
     onTurnFinished,
+    streamFeed,
+    streamEnd,
     onChatChanged,
     loadSettings,
     loadStatus,

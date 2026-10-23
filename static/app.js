@@ -875,6 +875,7 @@ function createAssistantTurn(options = {}) {
       api.collapseStage();
       api.finishTerm();          // команды показаны — дальше только ответ
       answerText += token;
+      if (!historyReplay && window.NovaSpeech && window.NovaSpeech.streamFeed) window.NovaSpeech.streamFeed(wrap, answerText);
       answerEl.innerHTML = formatContent(answerText);
       scrollToBottom();
     },

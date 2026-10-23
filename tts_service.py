@@ -85,12 +85,12 @@ GOOGLE_VOICES = (
 #: Голоса Groq PlayAI. Официальный playai-tts синтезирует английскую речь,
 #: поэтому в списке честно указано, что русский текст он не озвучит.
 GROQ_VOICES = (
-    ("Fritz-PlayAI", "Fritz · мужской (en)", (VOICE_EN,)),
-    ("Aristeo-PlayAI", "Aristeo · мужской (en)", (VOICE_EN,)),
-    ("Celeste-PlayAI", "Celeste · женский (en)", (VOICE_EN,)),
-    ("Gail-PlayAI", "Gail · женский (en)", (VOICE_EN,)),
-    ("Chrissie-PlayAI", "Chrissie · женский (en)", (VOICE_EN,)),
-    ("Thunder-PlayAI", "Thunder · мужской (en)", (VOICE_EN,)),
+    ("autumn", "Autumn · женский (en)", (VOICE_EN,)),
+    ("diana", "Diana · женский (en)", (VOICE_EN,)),
+    ("hannah", "Hannah · женский (en)", (VOICE_EN,)),
+    ("austin", "Austin · мужской (en)", (VOICE_EN,)),
+    ("daniel", "Daniel · мужской (en)", (VOICE_EN,)),
+    ("troy", "Troy · мужской (en)", (VOICE_EN,)),
 )
 
 #: Голоса Pollinations (OpenAI-совместимые названия; язык — по тексту).
@@ -166,6 +166,18 @@ def _provider_available(provider: str) -> bool:
     if provider == "custom":
         return bool(os.getenv("AUDIO_TTS_URL", "").strip())
     return bool(mg.provider_connected(provider))
+
+
+def _ready_model(model: dict) -> dict:
+    """Добавляет поля, которые проверяет media_generation.validate_selection."""
+    ready = dict(model)
+    provider = ready.get("provider") or ""
+    ready["provider_name"] = PROVIDER_LABELS.get(provider, provider)
+    ready["provider_connected"] = _provider_available(provider)
+    ready.setdefault("in_provider_catalog", None)
+    ready["pricing_label"] = mg.PRICING_LABELS.get(
+        ready.get("pricing_status"), mg.PRICING_LABELS[mg.PRICING_UNKNOWN])
+    return ready
 
 
 def voices_for(model: dict) -> list[dict]:
@@ -583,6 +595,7 @@ def synthesize(text: str, *, voice: str = "", provider: str = "", model_id: str 
         yield {"type": "error", "error": error, "mode": "browser"}
         return
 
+    resolved = _ready_model(resolved)
     chunks = split_text(prepared, limit=CHUNK_CHARS)
     if not chunks:
         yield {"type": "error", "error": "Не удалось разбить текст для озвучки."}
@@ -617,6 +630,7 @@ def synthesize(text: str, *, voice: str = "", provider: str = "", model_id: str 
             attempts += 1
             result, error = mg.generate_media(
                 resolved, chunk, options={"voice": voice_id} if voice_id else {},
+                confirm={"unknown": resolved.get("provider") == "custom"},
             )
             if result or not _is_transient(error):
                 break

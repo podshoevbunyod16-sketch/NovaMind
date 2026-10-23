@@ -30,7 +30,7 @@ import database
 log = logging.getLogger("novamind.scheduler")
 
 MAX_LOOKAHEAD_DAYS = 400
-TICK_SECONDS = int(os.getenv("SCHEDULER_TICK", "30"))
+TICK_SECONDS = int(os.getenv("SCHEDULER_TICK", "50"))
 MIN_EVERY = 60                      # чаще раза в минуту не запускаем
 
 _MONTHS = {"JAN": 1, "FEB": 2, "MAR": 3, "APR": 4, "MAY": 5, "JUN": 6,
