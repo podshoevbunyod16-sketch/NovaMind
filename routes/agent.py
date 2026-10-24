@@ -909,7 +909,7 @@ def agent_stream():
                 yield chunk
         finally:
             try:
-                database.save_trace(session.get("chat_id"), run_id, collected)
+                database.save_trace(chat_id, run_id, collected)
             except Exception:  # noqa: BLE001
                 log.warning("Не удалось сохранить трассу шагов", exc_info=True)
 

@@ -408,28 +408,51 @@ def search_web_ddg_lite(query, num=8):
 
 
 def search_web_httpx_ddg(query, num=8):
-    """Лёгкий HTML-поиск через httpx и BeautifulSoup4."""
-    url = "https://html.duckduckgo.com/html/?q=" + quote_plus(query) + "&kl=ru-ru"
-    try:
-        response = httpx.get(url, headers=_HEADERS, timeout=SEARCH_TIMEOUT,
-                             follow_redirects=True)
-        response.raise_for_status()
-        soup = BeautifulSoup(response.text, "html.parser")
-        results = []
-        for result in soup.select(".result")[:num]:
-            link = result.select_one("a.result__a")
-            if not link:
+    """HTML-поиск DuckDuckGo через httpx + BeautifulSoup4.
+
+    HTTP 202 = антибот-заглушка без результатов: ждём и повторяем,
+    а на последней попытке меняем способ запроса на POST.
+    """
+    import time as _time
+    url = "https://html.duckduckgo.com/html/"
+    params = {"q": query, "kl": "ru-ru"}
+    last_error = "httpx/ДДГ: пустая выдача"
+
+    for attempt in range(3):
+        try:
+            if attempt < 2:
+                response = httpx.get(url, params=params, headers=_HEADERS,
+                                     timeout=SEARCH_TIMEOUT, follow_redirects=True)
+            else:
+                response = httpx.post(url, data=params, headers=_HEADERS,
+                                      timeout=SEARCH_TIMEOUT, follow_redirects=True)
+
+            if response.status_code == 202:
+                last_error = "httpx/ДДГ: HTTP 202 (антибот)"
+                _time.sleep(1.5 * (attempt + 1))
                 continue
-            href = link.get("href", "")
-            title = link.get_text(" ", strip=True)
-            snippet_node = result.select_one(".result__snippet")
-            snippet = snippet_node.get_text(" ", strip=True) if snippet_node else ""
-            href = _unwrap_ddg_url(href)
-            if href and title:
-                results.append(_norm_result(title, href, snippet))
-        return results, None if results else "httpx/ДДГ: пустая выдача"
-    except httpx.HTTPError as exc:
-        return [], f"httpx/ДДГ: {exc.__class__.__name__}"
+
+            response.raise_for_status()
+            soup = BeautifulSoup(response.text, "html.parser")
+            results = []
+            for result in soup.select(".result")[:num]:
+                link = result.select_one("a.result__a")
+                if not link:
+                    continue
+                href = _unwrap_ddg_url(link.get("href", ""))
+                title = link.get_text(" ", strip=True)
+                snippet_node = result.select_one(".result__snippet")
+                snippet = snippet_node.get_text(" ", strip=True) if snippet_node else ""
+                if href and title:
+                    results.append(_norm_result(title, href, snippet))
+            if results:
+                return results, None
+            last_error = "httpx/ДДГ: пустая выдача"
+        except httpx.HTTPError as exc:
+            last_error = f"httpx/ДДГ: {exc.__class__.__name__}"
+            _time.sleep(1.0)
+
+    return [], last_error
 
 
 def _parse_ddg(html, num=8):
