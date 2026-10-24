@@ -71,7 +71,7 @@ MAX_STEPS = max(1, min(int(os.getenv("AGENT_MAX_STEPS", "20")), 60))
 CLEAN_ANSWER_SYSTEM = (
     "Ты — NovaMind. Ответь пользователю только готовым ответом по-русски: "
     "без рассуждений, без английских черновиков и без пояснений о том, как ты думаешь. "
-    "Если данных не хватает — скажи это одной короткой честной фразой.")
+    "Если ниже есть результаты поиска — опирайся на них и перечисли найденное (название, ссылка, суть). Только если данных нет совсем — скажи это одной короткой фразой.")
 #: Blocks that run code: they are never re-dispatched from a plain answer.
 EXECUTION_TAGS = {"bash", "python", "json"}
 #: Human names of media kinds for the answer text.
@@ -239,6 +239,9 @@ class AgentEngine:
         if not self.answer.strip() and self.state.status == "ok":
             # Модель ушла в рассуждения: просим чистый ответ и спасаем цитату.
             self.answer = self._recover_answer()
+        if not self.answer.strip() and getattr(self, "_found", None):
+            # поиск есть, ответа нет: отдаём найденное как есть
+            self.answer = self._local_digest()
         if not self.answer.strip():
             self.state.status = "error"
             self.state.error = self.state.error or "Агент не вернул ответ"
@@ -426,8 +429,14 @@ class AgentEngine:
             return
         if ctx.force_search:
             self._search_observation = self._run_forced_search()
-        agent = (self.router.by_role(ctx.force_role) if ctx.force_role else None) \
-            or self.router.select_agent(ctx.goal)
+        agent = (self.router.by_role(ctx.force_role) if ctx.force_role else None)
+        if (agent is None and getattr(self, "_search_observation", "")
+                and not _needs_tools(ctx.goal)):
+            agent = (self.router.by_role("talk") or self.router.by_type("casual_agent")
+                     or (self.router.agents[0] if self.router.agents else None))
+            self.router.last_reason = "поиск → ответ по источникам"
+        if agent is None:
+            agent = self.router.select_agent(ctx.goal)
         if agent is None:
             raise AgenticSeekError("No agent available",
                                    "Нет доступного исполнителя для запроса.")
@@ -441,7 +450,15 @@ class AgentEngine:
         watcher = self._start_stop_watcher(agent)
         try:
             prompt = self._goal_with_context()
-            answer, _summary = agent.process(prompt, None)
+            direct = ""
+            if getattr(self, "_search_observation", "") and not _needs_tools(ctx.goal):
+                direct = self._answer_from_observation(agent)
+                if not direct or _no_data(direct) or _is_tool_only(direct):
+                    direct = self._local_digest()
+            if direct:
+                answer, _summary = direct, ""
+            else:
+                answer, _summary = agent.process(prompt, None)
             if not agent.tools and self._has_foreign_block(answer):
                 # Маршрутизатор ошибся: модель хочет действие, а исполнитель без
                 # инструментов. Передаём задачу тому, кто умеет, вместо того чтобы
@@ -535,6 +552,7 @@ class AgentEngine:
                         "text": f"Поиск не удался: {type(error).__name__}"})
             return ""
         results = [item for item in (results or []) if isinstance(item, dict)]
+        self._found = results
         if not results:
             self._emit({"type": "step", "icon": "⚠️",
                         "text": f"Поиск «{goal}» ничего не дал"})
@@ -700,7 +718,9 @@ class AgentEngine:
                 "Ты NovaMind. Отвечай по-русски, чётко и по делу. Инструментов нет: "
                 "не пиши теги и блоки вызова. Используй только данные ниже, "
                 "ссылайся на номера [1], [2]. Даже если данных мало — перечисли всё найденное: названия, ссылки, суть из описаний. Не отвечай одной фразой «данных недостаточно».")},
-            {"role": "user", "content": f"{self.ctx.goal}\n\n{self._search_observation}"},
+            {"role": "user", "content": f"{self.ctx.goal}\n\n{self._search_observation}\n\n"
+                                        "Ответь списком из 3–5 пунктов: название, ссылка, "
+                                        "1 строка что делает (название, ссылка, 1 строка)."},
         ]
         try:
             text = str(agent.provider.respond(messages) or "")
@@ -708,6 +728,19 @@ class AgentEngine:
             return ""
         text = re.sub(r"<think>.*?</think>", "", text, flags=re.S).strip()
         return "" if _is_tool_only(text) else text
+
+    def _local_digest(self) -> str:
+        """Список найденного без участия модели (если модель сдалась)."""
+        items = getattr(self, "_found", None) or []
+        if not items:
+            return ""
+        lines = ["Вот что нашлось по твоему запросу:\n"]
+        for index, item in enumerate(items, 1):
+            title = str(item.get("title") or item.get("host") or item.get("url") or "").strip()
+            snippet = clip(str(item.get("snippet") or "").strip(), 300)
+            lines.append(f"{index}. **{title}**\n   {item.get('url', '')}\n   {snippet}".rstrip())
+        lines.append("\nМодель не собрала связный ответ, поэтому показываю найденное как есть.")
+        return "\n".join(lines)
 
     def _recover_answer(self) -> str:
         """Last attempt at a clean answer when the model only produced reasoning.
@@ -726,7 +759,9 @@ class AgentEngine:
                            if isinstance(item, dict) and item.get("content")][-4:]
                 text = self.provider.respond(
                     [{"role": "system", "content": CLEAN_ANSWER_SYSTEM}] + history
-                    + [{"role": "user", "content": self.ctx.goal}])
+                    + [{"role": "user", "content": self.ctx.goal
+                        + ("\n\n" + self._search_observation
+                           if self._search_observation else "")}])
                 answer = self._finalize(text)
             except AgentStopped:
                 raise
@@ -854,3 +889,17 @@ def _search_query(goal: str) -> str:
         return text
     low = text.lower()
     return f"site:github.com {q}" if ("github" in low or "гитхаб" in low) else q
+
+
+def _needs_tools(goal) -> bool:
+    """Нужны ли инструменты (файлы, запуск), а не просто ответ по поиску."""
+    return bool(_re.search(
+        r"(?i)\b(?:сохрани\w*|создай\w*|запусти\w*|установи\w*|скачай\w*|удали\w*|выполни\w*|"
+        r"напиши\s+(?:файл|скрипт|программу))\b|в\s+файл", str(goal or "")))
+
+
+def _no_data(text) -> bool:
+    """Короткая отписка вида «данных недостаточно»."""
+    t = str(text or "").strip()
+    return len(t) < 250 and bool(_re.search(
+        r"(?i)недостаточно|не\s+(?:удалось|могу|нашл)|нет\s+данных|insufficient|not enough", t))
