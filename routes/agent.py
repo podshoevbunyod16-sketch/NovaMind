@@ -934,6 +934,23 @@ def _local_model(messages):
 
 def _read_page(url, max_chars=6000):
     """Чтение страницы для веб-агента (тот же зачитыватель, что у поиска)."""
+    gh = re.match(r"https?://github\.com/([^/\s]+)/([^/\s?#]+)/?$", str(url or ""))
+    if gh:
+        try:
+            import httpx
+            owner, repo = gh.group(1), gh.group(2)
+            head = {"User-Agent": "NovaMind", "Accept": "application/vnd.github+json"}
+            meta = httpx.get(f"https://api.github.com/repos/{owner}/{repo}",
+                             headers=head, timeout=15).json()
+            readme = httpx.get(f"https://api.github.com/repos/{owner}/{repo}/readme",
+                               headers={**head, "Accept": "application/vnd.github.raw+json"},
+                               timeout=15, follow_redirects=True)
+            title = (f"GitHub {owner}/{repo} · звёзд: {meta.get('stargazers_count', '?')} · "
+                     f"язык: {meta.get('language') or '—'} · {meta.get('description') or ''}")
+            if readme.status_code == 200 and readme.text.strip():
+                return (title + "\n\n" + readme.text)[:max_chars], ""
+        except Exception:
+            pass
     from routes.search import fetch_page_text
     fetched = fetch_page_text(url, max_chars=max_chars)
     if isinstance(fetched, tuple):

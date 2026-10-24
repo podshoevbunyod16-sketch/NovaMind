@@ -528,7 +528,7 @@ class AgentEngine:
         if ctx.cancel is not None and ctx.cancel.is_set():
             return ""
         try:
-            results, _meta = ctx.search(goal, 3)
+            results, _meta = ctx.search(_search_query(goal), 5)
         except Exception as error:  # noqa: BLE001 — the answer must still happen
             log.warning("forced search failed: %s", type(error).__name__)
             self._emit({"type": "step", "icon": "⚠️",
@@ -699,7 +699,7 @@ class AgentEngine:
             {"role": "system", "content": (
                 "Ты NovaMind. Отвечай по-русски, чётко и по делу. Инструментов нет: "
                 "не пиши теги и блоки вызова. Используй только данные ниже, "
-                "ссылайся на номера [1], [2]. Если данных мало — так и скажи.")},
+                "ссылайся на номера [1], [2]. Даже если данных мало — перечисли всё найденное: названия, ссылки, суть из описаний. Не отвечай одной фразой «данных недостаточно».")},
             {"role": "user", "content": f"{self.ctx.goal}\n\n{self._search_observation}"},
         ]
         try:
@@ -840,3 +840,17 @@ _TOOL_ONLY = _re.compile(
 def _is_tool_only(text) -> bool:
     t = str(text or "").strip()
     return not t or bool(_TOOL_ONLY.match(t))
+
+
+
+def _search_query(goal: str) -> str:
+    """Фраза-команда -> поисковый запрос (+ site:github.com для GitHub)."""
+    text = str(goal or "")
+    q = _re.sub(r"(?i)metatr[ea]+d[ea]r\s*5?", "MetaTrader 5", text)
+    q = _re.sub(r"(?i)\bбот\w*", "bot", q)
+    q = _re.sub(r"(?i)\b(?:использовать|используй|mcp|github|гитхаб|найти|найди|найдите|несколько|пожалуйста|мне|и|для)\b", " ", q)
+    q = _re.sub(r"\s+", " ", q).strip(" .,:;!?")
+    if not q:
+        return text
+    low = text.lower()
+    return f"site:github.com {q}" if ("github" in low or "гитхаб" in low) else q
