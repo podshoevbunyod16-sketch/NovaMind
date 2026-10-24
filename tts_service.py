@@ -3,7 +3,7 @@
 Зачем отдельный модуль
 ----------------------
 В NovaMind уже есть генерация аудио: ``media_generation`` умеет четыре TTS-бэкенда
-(Google AI Studio, Groq PlayAI, Pollinations, свой ``AUDIO_TTS_URL``), а
+(Google AI Studio, Groq Orpheus, Pollinations, свой ``AUDIO_TTS_URL``), а
 ``media_agent`` выбирает модель. Чату нужен другой сценарий: озвучить **готовый
 текст ответа**, разбить длинный ответ на части, показать подготовку и дать
 пользователю остановиться. Поэтому здесь только логика озвучки, а сами запросы
@@ -18,8 +18,11 @@
   включает их чтение).
 * :func:`split_text` — режет текст по границам предложений, не разрывая слов,
   с ограничением на размер части и число частей.
-* :func:`voice_catalog` / :func:`status` — реальный список провайдеров, моделей
-  и голосов с честным признаком «доступен / нужен ключ / почему недоступен».
+* :func:`model_catalog` / :func:`voice_catalog` / :func:`status` — реальный
+  список провайдеров, моделей и голосов с честным признаком «доступен / нужен
+  ключ / почему недоступен». Модели Pollinations берутся из живого каталога
+  провайдера, поэтому интерфейс показывает только существующие модели, а у
+  каждой модели известен её endpoint и лимит символов на запрос.
 * :func:`synthesize` — генератор: отдаёт по одной части, поддерживает отмену
   между частями, повторяет временно неудачный запрос один раз.
 * :class:`_Job` — реестр запусков, чтобы ``POST /api/tts/cancel`` мог
@@ -82,8 +85,10 @@ GOOGLE_VOICES = (
     ("Zephyr", "Zephyr · светлый женский", (VOICE_RU, VOICE_EN)),
 )
 
-#: Голоса Groq PlayAI. Официальный playai-tts синтезирует английскую речь,
-#: поэтому в списке честно указано, что русский текст он не озвучит.
+#: Голоса Groq Orpheus. playai-tts отключён Groq 31.12.2025, вместо него две
+#: модели Orpheus: английская (autumn/diana/hannah/austin/daniel/troy) и
+#: саудовская арабская (fahad/sultan/lulwa/noura). Русский текст обе читают
+#: с акцентом — об этом честно сказано в подписи голоса.
 GROQ_VOICES = (
     ("autumn", "Autumn · женский (en)", (VOICE_EN,)),
     ("diana", "Diana · женский (en)", (VOICE_EN,)),
@@ -91,16 +96,21 @@ GROQ_VOICES = (
     ("austin", "Austin · мужской (en)", (VOICE_EN,)),
     ("daniel", "Daniel · мужской (en)", (VOICE_EN,)),
     ("troy", "Troy · мужской (en)", (VOICE_EN,)),
+    ("fahad", "Fahad · мужской (ar)", ("ar",)),
+    ("sultan", "Sultan · мужской (ar)", ("ar",)),
+    ("lulwa", "Lulwa · женский (ar)", ("ar",)),
+    ("noura", "Noura · женский (ar)", ("ar",)),
 )
 
-#: Голоса Pollinations (OpenAI-совместимые названия; язык — по тексту).
-POLLINATIONS_VOICES = (
-    ("nova", "nova · женский", (VOICE_RU, VOICE_EN)),
-    ("alloy", "alloy · нейтральный", (VOICE_RU, VOICE_EN)),
-    ("echo", "echo · мужской", (VOICE_RU, VOICE_EN)),
-    ("fable", "fable · рассказчик", (VOICE_RU, VOICE_EN)),
-    ("onyx", "onyx · глубокий мужской", (VOICE_RU, VOICE_EN)),
-    ("shimmer", "shimmer · мягкий женский", (VOICE_RU, VOICE_EN)),
+GROQ_VOICES_BY_MODEL = {
+    "canopylabs/orpheus-v1-english": GROQ_VOICES[:6],
+    "canopylabs/orpheus-arabic-saudi": GROQ_VOICES[6:],
+}
+
+#: Голоса Pollinations/OpenAI-совместимых endpoint'ов (язык — по тексту).
+POLLINATIONS_VOICES = tuple(
+    (voice, f"{voice} · голос OpenAI", (VOICE_RU, VOICE_EN))
+    for voice in mg.POLLINATIONS_AUDIO_VOICES
 )
 
 #: Свой endpoint (AUDIO_TTS_URL) обычно OpenAI-совместим.
@@ -108,7 +118,7 @@ CUSTOM_VOICES = POLLINATIONS_VOICES
 
 PROVIDER_LABELS = {
     "google_ai_studio": "Google AI Studio (Gemini TTS)",
-    "groq": "Groq (PlayAI TTS)",
+    "groq": "Groq (Orpheus TTS)",
     "pollinations": "Pollinations Audio",
     "custom": "Свой TTS-endpoint (AUDIO_TTS_URL)",
 }
@@ -123,15 +133,97 @@ _VOICES_BY_BACKEND = {
 _PROVIDER_REASON = {
     "google_ai_studio": "Нужен GEMINI_API_KEY (бесплатный тариф с лимитами).",
     "groq": "Нужен GROQ_API_KEY (бесплатный тариф с лимитами, карта не нужна).",
-    "pollinations": "Нужен POLLINATIONS_API_KEY — без него синтез речи не работает.",
+    "pollinations": "Нужен POLLINATIONS_API_KEY — без ключа /v1/audio/speech отвечает 401.",
     "custom": "Нужен AUDIO_TTS_URL в .env (OpenAI-совместимый /audio/speech).",
 }
 
+#: Куда идти пользователю, если провайдер ответил отказом по доступу.
+_PROVIDER_ACTION = {
+    "groq": ("Принять условия Orpheus в консоли Groq",
+             mg.groq_terms_url("canopylabs/orpheus-v1-english")),
+    "pollinations": ("Получить бесплатный ключ Pollinations", mg.POLLINATIONS_KEYS_URL),
+    "google_ai_studio": ("Получить ключ Google AI Studio",
+                         "https://aistudio.google.com/app/apikey"),
+    "custom": ("Настроить AUDIO_TTS_URL", ""),
+}
 
-def _audio_models() -> list[dict]:
+
+def provider_action(provider: str) -> dict:
+    """Кнопка-действие для провайдера: подпись и ссылка (если есть)."""
+    label, url = _PROVIDER_ACTION.get(provider, ("", ""))
+    return {"label": label, "url": url}
+
+
+_ISO_LANG = re.compile(r"^([a-z]{2})[-_][A-Z]{2}[-_]")
+
+
+def _guess_languages(voice: str) -> list[str]:
+    """Язык голоса по его id (``ru-RU-Masha`` → ``ru``), иначе «любой»."""
+    match = _ISO_LANG.match(str(voice or ""))
+    return [match.group(1)] if match else []
+
+
+def _registry_audio_models() -> list[dict]:
     """TTS-модели из общего реестра медиа (без сетевых запросов)."""
     return [dict(item) for item in mg.MEDIA_MODEL_REGISTRY
             if item.get("media_type") == "audio" and item.get("backend") in _VOICES_BY_BACKEND]
+
+
+def _normalize_pollinations_entries(entries: list[dict]) -> list[dict]:
+    """Элементы живого каталога → записи моделей в формате реестра медиа."""
+    models = []
+    for entry in entries:
+        voices = [str(voice) for voice in (entry.get("voices") or []) if voice]
+        models.append({
+            "id": entry["id"],
+            "name": entry.get("name") or entry["id"],
+            "provider": "pollinations",
+            "media_type": "audio",
+            "backend": "pollinations_audio",
+            "pricing_status": mg.PRICING_PAID if entry.get("paid_only") else mg.PRICING_FREE,
+            "description": entry.get("description") or "",
+            "options": {
+                "voice": (voices or list(mg.POLLINATIONS_AUDIO_VOICES))[0],
+                "voices": voices or list(mg.POLLINATIONS_AUDIO_VOICES),
+                "endpoint": entry.get("endpoint") or "speech",
+                "aliases": entry.get("aliases") or [],
+                "paid_only": bool(entry.get("paid_only")),
+                "health": entry.get("health") or "",
+            },
+            "in_provider_catalog": True,
+            "live": True,
+        })
+    return models
+
+
+def _pollinations_models(refresh: bool = False, allow_fetch: bool = False) -> list[dict]:
+    """Живой каталог TTS-моделей Pollinations в формате реестра.
+
+    Каталог у провайдера меняется (модели, голоса, алиасы), поэтому список
+    моделей в настройках берётся оттуда, а не из захардкоженного перечня.
+    ``allow_fetch=False`` — только уже загруженный снимок, без сети: страница
+    настроек не должна ждать провайдера.
+    """
+    try:
+        entries = mg.pollinations_tts_catalog(force=refresh, allow_fetch=allow_fetch)
+    except TypeError:            # старая сигнатура каталога
+        entries = mg.pollinations_tts_catalog(force=refresh)
+    except Exception as exc:  # noqa: BLE001 — каталог не должен ломать настройки
+        log.warning("Pollinations TTS catalog unavailable: %s", exc)
+        entries = []
+    return _normalize_pollinations_entries(entries)
+
+
+def _live_pollinations_model(model_id: str) -> Optional[dict]:
+    """Одна модель Pollinations из живого каталога (если её нет в реестре)."""
+    try:
+        entry = mg.pollinations_tts_model(model_id)
+    except Exception:  # noqa: BLE001 — сеть не должна ломать выбор модели
+        return None
+    if not entry:
+        return None
+    models = _normalize_pollinations_entries([entry])
+    return models[0] if models else None
 
 
 def _custom_model() -> Optional[dict]:
@@ -148,8 +240,17 @@ def _custom_model() -> Optional[dict]:
     }
 
 
-def _all_models() -> list[dict]:
-    models = _audio_models()
+def _all_models(refresh: bool = False, allow_fetch: bool = False) -> list[dict]:
+    """Все TTS-модели: живой каталог Pollinations + реестр медиа + свой endpoint.
+
+    Живые записи имеют приоритет, статический реестр остаётся страховкой, если
+    каталог провайдера недоступен.
+    """
+    live = _pollinations_models(refresh=refresh, allow_fetch=allow_fetch)
+    live_ids = {model["id"] for model in live}
+    models = [model for model in _registry_audio_models()
+              if model.get("provider") != "pollinations" or model["id"] not in live_ids]
+    models.extend(live)
     custom = _custom_model()
     if custom:
         models.insert(0, custom)
@@ -181,47 +282,124 @@ def _ready_model(model: dict) -> dict:
 
 
 def voices_for(model: dict) -> list[dict]:
-    """Голоса конкретной TTS-модели в форме, удобной интерфейсу."""
+    """Голоса конкретной TTS-модели в форме, удобной интерфейсу.
+
+    Источник истины — сама модель: у живой модели каталога Pollinations голоса
+    приходят от провайдера (``ru-RU-Masha``, ``af_nova`` и т. п.), у Groq —
+    свой список для каждой модели Orpheus.
+    """
+    options = model.get("options") or {}
     backend = model.get("backend") or ""
-    default = (model.get("options") or {}).get("voice") or ""
+    default = options.get("voice") or ""
+    known = {voice[0]: voice for voice in _VOICES_BY_BACKEND.get(backend, ())}
+    if backend == "groq_tts" and model.get("id") in GROQ_VOICES_BY_MODEL:
+        known = {voice[0]: voice for voice in GROQ_VOICES_BY_MODEL[model["id"]]}
+    explicit = [str(voice) for voice in (options.get("voices") or []) if voice]
     items = []
-    for voice_id, label, languages in _VOICES_BY_BACKEND.get(backend, ()):
-        items.append({"id": voice_id, "label": label, "languages": list(languages),
-                      "default": voice_id == default})
+    if explicit:
+        for voice_id in explicit:
+            _, label, languages = known.get(
+                voice_id, (voice_id, voice_id, _guess_languages(voice_id)))
+            items.append({"id": voice_id, "label": label, "languages": list(languages),
+                          "default": voice_id == default})
+    else:
+        for voice_id, label, languages in known.values():
+            items.append({"id": voice_id, "label": label, "languages": list(languages),
+                          "default": voice_id == default})
     return items
 
 
-def voice_catalog(provider: str = "") -> list[dict]:
-    """Все голоса (или только выбранного провайдера) с признаком доступности."""
-    catalog = []
+def voice_catalog(provider: str = "", model_id: str = "") -> list[dict]:
+    """Голоса провайдера (или одной модели) с признаком доступности.
+
+    Голоса разных моделей одного провайдера дублируются (у Gemini это одни и
+    те же 8 голосов в двух моделях) — отдаём каждый один раз со списком моделей.
+    """
+    catalog: dict[tuple[str, str], dict] = {}
     for model in _all_models():
         item_provider = model.get("provider") or ""
         if provider and item_provider != provider:
             continue
+        if model_id and model.get("id") != model_id:
+            continue
         available = _provider_available(item_provider)
         for voice in voices_for(model):
-            catalog.append({**voice, "provider": item_provider,
+            key = (item_provider, voice["id"])
+            if key in catalog:
+                catalog[key]["models"].append(model.get("id"))
+                continue
+            catalog[key] = {**voice,
+                            "provider": item_provider,
                             "provider_name": PROVIDER_LABELS.get(item_provider, item_provider),
-                            "model": model.get("id"), "available": available})
-    return catalog
+                            "model": model.get("id"),
+                            "models": [model.get("id")],
+                            "available": available}
+    return list(catalog.values())
 
 
-def provider_choices() -> list[dict]:
-    """Провайдеры TTS: подключён или нет и почему."""
+def model_catalog(provider: str = "", refresh: bool = False,
+                  allow_fetch: bool = True) -> list[dict]:
+    """Модели TTS (по провайдеру) для выбора в настройках озвучки.
+
+    В отличие от :func:`provider_choices` здесь есть всё, что нужно панели:
+    голоса модели, тариф, endpoint и лимит символов на запрос.
+    """
+    configured = settings()
+    selected_model = str(configured.get("model") or "")
+    selected_provider = str(configured.get("provider") or "")
+    items = []
+    for model in _all_models(refresh=refresh, allow_fetch=allow_fetch):
+        item_provider = model.get("provider") or ""
+        if provider and item_provider != provider:
+            continue
+        options = model.get("options") or {}
+        voices = voices_for(model)
+        paid = model.get("pricing_status") == mg.PRICING_PAID
+        items.append({
+            "id": model["id"],
+            "name": model.get("name") or model["id"],
+            "provider": item_provider,
+            "provider_name": PROVIDER_LABELS.get(item_provider, item_provider),
+            "description": model.get("description") or "",
+            "available": _provider_available(item_provider),
+            "pricing_status": model.get("pricing_status"),
+            "pricing_label": mg.PRICING_LABELS.get(model.get("pricing_status"),
+                                                   mg.PRICING_LABELS[mg.PRICING_UNKNOWN]),
+            "paid": paid,
+            "endpoint": options.get("endpoint") or "",
+            "voices": voices,
+            "voices_count": len(voices),
+            "max_input_chars": int(options.get("max_input_chars") or CHUNK_CHARS),
+            "health": options.get("health") or "",
+            "in_provider_catalog": model.get("in_provider_catalog"),
+            "selected": (model["id"] == selected_model
+                         and (not selected_provider or selected_provider == item_provider)),
+        })
+    items.sort(key=lambda item: (item["paid"], not item["available"], item["name"].lower()))
+    return items
+
+
+def provider_choices(refresh: bool = False, allow_fetch: bool = False) -> list[dict]:
+    """Провайдеры TTS: подключён или нет, почему и что сделать."""
     seen, items = set(), []
-    for model in _all_models():
+    models = _all_models(refresh=refresh, allow_fetch=allow_fetch)
+    for model in models:
         provider = model.get("provider") or ""
         if provider in seen:
             continue
         seen.add(provider)
         available = _provider_available(provider)
+        action = provider_action(provider)
         items.append({
             "id": provider,
             "name": PROVIDER_LABELS.get(provider, provider),
             "available": available,
             "reason": "" if available else _PROVIDER_REASON.get(provider, "Провайдер не настроен."),
-            "models": [{"id": m["id"], "name": m.get("name", m["id"])}
-                       for m in _all_models() if m.get("provider") == provider],
+            "action_label": action["label"],
+            "action_url": action["url"],
+            "models": [{"id": m["id"], "name": m.get("name", m["id"]),
+                        "paid": m.get("pricing_status") == mg.PRICING_PAID}
+                       for m in models if m.get("provider") == provider],
             "backend": model.get("backend"),
         })
     return items
@@ -237,14 +415,35 @@ def settings() -> dict:
 
 
 def save_settings(updates: Optional[dict] = None) -> dict:
-    """Сохраняет только известные поля; провайдер и голос проверяются."""
+    """Сохраняет только известные поля; провайдер, модель и голос проверяются."""
     import config
     payload = dict(updates or {})
     provider = str(payload.get("provider") or "").strip()
     if provider and provider not in {item["id"] for item in provider_choices()}:
         raise ValueError(f"Неизвестный TTS-провайдер: {provider}")
+    model_id = str(payload.get("model") or "").strip()
     voice = str(payload.get("voice") or "").strip()
-    if voice:
+    if model_id:
+        # Список моделей разрешаем обновить: пользователь мог выбрать модель,
+        # которая появилась в каталоге провайдера только что.
+        candidates = model_catalog(provider, allow_fetch=True)
+        found = next((item for item in candidates if item["id"] == model_id), None)
+        if found is None:
+            raise ValueError(
+                f"Модель «{model_id}» не найдена у провайдера "
+                f"{PROVIDER_LABELS.get(provider, provider) or '—'}: обновите список моделей.")
+        if found.get("paid") and not payload.get("confirm_paid"):
+            raise ValueError(
+                f"Модель «{model_id}» платная ({found.get('pricing_label')}): каждый запрос "
+                "озвучки расходует кредиты провайдера. Подтвердите выбор (confirm_paid=true) "
+                "или выберите бесплатную модель.")
+        if not provider:
+            provider = found.get("provider") or ""
+            payload["provider"] = provider
+        known_voices = {voice_item["id"] for voice_item in found.get("voices") or []}
+        if voice and known_voices and voice not in known_voices:
+            raise ValueError(f"Голос «{voice}» недоступен у модели «{model_id}».")
+    elif voice:
         known = {item["id"] for item in voice_catalog(provider)}
         if voice not in known:
             raise ValueError(f"Голос «{voice}» недоступен у выбранного провайдера")
@@ -258,21 +457,45 @@ def save_settings(updates: Optional[dict] = None) -> dict:
     return config.save_speech_settings(safe)
 
 
-def resolve_model(provider: str = "", model_id: str = "") -> tuple[Optional[dict], str]:
-    """Выбирает TTS-модель: явная настройка → первый доступный провайдер."""
-    models = _all_models()
-    if model_id:
-        for model in models:
-            if model.get("id") == model_id and (not provider or model.get("provider") == provider):
-                if not _provider_available(model.get("provider") or ""):
-                    return None, _PROVIDER_REASON.get(model.get("provider"), "Провайдер не настроен.")
-                return model, ""
-        return None, f"TTS-модель «{model_id}» не найдена."
+def _find_model(models: list[dict], model_id: str, provider: str = "") -> Optional[dict]:
+    """Ищет модель по id или алиасу провайдера."""
+    for model in models:
+        if model.get("id") != model_id:
+            continue
+        if provider and model.get("provider") != provider:
+            continue
+        return model
+    for model in models:
+        aliases = (model.get("options") or {}).get("aliases") or []
+        if model_id in aliases and (not provider or model.get("provider") == provider):
+            return model
+    return None
 
+
+def resolve_model(provider: str = "", model_id: str = "") -> tuple[Optional[dict], str]:
+    """Выбирает TTS-модель: явная настройка → выбранный провайдер → любой доступный."""
     configured = settings()
-    preferred = [provider or configured.get("provider") or "",
-                 configured.get("provider") or ""]
-    order = [item for item in preferred if item]
+    provider = (provider or configured.get("provider") or "").strip()
+    model_id = (model_id or configured.get("model") or "").strip()
+    models = _all_models()
+
+    if model_id:
+        model = _find_model(models, model_id, provider)
+        if model is None:
+            # Модель могла появиться в живом каталоге после старта процесса.
+            live = _live_pollinations_model(model_id)
+            if live and (not provider or live["provider"] == provider):
+                model = live
+        if model is None:
+            hint = f" у провайдера {PROVIDER_LABELS.get(provider, provider)}" if provider else ""
+            return None, (f"TTS-модель «{model_id}» не найдена{hint}. "
+                          "Обновите список моделей в настройках озвучки.")
+        if not _provider_available(model.get("provider") or ""):
+            reason = _PROVIDER_REASON.get(model.get("provider"), "Провайдер не настроен.")
+            return None, f"{PROVIDER_LABELS.get(model.get('provider'), '')}: {reason}"
+        return model, ""
+
+    order = [item for item in (provider, configured.get("provider") or "") if item]
     order += [item["id"] for item in provider_choices()]
     seen = set()
     for candidate in order:
@@ -290,14 +513,56 @@ def resolve_model(provider: str = "", model_id: str = "") -> tuple[Optional[dict
     return None, ("Озвучка не настроена. " + " ".join(reasons)) if reasons else "TTS-провайдер не найден."
 
 
-def status() -> dict:
-    """Полное состояние озвучки для интерфейса (без секретов)."""
+def explain_error(message: str, model: Optional[dict] = None) -> dict:
+    """Человеческое объяснение ошибки провайдера: что именно сделать.
+
+    Возвращает ``{"hint": str, "action_url": str}``. Дословный ответ провайдера
+    остаётся в тексте ошибки — интерфейс показывает и его, и подсказку.
+    """
+    text = str(message or "")
+    low = text.lower()
+    model = model or {}
+    provider = model.get("provider") or ""
+    hint, url = "", ""
+    if "model_terms_required" in low or "requires terms acceptance" in low:
+        hint = ("Модель Groq нужно один раз активировать: откройте ссылку, войдите в свою "
+                "организацию, нажмите «Accept terms» и повторите озвучку.")
+        url = mg.groq_terms_url(model.get("id") or "canopylabs/orpheus-v1-english")
+    elif "is a text model" in low or "text endpoint" in low:
+        hint = ("Эта модель синтезирует речь только через /v1/chat/completions. "
+                "Обновите список моделей озвучки — правильный endpoint подставится сам.")
+    elif provider and ("401" in low or "unauthorized" in low
+                       or "invalid api key" in low or "нужен pollinations_api_key" in low):
+        hint = ("Ключ провайдера не принят или отсутствует. "
+                f"{_PROVIDER_REASON.get(provider, '')}").strip()
+        url = provider_action(provider).get("url", "")
+    elif "429" in low or "rate limit" in low or "too many requests" in low:
+        hint = ("Провайдер ограничил частоту запросов. Groq на бесплатном тарифе даёт "
+                "10 запросов в минуту — подождите минуту и повторите.")
+    elif "deprecated" in low or "playai" in low or "not found" in low or "не найдена" in low:
+        hint = "Обновите список моделей и выберите модель, которая есть в каталоге провайдера."
+    return {"hint": hint, "action_url": url}
+
+
+def status(refresh: bool = False) -> dict:
+    """Полное состояние озвучки для интерфейса (без секретов).
+
+    ``refresh=True`` — перечитать каталоги провайдеров (кнопка «Проверить»).
+    """
     configured = settings()
     model, error = resolve_model(configured.get("provider") or "", configured.get("model") or "")
-    voices = voice_catalog(configured.get("provider") or "")
+    provider = (model or {}).get("provider") or configured.get("provider") or ""
+    voices = voice_catalog(provider)
     default_voice = ""
     if model:
         default_voice = configured.get("voice") or (model.get("options") or {}).get("voice") or ""
+    explanation = explain_error(error, model) if error else {"hint": "", "action_url": ""}
+    catalog_error = ""
+    if provider == "pollinations":
+        try:
+            catalog_error = getattr(mg, "_POLL_TTS_CACHE", {}).get("error") or ""
+        except Exception:  # pragma: no cover — диагностика не обязательна
+            catalog_error = ""
     return {
         "available": model is not None,
         "mode": "ai" if model else "browser",
@@ -307,11 +572,15 @@ def status() -> dict:
         "model_name": (model or {}).get("name", ""),
         "voice": default_voice,
         "voices": voices,
-        "providers": provider_choices(),
+        "models": model_catalog(provider, refresh=refresh, allow_fetch=refresh),
+        "providers": provider_choices(refresh=refresh, allow_fetch=refresh),
         "settings": configured,
         "limits": {"max_chars": MAX_TEXT_CHARS, "chunk_chars": CHUNK_CHARS,
                    "max_chunks": MAX_CHUNKS, "timeout": REQUEST_TIMEOUT},
         "error": error,
+        "hint": explanation["hint"],
+        "action_url": explanation["action_url"],
+        "catalog_error": catalog_error,
         "fallback": "browser" if model is None else "",
     }
 
@@ -592,16 +861,30 @@ def synthesize(text: str, *, voice: str = "", provider: str = "", model_id: str 
 
     resolved, error = resolve_model(provider, model_id)
     if not resolved:
-        yield {"type": "error", "error": error, "mode": "browser"}
+        explanation = explain_error(error)
+        yield {"type": "error", "error": error, "mode": "browser",
+               "hint": explanation["hint"], "action_url": explanation["action_url"]}
         return
 
     resolved = _ready_model(resolved)
-    chunks = split_text(prepared, limit=CHUNK_CHARS)
+    options = resolved.get("options") or {}
+    # У провайдеров разные лимиты на один запрос: Orpheus принимает 200 символов,
+    # Gemini — до 900. Режем по лимиту модели, иначе провайдер отвечает 400.
+    limit = max(40, min(CHUNK_CHARS, int(options.get("max_input_chars") or CHUNK_CHARS)))
+    max_chunks = MAX_CHUNKS if limit >= 600 else min(40, MAX_CHUNKS * 3)
+    chunks = split_text(prepared, limit=limit, max_chunks=max_chunks)
     if not chunks:
         yield {"type": "error", "error": "Не удалось разбить текст для озвучки."}
         return
-    voice_id = voice or (settings().get("voice") or "") or (resolved.get("options") or {}).get("voice") or ""
+    voice_id = voice or (settings().get("voice") or "") or options.get("voice") or ""
+    voices = {item["id"] for item in voices_for(resolved)}
+    if voice_id and voices and voice_id not in voices:
+        # Голос мог остаться от другой модели — молча подставляем голос модели.
+        voice_id = options.get("voice") or next(iter(voices))
     detected = lang or detect_language(prepared)
+    # Пользователь выбрал модель сам в настройках — это и есть явное подтверждение
+    # тарифа (платную модель нельзя сохранить без confirm_paid).
+    confirm = {"paid": True, "trial": True, "unknown": True}
 
     job = _register_job(len(chunks))
     if cancel is not None and cancel.is_set():
@@ -630,7 +913,7 @@ def synthesize(text: str, *, voice: str = "", provider: str = "", model_id: str 
             attempts += 1
             result, error = mg.generate_media(
                 resolved, chunk, options={"voice": voice_id} if voice_id else {},
-                confirm={"unknown": resolved.get("provider") == "custom"},
+                confirm=confirm,
             )
             if result or not _is_transient(error):
                 break
@@ -643,9 +926,16 @@ def synthesize(text: str, *, voice: str = "", provider: str = "", model_id: str 
         if not result:
             if index == 0:
                 job.state = "error"
-                yield {"type": "error", "error": f"Озвучка не удалась: {error}"}
+                explanation = explain_error(error, resolved)
+                yield {"type": "error", "error": f"Озвучка не удалась: {error}",
+                       "hint": explanation["hint"],
+                       "action_url": explanation["action_url"],
+                       "provider": resolved.get("provider"),
+                       "model": resolved.get("id")}
                 return
-            yield {"type": "chunk_error", "index": index, "error": str(error)}
+            explanation = explain_error(error, resolved)
+            yield {"type": "chunk_error", "index": index, "error": str(error),
+                   "hint": explanation["hint"], "action_url": explanation["action_url"]}
             continue
         if not str(result.get("mime", "")).startswith("audio/"):
             # Провайдер вернул не аудио — не подсовываем это плееру.

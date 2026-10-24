@@ -652,7 +652,7 @@ for (const file of ['i18n', 'accordion', 'tts', 'mcp-settings', 'skills-settings
 // Счётчики обращений страницы настроек к мокам
 const settingsMock = {
   skillRequests: [], skillListCalls: 0, speechSettings: [], speechSampleRequests: [],
-  langRequests: [], mcpToolsCalls: 0, mcpTestCalls: 0,
+  langRequests: [], mcpToolsCalls: 0, mcpTestCalls: 0, ttsModelCalls: 0, speech: {},
 };
 
 const settingsErrors = [];
@@ -773,12 +773,35 @@ const settingsDom = new JSDOM(settingsPage,
             voices: [{ id: 'Puck', label: 'Puck', provider: 'google_ai_studio',
               languages: ['ru', 'en'], available: true }],
             providers: [{ id: 'google_ai_studio', name: 'Google AI Studio', available: true, reason: '' }],
-            settings: { auto_speak: false, provider: '', voice: 'Puck', lang: 'ru', read_code: false },
+            settings: { auto_speak: false, provider: '', voice: 'Puck', lang: 'ru',
+              read_code: false, ...settingsMock.speech },
             limits: { max_chars: 8000, chunks: 12 }, error: '',
           });
         }
+        if (path.startsWith('/api/tts/models')) {
+          settingsMock.ttsModelCalls += 1;
+          return json({ count: 2, catalog_error: '', models: [
+            { id: 'gemini-3.8-flash-tts', name: 'Gemini 3.8 Flash TTS',
+              provider: 'google_ai_studio', provider_name: 'Google AI Studio',
+              available: true, paid: false, endpoint: '', max_input_chars: 900,
+              description: 'Студийное качество речи', health: 'healthy',
+              voices: [{ id: 'Puck', label: 'Puck' }, { id: 'Kore', label: 'Kore' }],
+              voices_count: 2 },
+            { id: 'gemini-3.8-flash-lite-tts', name: 'Gemini 3.8 Flash-Lite TTS',
+              provider: 'google_ai_studio', provider_name: 'Google AI Studio',
+              available: true, paid: false, endpoint: '', max_input_chars: 900,
+              description: 'Быстрый TTS для длинных текстов', health: 'healthy',
+              voices: [{ id: 'Leda', label: 'Leda' }, { id: 'Zephyr', label: 'Zephyr' }],
+              voices_count: 2 },
+          ] });
+        }
         if (path.startsWith('/api/tts/settings')) {
-          if (options.body) settingsMock.speechSettings.push(JSON.parse(options.body));
+          if (options.body) {
+            const payload = JSON.parse(options.body);
+            settingsMock.speechSettings.push(payload);
+            // Как настоящий сервер: сохранённое видно в следующем /api/tts/status.
+            Object.assign(settingsMock.speech, payload);
+          }
           return json({ settings: { auto_speak: true, provider: '', voice: 'Puck', lang: 'ru', read_code: false,
             ...(settingsMock.speechSettings[settingsMock.speechSettings.length - 1] || {}) } });
         }
@@ -1024,6 +1047,32 @@ check('пример действительно отдан в плеер',
 sdoc.getElementById('stopSpeech').dispatchEvent(new settingsDom.window.MouseEvent('click', { bubbles: true }));
 check('кнопка «Остановить» сбрасывает озвучку',
   settingsDom.window.NovaSpeech._state().current === null);
+
+check('модели TTS приходят из каталога провайдера, а не из разметки',
+  settingsMock.ttsModelCalls > 0
+  && [...sdoc.querySelectorAll('#speechModel option')].some((o) => o.value === 'gemini-3.8-flash-tts')
+  && [...sdoc.querySelectorAll('#speechModel option')].some((o) => o.value === 'gemini-3.8-flash-lite-tts'),
+  [...sdoc.querySelectorAll('#speechModel option')].map((o) => o.value).join(', '));
+const modelSelect = sdoc.getElementById('speechModel');
+modelSelect.value = 'gemini-3.8-flash-lite-tts';
+modelSelect.dispatchEvent(new settingsDom.window.Event('change', { bubbles: true }));
+await settingsWait(80);
+check('выбор модели меняет список голосов',
+  [...sdoc.querySelectorAll('#speechVoice option')].some((o) => o.value === 'Leda')
+  && ![...sdoc.querySelectorAll('#speechVoice option')].some((o) => o.value === 'Puck'),
+  [...sdoc.querySelectorAll('#speechVoice option')].map((o) => o.value).join(', '));
+check('под выбранной моделью видно её описание и лимит',
+  sdoc.getElementById('speechModelInfo').textContent.includes('Flash-Lite')
+  && sdoc.getElementById('speechModelInfo').textContent.includes('900'));
+sdoc.getElementById('speechVoice').value = 'Leda';
+sdoc.getElementById('saveSpeech').dispatchEvent(new settingsDom.window.MouseEvent('click', { bubbles: true }));
+await settingsWait(120);
+const savedSpeech = settingsMock.speechSettings[settingsMock.speechSettings.length - 1] || {};
+check('модель и голос уходят на сервер вместе с провайдером',
+  savedSpeech.provider === 'google_ai_studio'
+  && savedSpeech.model === 'gemini-3.8-flash-lite-tts'
+  && savedSpeech.voice === 'Leda',
+  JSON.stringify(savedSpeech));
 
 // ── 8ж) Язык интерфейса ─────────────────────────────────────────────────
 console.log('\n8ж) Переключение языка');

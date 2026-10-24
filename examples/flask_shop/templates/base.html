@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Лавка{% endblock %}</title>
+  <style>
+    :root { color-scheme: light dark; }
+    * { box-sizing: border-box; }
+    body { margin: 0; font: 16px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+           background: #f6f7f9; color: #16181d; }
+    header { background: #16181d; color: #fff; padding: 12px 20px; display: flex;
+             gap: 16px; align-items: center; flex-wrap: wrap; }
+    header a { color: #fff; text-decoration: none; }
+    header .brand { font-weight: 700; }
+    header .spacer { flex: 1; }
+    .cart-link { background: #2f6f4f; padding: 6px 12px; border-radius: 999px; }
+    main { max-width: 960px; margin: 0 auto; padding: 20px; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+            gap: 16px; }
+    .card { background: #fff; border-radius: 12px; padding: 16px;
+            box-shadow: 0 1px 3px rgb(0 0 0 / 8%); display: flex; flex-direction: column;
+            gap: 8px; }
+    .card h3 { margin: 0; font-size: 17px; }
+    .price { font-weight: 700; }
+    .muted { color: #6b7280; font-size: 14px; }
+    .btn { display: inline-block; border: 0; border-radius: 8px; padding: 8px 14px;
+           background: #2f6f4f; color: #fff; cursor: pointer; text-decoration: none;
+           font: inherit; }
+    .btn.secondary { background: #e5e7eb; color: #16181d; }
+    .btn.danger { background: #b3261e; }
+    form.inline { display: inline; }
+    table { width: 100%; border-collapse: collapse; background: #fff; border-radius: 12px;
+            overflow: hidden; }
+    th, td { padding: 10px 12px; text-align: left; border-bottom: 1px solid #e5e7eb; }
+    .flash { padding: 10px 14px; border-radius: 10px; margin-bottom: 12px; }
+    .flash.ok { background: #e7f6ec; color: #14532d; }
+    .flash.error { background: #fdecea; color: #7f1d1d; }
+    .flash.warn { background: #fff7e6; color: #7c4a03; }
+    input, textarea, select { font: inherit; padding: 8px 10px; border: 1px solid #d1d5db;
+                              border-radius: 8px; width: 100%; }
+    label { display: block; margin: 10px 0 4px; font-weight: 600; font-size: 14px; }
+    .row { display: flex; gap: 10px; flex-wrap: wrap; }
+    .row > * { flex: 1; min-width: 160px; }
+    footer { text-align: center; color: #6b7280; padding: 30px 10px; font-size: 14px; }
+  </style>
+</head>
+<body>
+<header>
+  <a class="brand" href="{{ url_for('index') }}">☕ Лавка</a>
+  <a href="{{ url_for('index') }}">Каталог</a>
+  <span class="spacer"></span>
+  {% if session.get('is_admin') %}
+    <a href="{{ url_for('admin') }}">Админка</a>
+    <form class="inline" method="post" action="{{ url_for('admin_logout') }}">
+      <button class="btn secondary" type="submit">Выйти</button>
+    </form>
+  {% endif %}
+  <a class="cart-link" href="{{ url_for('cart_page') }}">Корзина · {{ cart_size }}</a>
+</header>
+<main>
+  {% with messages = get_flashed_messages(with_categories=true) %}
+    {% for category, message in messages %}
+      <div class="flash {{ category }}">{{ message }}</div>
+    {% endfor %}
+  {% endwith %}
+  {% block content %}{% endblock %}
+</main>
+<footer>Демо-магазин NovaMind · данные в SQLite</footer>
+</body>
+</html>

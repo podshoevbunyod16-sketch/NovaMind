@@ -927,6 +927,7 @@ function createAssistantTurn(options = {}) {
       });
 
       const settle = (approve, text) => {
+        if (box._timer) { clearInterval(box._timer); box._timer = null; }
         if (box.classList.contains('is-approved') || box.classList.contains('is-denied')) return;
         box.querySelectorAll('[data-confirm]').forEach((button) => { button.disabled = true; });
         box.classList.add(approve ? 'is-approved' : 'is-denied');
@@ -952,13 +953,36 @@ function createAssistantTurn(options = {}) {
       box.querySelector('[data-confirm="always"]').addEventListener('click', () => decide(true, true));
       box.querySelector('[data-confirm="no"]').addEventListener('click', () => decide(false));
       box._settle = settle;
+      // Обратный отсчёт: сервер ждёт ограниченное время и потом молча откажет.
+      const limit = Number(request.timeout) || 0;
+      if (limit > 0) {
+        let left = Math.round(limit);
+        const tick = () => {
+          if (box.classList.contains('is-approved') || box.classList.contains('is-denied')) {
+            if (box._timer) { clearInterval(box._timer); box._timer = null; }
+            return;
+          }
+          note.textContent = `⏳ решите в течение ${left} c`;
+          if (left <= 0) {
+            settle(false, '⏱ время вышло — действие не выполнено');
+            return;
+          }
+          left -= 1;
+        };
+        tick();
+        box._timer = setInterval(tick, 1000);
+      }
       scrollToBottom();
       return box;
     },
 
     /** Ответ на подтверждение уже обработан сервером (пришёл confirm_result). */
     confirmResult(event) {
-      const box = bubble.querySelector(`.agent-confirm[data-id="${event.id}"]`);
+      // Карточка живёт в панели «Шаги ИИ» внутри сообщения, но если ход уже
+      // перерисован — ищем по документу, иначе карточка навсегда остаётся
+      // «ждёт разрешения», хотя сервер уже ответил.
+      const box = bubble && bubble.querySelector(`.agent-confirm[data-id="${event.id}"]`)
+        || document.querySelector(`.agent-confirm[data-id="${event.id}"]`);
       if (!box) return;
       if (box._settle) {
         box.classList.toggle('is-always', Boolean(event.approved && event.always));

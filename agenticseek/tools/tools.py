@@ -50,6 +50,10 @@ class Tools:
         self.logger = Logger("tools.log")
         self.work_dir = get_work_dir()
         self.executable_blocks_found = False
+        #: Путь, в который движок только что записал этот блок (``python:app.py``).
+        #: Инструмент решает сам, что с этим делать: исполнитель кода не
+        #: запускает записанный файл, а сообщает, как проверить его отдельно.
+        self.saved_path = ""
 
     def get_work_dir(self) -> str:
         return self.work_dir
@@ -71,12 +75,13 @@ class Tools:
         return str(output or "")
 
     # ── block parsing ─────────────────────────────────────────────────────
-    def load_exec_block(self, llm_text: str):
-        """Extract this tool's blocks from a model answer.
+    def load_blocks(self, llm_text: str) -> list[tuple[str, "str | None"]]:
+        """Все блоки инструмента в порядке ответа: ``[(payload, путь|None), …]``.
 
-        Returns:
-            (list[str], str | None): payloads and the save path, or (None, None)
-            when the answer contains no block with this tag.
+        У каждого блока свой путь: раньше на весь ответ возвращался один
+        ``save_path``, поэтому несколько блоков ```python:app.py```,
+        ```python:templates/base.html``` записывались в последний файл — модель
+        «создавала проект», а на диске оставался один файл.
         """
         if self.tag == "undefined":
             raise RuntimeError("Tool tag is not defined")
@@ -84,10 +89,9 @@ class Tools:
         start_tag = f"```{self.tag}"
         end_tag = "```"
         if start_tag not in llm_text:
-            return None, None
+            return []
 
-        blocks: list[str] = []
-        save_path = None
+        found: list[tuple[str, "str | None"]] = []
         index = 0
         while True:
             start = llm_text.find(start_tag, index)
@@ -112,13 +116,33 @@ class Tools:
                 # Upstream also accepts "hello.py:print(...)" style first lines.
                 candidate = header.split(":", 1)[1].strip()
                 content = body if separator else ""
-            if candidate and _SAVE_PATH.match(candidate):
-                save_path = candidate
+            save_path = candidate if candidate and _SAVE_PATH.match(candidate) else None
             if content.strip():
-                blocks.append(content)
+                found.append((content, save_path))
             index = end + len(end_tag)
-        self.executable_blocks_found = bool(blocks)
-        return (blocks or None), save_path
+        self.executable_blocks_found = bool(found)
+        return found
+
+    def load_exec_block(self, llm_text: str):
+        """Extract this tool's blocks from a model answer (старый API).
+
+        Returns:
+            (list[str], str | None): payloads and the last save path, or
+            (None, None) when the answer contains no block with this tag.
+            Новый код использует :meth:`load_blocks`: у каждого блока свой путь.
+        """
+        if self.tag == "undefined":
+            raise RuntimeError("Tool tag is not defined")
+        llm_text = str(llm_text or "")
+        start_tag = f"```{self.tag}"
+        end_tag = "```"
+        if start_tag not in llm_text:
+            return None, None
+
+        found = self.load_blocks(llm_text)
+        if not found:
+            return None, None
+        return [payload for payload, _ in found], found[-1][1]
 
     # ── workspace writing ─────────────────────────────────────────────────
     def save_block(self, payload: str, save_path: str) -> str:

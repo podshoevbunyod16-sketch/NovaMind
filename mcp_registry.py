@@ -216,13 +216,13 @@ def connected_tools() -> list[dict[str, Any]]:
                 result.append({
                     "server_id": server_id,
                     "server_name": item.get("name", server_id),
-                    "name": tool["name"],
+                    "name": str(tool.get("name") or ""),
                     "description": tool.get("description", ""),
                     "inputSchema": tool.get("inputSchema") or {"type": "object"},
                 })
         except Exception as exc:
             item["last_error"] = f"{exc.__class__.__name__}: {exc}"
-    return result
+    return [entry for entry in result if entry["name"]]
 
 
 def call_tool(server_id: str, tool_name: str, arguments: dict[str, Any] | None = None) -> dict[str, Any]:

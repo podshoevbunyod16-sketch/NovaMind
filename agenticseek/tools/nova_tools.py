@@ -67,8 +67,12 @@ class McpBridgeTool(BridgeTool):
     """mcp_call: модель видит список инструментов; не-админ только читает."""
 
     def __init__(self, ctx, state=None, emit=None):
-        tools = getattr(ctx, "mcp_tools", None) or []
-        listing = "; ".join(f"{t['server_id']}:{t['name']}" for t in tools[:40])
+        tools = [t for t in (getattr(ctx, "mcp_tools", None) or []) if isinstance(t, dict)]
+        # Одна запись без имени не должна валить весь ход агента: раньше это
+        # было KeyError: 'name' и пользователь видел «Внутренняя ошибка агента».
+        listing = "; ".join(
+            f"{t.get('server_id') or t.get('server') or '?'}:"
+            f"{t.get('name') or t.get('tool') or '?'}" for t in tools[:40])
         super().__init__(
             "mcp_call",
             'Вызвать инструмент MCP-сервера: {"server_id":"…","tool":"…","arguments":{}}. '

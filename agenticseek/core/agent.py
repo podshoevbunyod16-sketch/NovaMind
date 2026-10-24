@@ -42,6 +42,7 @@ import time
 from agenticseek import policy
 from agenticseek.core.errors import AgenticSeekError, AgentStopped, StepLimitReached
 from agenticseek.core.logger import Logger
+from agenticseek.core.markup import normalize_answer, sanitize_answer
 from agenticseek.core.memory import Memory
 from agenticseek.core.utility import pretty_print
 from agenticseek.core.workspace import get_work_dir, resolve_workspace_path
@@ -314,6 +315,10 @@ class Agent:
 
         self.take_step()
         started = time.monotonic()
+        # Инструмент должен знать, что блок уже записан в файл: блок
+        # ```python:app.py``` — это запись файла, а не запуск (иначе Flask-сервер
+        # с app.run() занимал бы терминал до таймаута).
+        tool.saved_path = saved
         try:
             output = tool.execute(str(payload))
             ok = not tool.execution_failure_check(output)
@@ -366,8 +371,9 @@ class Agent:
         for tag, tool in list(self.tools.items()):
             if tag == "json":
                 continue
-            blocks, save_path = tool.load_exec_block(text)
-            for payload in blocks or []:
+            # У каждого блока свой путь: несколько ```python:path``` в одном
+            # ответе раньше писались в один и тот же последний файл.
+            for payload, save_path in tool.load_blocks(text):
                 self.check_limits()
                 executed += 1
                 ok, feedback = self.run_tool(tag, payload, save_path)
@@ -407,6 +413,10 @@ class Agent:
             self.check_limits()
             answer = self.llm_request() if pending is None else pending
             pending = None
+            # Модель может ответить тегами <bash>…</bash> вместо блока ```bash:
+            # приводим к протоколу, иначе команда не выполнится, а теги попадут
+            # в ответ пользователю.
+            answer = normalize_answer(answer)
             self.memory.push("assistant", answer)
             self.last_answer = answer
             feedback, executed = self.execute_blocks(answer)
@@ -486,8 +496,21 @@ def strip_unknown_blocks(text: str, allowed: set[str] | None = None) -> str:
 
 
 def _describe(tag: str, payload: str, saved: str) -> str:
-    """Short human description of a block for the ``tool`` event."""
-    first = next((line.strip() for line in str(payload or "").splitlines() if line.strip()), "")
+    """Short human description of a block for the ``tool`` event.
+
+    Для bash — первая настоящая команда: строки-комментарии не выполняются,
+    и показывать их как «выполнено» нельзя.
+    """
+    first = ""
+    if tag == "bash":
+        from agenticseek.tools import shell_text
+        if not shell_text.has_commands(str(payload or "")):
+            # Блок из одних комментариев: показывать комментарий как команду —
+            # ровно то, что сбивало с толку в журнале с телефона.
+            return "блок без команд (только комментарии)" + (f" · {saved}" if saved else "")
+        first = shell_text.first_command(str(payload or ""))
+    if not first:
+        first = next((line.strip() for line in str(payload or "").splitlines() if line.strip()), "")
     if saved:
         return f"{saved} · {first[:120]}" if first else saved
     return first[:160] or tag

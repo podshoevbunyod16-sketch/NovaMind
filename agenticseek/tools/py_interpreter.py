@@ -44,6 +44,21 @@ class PythonTool(Tools):
         code = str(payload or "")
         if not code.strip():
             return "[failure] Пустой блок python."
+        saved = str(getattr(self, "saved_path", "") or "")
+        if saved:
+            # Блок вида ```python:app.py``` — это создание файла. Выполнять его
+            # здесь нельзя: Flask-приложение с app.run() займёт терминал до
+            # таймаута, а скрипт-генератор отработает дважды. Запись и запуск
+            # разделены — проверка отдельной командой.
+            note = ""
+            if "app.run(" in code or "app.run (" in code:
+                note = ("\nЭто веб-приложение: сервер в песочнице не запускай — он "
+                        "занимает терминал. Проверяй через test client, например "
+                        "`python3 -c \"from app import app; c=app.test_client(); "
+                        "print(c.get('/').status_code)\"`.")
+            return (f"[success] Код записан в {saved} и не выполнялся.\n"
+                    f"Проверь его отдельной командой в блоке bash: "
+                    f"`python3 -m py_compile {saved}` или `python3 {saved}`.{note}")
         if _INTERACTIVE.search(code):
             return ("[failure] Код ждёт ввода с клавиатуры (input/curses/stdin) — "
                     "он зависнет. Перепиши так, чтобы все значения были в переменных.")
@@ -70,7 +85,15 @@ class PythonTool(Tools):
         if result.get("cancelled"):
             return "[failure] Выполнение отменено пользователем."
         text = (result.get("stdout") or "") + (result.get("stderr") or "")
-        text = text.strip() or "(нет вывода)"
+        text = text.strip()
         if result["code"] != 0:
-            return f"[failure] Python завершился с кодом {result['code']}:\n{clip(text, 3000)}"
+            return (f"[failure] Python завершился с кодом {result['code']}:\n"
+                    f"{clip(text or '(нет вывода)', 3000)}")
+        if not text:
+            # Так выглядит блок из одних import/def: он «прошёл», но ничего не
+            # сделал. Модель должна понять, что файл так не создаётся.
+            return ("[success] Python выполнен, но ничего не вывел. Если цель — "
+                    "создать файл проекта, укажи путь сразу после тега: "
+                    "```python:app.py```. Блок ```python``` — это запуск, он не "
+                    "сохраняет код в проект.")
         return f"[success] Python выполнен:\n{clip(text, 3000)}"

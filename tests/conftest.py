@@ -8,6 +8,17 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
+import config  # noqa: E402 — после правки sys.path
+
+#: Заводские настройки озвучки: снимок до того, как тесты начали их менять.
+SPEECH_DEFAULTS = dict(config.speech_settings)
+
+
+def reset_speech_settings():
+    """Возвращает настройки озвучки к заводским (глобальный объект config)."""
+    config.speech_settings.clear()
+    config.speech_settings.update(SPEECH_DEFAULTS)
+
 KEY_VARS = (
     "GEMINI_API_KEY", "GOOGLE_AI_STUDIO_KEY", "OPENROUTER_API_KEY", "GROQ_API_KEY",
     "GROQ_API_KEY_1", "GROQ_API_KEY_2", "CEREBRAS_API_KEY", "OPENAI_API_KEY",
@@ -37,6 +48,9 @@ def isolated_env(tmp_path, monkeypatch):
     import config
     monkeypatch.setattr(config, "RUNTIME_SETTINGS_FILE", str(tmp_path / "runtime_settings.json"))
     config.save_selected_media_model({})
+    # Настройки озвучки живут в глобальном объекте config: без сброса один тест
+    # «выбирал» модель для следующего (и тот падал на чужом провайдере).
+    reset_speech_settings()
 
     import groq_rotation
     monkeypatch.setattr(groq_rotation, "GROQ_KEYS", [], raising=False)
@@ -54,7 +68,9 @@ def isolated_env(tmp_path, monkeypatch):
     security.tts_limiter.clear()
 
     config.save_selected_media_model({})
+    reset_speech_settings()
     mg.reset_catalog_cache()
+    mg.reset_tts_catalog_cache()
 
 
 @pytest.fixture

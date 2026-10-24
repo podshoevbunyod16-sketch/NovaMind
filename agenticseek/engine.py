@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import queue as queue_mod
 import threading
 import time
@@ -43,6 +44,7 @@ from typing import Callable, Optional
 import database
 from agenticseek import policy
 from agenticseek.core.agent import Agent, clip, dumps, strip_unknown_blocks
+from agenticseek.core.markup import sanitize_answer
 from agenticseek.core.browser import create_browser
 from agenticseek.core.browser_agent import BrowserAgent, NO_BROWSER_TEXT
 from agenticseek.core.casual_agent import CasualAgent
@@ -57,7 +59,7 @@ from agenticseek.offline import OfflineTurn
 from agenticseek.providers.nova_provider import NovaProvider
 from agenticseek.router import AgentRouter
 from agenticseek.state import RunState
-from agenticseek.tools import sandbox
+from agenticseek.tools import sandbox, shell_text
 from agenticseek.tools.bash_interpreter import BashTool
 from agenticseek.tools.file_finder import FileEditTool, FileFinderTool
 from agenticseek.tools.nova_tools import build_nova_tools
@@ -74,6 +76,12 @@ CLEAN_ANSWER_SYSTEM = (
     "Если данных не хватает — скажи это одной короткой честной фразой.")
 #: Blocks that run code: they are never re-dispatched from a plain answer.
 EXECUTION_TAGS = {"bash", "python", "json"}
+#: Tools that touch the machine. The web agent must not get them: its context is
+#: untrusted page text, and shell access there is one prompt injection away from
+#: running a stranger's command. Coding/file work goes to the agents built for it.
+EXECUTION_TOOL_TAGS = {"bash", "python", "file_finder", "file_edit"}
+#: ```tag\npayload``` blocks of an answer.
+_BLOCK = re.compile(r"```([a-zA-Z_][\w-]*)\n(.*?)```", re.S)
 #: Human names of media kinds for the answer text.
 KIND_RU = {"image": "изображение", "audio": "аудио", "video": "видео"}
 AGENT_TIMEOUT = max(10.0, float(os.getenv("AGENT_TIMEOUT", "180")))
@@ -344,6 +352,8 @@ class AgentEngine:
             if agent.role == "talk":
                 continue
             for tag, tool in shared.items():
+                if agent.role == "web" and tag in EXECUTION_TOOL_TAGS:
+                    continue
                 agent.tools.setdefault(tag, tool)
         planner.add_shared_tools({tag: tool for tag, tool in shared.items()})
 
@@ -378,13 +388,25 @@ class AgentEngine:
             record = policy.register_confirmation(tool, payload)
             self._emit({"type": "confirm", "id": record["id"], "tool": record["tool"],
                         "description": record["description"], "risk": record["risk"],
-                        "command": record["description"]})
+                        "command": record.get("command") or record["description"],
+                        # Карточка показывает обратный отсчёт: иначе непонятно, что
+                        # вопрос вообще закроется и через сколько.
+                        "timeout": policy.confirm_timeout()})
             self._emit({"type": "step", "icon": "🔐",
                         "text": f"Жду подтверждения: {record['description'][:160]}"})
             approved = policy.await_confirmation(record)
             self._emit({"type": "confirm_result", "id": record["id"], "approved": approved})
-            self._emit({"type": "step", "icon": "✅" if approved else "🚫",
-                        "text": "Разрешено" if approved else "Запрещено"})
+            if approved:
+                self._emit({"type": "step", "icon": "✅", "text": "Разрешено"})
+            else:
+                # Молчаливое «Запрещено» выглядело как поломка: пользователь не
+                # понимал, что карточку нужно нажать и что окно ожидания закрывается.
+                waited = policy.confirm_timeout()
+                self._emit({"type": "step", "icon": "🚫",
+                            "text": "Действие не выполнено: разрешение не получено"
+                                    + (f" (ждал {waited:.0f} c)" if waited >= 1 else "") + ". "
+                                    "Повторите запрос и нажмите «Разрешить» в карточке "
+                                    "«Нужно разрешение» — она в этом же сообщении."})
             return approved
 
         return confirm
@@ -442,17 +464,27 @@ class AgentEngine:
         try:
             prompt = self._goal_with_context()
             answer, _summary = agent.process(prompt, None)
-            if not agent.tools and self._has_foreign_block(answer):
-                # Маршрутизатор ошибся: модель хочет действие, а исполнитель без
-                # инструментов. Передаём задачу тому, кто умеет, вместо того чтобы
+            missing = self._missing_tools(agent, answer)
+            # В разговоре блок ```bash — пример, а не действие: такой ход не
+            # переводим программисту, иначе «как создать venv?» выполнит ответ.
+            movable = tuple(tag for tag in missing
+                            if getattr(agent, "role", "") != "talk"
+                            or tag not in EXECUTION_TAGS)
+            fallback = self._tool_agent(movable) if movable else None
+            if fallback is not None and fallback is not agent:
+                # Маршрутизатор ошибся: модель хочет действие, которого у
+                # исполнителя нет (веб-агент пытается выполнить bash). Передаём
+                # задачу тому, у кого инструмент есть, вместо того чтобы
                 # показывать пользователю невыполненный блок.
-                fallback = self._tool_agent()
-                if fallback is not None and fallback is not agent:
-                    self._emit({"type": "step", "icon": "🔁",
-                                "text": f"Передаю задачу исполнителю: {fallback.label}"})
-                    agent = fallback
-                    self.chosen = agent
-                    answer, _summary = agent.continue_with(answer, prompt)
+                self._emit({"type": "step", "icon": "🔁",
+                            "text": f"Передаю задачу исполнителю: {fallback.label}"})
+                agent = fallback
+                self.chosen = agent
+                answer, _summary = agent.continue_with(answer, prompt)
+            elif any(tag in EXECUTION_TAGS for tag in missing):
+                # Выполнить некому — честно говорим, что команда не запускалась.
+                self._emit({"type": "step", "icon": "ℹ️",
+                            "text": "Команды в ответе показаны как пример и не выполнялись"})
             cleaned = strip_unknown_blocks(answer, set(getattr(agent, "tools", None) or {}))
             if cleaned != str(answer or "").strip():
                 # Блок недоступного инструмента — не выполнение: убираем его из
@@ -596,27 +628,41 @@ class AgentEngine:
         self._emit({"type": "step", "icon": "ℹ️",
                     "text": "Офлайн-режим: подключите ключ провайдера для полного агента"})
 
-    def _tool_agent(self):
-        """First agent of this run that actually has tools."""
+    def _tool_agent(self, required=()):
+        """First agent of this run that can run every tool in ``required``."""
+        required = tuple(required or ())
         for role in ("code", "files", "web"):
             agent = self.router.by_role(role)
-            if agent is not None and getattr(agent, "tools", None):
+            tools = getattr(agent, "tools", None) or {}
+            if agent is not None and tools and all(tag in tools for tag in required):
                 return agent
         return None
 
-    def _has_foreign_block(self, text: str) -> bool:
-        """Does the text call a tool that only another agent can run?
+    def _missing_tools(self, agent, text: str) -> tuple[str, ...]:
+        """Tools the answer calls but ``agent`` cannot run (empty when none).
 
-        Codes blocks are deliberately ignored: a code sample inside a normal
-        answer is an illustration, not a request to run it — executing examples
-        from a chat message would be surprising and unsafe.
+        A model wearing the web-agent prompt still answers «создай сайт» with a
+        ```bash``` block. The block is executed only by an agent that owns bash:
+        elsewhere it would silently do nothing (the old «просит разрешения и не
+        работает»). Comment-only shell blocks and prose-only python blocks are
+        not actions and are ignored.
         """
-        tags = set()
-        for agent in self.agents.values():
-            tags.update(getattr(agent, "available_tools", lambda: [])())
-        tags -= EXECUTION_TAGS
-        body = str(text or "")
-        return any(f"```{tag}" in body for tag in tags)
+        role = getattr(agent, "role", "")
+        if role in ("code", "files", "project"):
+            return ()
+        own = set(getattr(agent, "available_tools", lambda: [])())
+        missing: list[str] = []
+        for tag, payload in _BLOCK.findall(str(text or "")):
+            tag = tag.strip().lower()
+            if tag in own or tag in missing:
+                continue
+            if tag in EXECUTION_TAGS - {"json"}:
+                if tag == "bash" and not shell_text.has_commands(payload):
+                    continue          # блок-комментарий: выполнять нечего
+                if tag == "python" and not payload.strip():
+                    continue
+            missing.append(tag)
+        return tuple(missing)
 
     def _goal_with_context(self) -> str:
         ctx = self.ctx
@@ -724,7 +770,9 @@ class AgentEngine:
         return ""
 
     def _finalize(self, text: str) -> str:
-        text = str(text or "").strip()
+        # Теги <bash>/<bash code_output> в ответе — не текст для пользователя:
+        # команды остаются блоками, сочинённый моделью «вывод» убирается.
+        text = sanitize_answer(str(text or "")).strip()
         if text and self.ctx.finalize is not None:
             try:
                 text = str(self.ctx.finalize(text) or "").strip()
