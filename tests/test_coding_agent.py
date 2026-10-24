@@ -76,7 +76,7 @@ def test_coding_agent_reads_project_file(google_client, monkeypatch):
                                       json={"message": "проверь routes/coding_agent.py"}))
     tool = events_of(events, "tool")[0]
     assert tool["name"] == "project_read" and tool["code"] == 0
-    assert "Admin-only read-first coding agent" in tool["output"]
+    assert "Read-first coding agent" in tool["output"]
     assert answer_of(events) == "Прочитал маршрут, замечаний нет."
     offered = model_text(seen).split("ДОСТУПНЫЕ")[-1]
     assert "project_tree" in offered and "project_patch" in offered

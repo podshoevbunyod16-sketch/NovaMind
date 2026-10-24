@@ -486,8 +486,17 @@ def strip_unknown_blocks(text: str, allowed: set[str] | None = None) -> str:
 
 
 def _describe(tag: str, payload: str, saved: str) -> str:
-    """Short human description of a block for the ``tool`` event."""
-    first = next((line.strip() for line in str(payload or "").splitlines() if line.strip()), "")
+    """Short human description of a block for the ``tool`` event.
+
+    Для bash — первая настоящая команда: строки-комментарии не выполняются,
+    и показывать их как «выполнено» нельзя.
+    """
+    first = ""
+    if tag == "bash":
+        from agenticseek.tools.shell_text import first_command
+        first = first_command(str(payload or ""))
+    if not first:
+        first = next((line.strip() for line in str(payload or "").splitlines() if line.strip()), "")
     if saved:
         return f"{saved} · {first[:120]}" if first else saved
     return first[:160] or tag

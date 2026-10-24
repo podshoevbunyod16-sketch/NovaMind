@@ -63,6 +63,23 @@ ROLE_KEYWORDS = {
     "talk": ("привет", "здравствуй", "как дела", "спасибо", "кто ты", "что умеешь"),
 }
 
+#: «Создай сайт», «сделай интернет-магазин», «напиши бота» — это работа для
+#: кодера, хотя слова «сайт» и «интернет» одновременно являются маркерами
+#: веб-поиска. Без этой проверки запрос «создай интернет-магазин на Flask»
+#: уходил веб-агенту, который умеет только искать страницы, и пользователь
+#: вместо результата получал отказ или просьбу разрешения.
+_BUILD_VERB = re.compile(
+    r"(?:^|[^\wа-яё])(?:созда|сдела|сделай|напиш|напис|разработ|сверста|собер|сбери|"
+    r"реализу|запрограмм|постро|построй|подними|сгенерир|сколоти|build|create|make|"
+    r"write|develop|implement|generate)", re.I)
+_BUILD_OBJECT = ("сайт", "магазин", "приложени", "бот", "апи", "api", "парсер", "скрипт",
+                 "сервис", "лендинг", "панел", "дашборд", "игр", "программ", "функци",
+                 "класс", "модул", "flask", "django", "fastapi", "react", "telegram")
+#: Запросы-поиски внутри «создай»-фразы не превращают её в кодинг: «создай
+#: список книг, найди в интернете» — по-прежнему про поиск. Достаточно, чтобы
+#: не было глагола-действия над объектом создания.
+_SEARCH_ONLY = re.compile(r"^(?:найди|поищи|погугли|search|find)\b", re.I)
+
 _COMPLEX_MARKERS = ("затем", "потом", "после этого", "и сохрани", "сравни", "проанализируй",
                     "план", "по шагам", "несколько шагов", "сначала", "в конце",
                     "then ", "and save", "compare", "step by step")
@@ -91,6 +108,21 @@ def looks_complex(text: str) -> bool:
     if any(marker in low for marker in _COMPLEX_MARKERS) and actions >= 2:
         return True
     return False
+
+
+def is_build_request(text: str) -> bool:
+    """Does the user ask to *create* a site/app/program rather than to find one?
+
+    «Создай интернет-магазин на Flask» — кодинг; «найди сайт с рецептами» и
+    «что пишут на сайте новостей» — веб-поиск. Проверка нужна раньше подсчёта
+    ключевых слов: у «сайт»/«интернет» и у кодера маркеры пересекаются.
+    """
+    low = str(text or "").strip().lower()
+    if not low or not _BUILD_VERB.search(low):
+        return False
+    if _SEARCH_ONLY.search(low):
+        return False   # «найди, как создать сайт» — это поиск, а не разработка
+    return any(marker in low for marker in _BUILD_OBJECT)
 
 
 class AgentRouter:
@@ -163,6 +195,8 @@ class AgentRouter:
 
     def heuristic_role(self, text: str) -> str:
         low = str(text or "").lower()
+        if is_build_request(low):
+            return "code"
         best, best_score = "talk", 0
         for role, markers in ROLE_KEYWORDS.items():
             score = sum(1 for marker in markers if marker in low)

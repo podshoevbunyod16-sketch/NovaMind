@@ -229,3 +229,126 @@ def test_block_payload_is_passed_verbatim(admin_client, sandbox, monkeypatch):
     events = ndjson(admin_client.post("/api/agent/stream", json={"message": "выполни echo привет"}))
     tool = events_of(events, "tool")[0]
     assert "привет" in tool["output"]
+
+
+# ══════════════ bash: комментарии, таймаут, сигнал ══════════════
+
+def _bash_tool(monkeypatch, runner):
+    """BashTool с подменённым раннером песочницы."""
+    from agenticseek.tools import sandbox
+    from agenticseek.tools.bash_interpreter import BashTool
+    calls = []
+
+    def fake_run(command, timeout=None):
+        calls.append((command, timeout))
+        return runner(command, timeout)
+
+    monkeypatch.setattr(sandbox, "run", fake_run)
+    return BashTool(), calls
+
+
+def test_bash_block_with_only_comment_is_not_executed(monkeypatch):
+    """Ровно этот случай ломал агента: блок «# в корне проекта» → «Пустая команда»."""
+    tool, calls = _bash_tool(monkeypatch, lambda command, timeout: {
+        "code": 2, "stdout": "", "stderr": "Пустая команда"})
+    output = tool.execute("# в корне проекта")
+    assert output.startswith("[failure]")
+    assert "нет ни одной команды" in output
+    assert "Пустая команда" not in output
+    assert calls == [], "комментарий не должен попадать в песочницу"
+
+
+def test_bash_comments_are_stripped_but_commands_run(monkeypatch):
+    tool, calls = _bash_tool(monkeypatch, lambda command, timeout: {
+        "code": 0, "stdout": "ok", "stderr": ""})
+    output = tool.execute("# создам окружение\n# в корне проекта\npython app.py\n")
+    assert "[success] python app.py" in output
+    assert [command for command, _ in calls] == ["python app.py"]
+    assert "#" not in output
+
+
+def test_bash_comment_at_end_of_line_survives(monkeypatch):
+    """`ls -la   # список` — это команда с inline-комментарием, её выполняем."""
+    tool, calls = _bash_tool(monkeypatch, lambda command, timeout: {
+        "code": 0, "stdout": "ok", "stderr": ""})
+    tool.execute("ls -la   # список файлов")
+    assert calls[0][0] == "ls -la   # список файлов"
+
+
+def test_bash_timeout_is_reported_as_timeout(monkeypatch):
+    tool, _ = _bash_tool(monkeypatch, lambda command, timeout: {
+        "code": -9, "stdout": "", "stderr": "", "timed_out": True})
+    output = tool.execute("sleep 100")
+    assert "таймаут" in output
+    assert "SIGKILL" in output
+    assert "не повторяй" in output.lower()
+
+
+def test_bash_sigkill_explains_memory(monkeypatch):
+    tool, _ = _bash_tool(monkeypatch, lambda command, timeout: {
+        "code": -9, "stdout": "", "stderr": ""})
+    output = tool.execute("python -m venv venv")
+    assert "SIGKILL" in output
+    assert "памяти" in output
+    assert "pip install --user" in output, "на Termux должна быть подсказка про --user"
+
+
+def test_slow_commands_get_a_longer_timeout(monkeypatch):
+    tool, calls = _bash_tool(monkeypatch, lambda command, timeout: {
+        "code": 0, "stdout": "", "stderr": ""})
+    tool.execute("pip install flask")
+    tool.execute("ls -la")
+    assert calls[0][1] >= 60, calls
+    assert calls[1][1] < 60, calls
+
+
+def test_empty_bash_block_is_explained(monkeypatch):
+    tool, calls = _bash_tool(monkeypatch, lambda command, timeout: {
+        "code": 0, "stdout": "", "stderr": ""})
+    output = tool.execute("\n   \n")
+    assert "нет ни одной команды" in output
+    assert calls == []
+
+
+def test_agent_recovers_from_comment_only_bash_block(admin_client, sandbox, monkeypatch):
+    """Сценарий с телефона: модель прислала блок из одного комментария.
+
+    Раньше это давало «код 2: Пустая команда» и шаг терялся. Теперь модель
+    получает понятное объяснение и продолжает работу (в тесте — создаёт файл).
+    """
+    seen = []
+    script(monkeypatch, [
+        "```bash\n# в корне проекта\n```",
+        "```python:app.py\nprint('hello')\n```",
+        "Готово: app.py создан.",
+    ], seen)
+    events = ndjson(admin_client.post("/api/agent/stream",
+                                      json={"message": "Создай сайт на Flask"}))
+    assert answer_of(events) == "Готово: app.py создан."
+    tool_events = events_of(events, "tool")
+    assert tool_events, "агент должен показать шаг"
+    failure_text = model_text(seen, 1)
+    assert "нет ни одной команды" in failure_text
+    assert "Пустая команда" not in failure_text
+    # Никакой карточки «Разрешить» для пустого блока.
+    assert not events_of(events, "confirm")
+    assert (sandbox / "app.py").exists()
+
+
+def test_bash_path_rejection_explains_relative_paths(monkeypatch):
+    """`python -m venv /tmp/x` падал с «Path traversal запрещён» — непонятно why."""
+    from agenticseek.core.errors import AgenticSeekError
+
+    def runner(command, timeout):
+        raise AgenticSeekError(
+            "rejected",
+            "Путь «/tmp/x» не разрешён: команды выполняются только внутри рабочей "
+            "папки (/tmp/ws), и только по относительным путям.")
+
+    tool, calls = _bash_tool(monkeypatch, runner)
+    output = tool.execute("python -m venv /tmp/x")
+    assert output.startswith("[failure]")
+    assert "Path traversal" not in output
+    assert "относительным путям" in output
+    assert "относительные" in output, "модель должна получить правило, а не только отказ"
+    assert len(calls) == 1

@@ -34,6 +34,8 @@ import time
 import uuid
 from typing import Optional
 
+from agenticseek.tools.shell_text import executable_lines, first_command
+
 log = logging.getLogger("agenticseek.policy")
 
 RISK_SAFE = "safe"
@@ -115,10 +117,16 @@ def risk_of(tool, payload: str = "") -> str:
 
 
 def describe_action(tool, payload: str = "") -> str:
-    """Short, secret-free description of a tool call for the confirmation dialog."""
+    """Short, secret-free description of a tool call for the confirmation dialog.
+
+    Для bash берём первую настоящую команду: строки-комментарии не выполняются,
+    и показывать их в карточке «Нужно разрешение» бессмысленно.
+    """
     tag = getattr(tool, "tag", str(tool)) if not isinstance(tool, str) else tool
     text = redact(str(payload or "")).strip()
-    first = next((line.strip() for line in text.splitlines() if line.strip()), "")
+    first = first_command(text) if tag == "bash" else ""
+    if not first:
+        first = next((line.strip() for line in text.splitlines() if line.strip()), "")
     return f"{tag}: {first[:180]}" if first else tag
 
 
@@ -170,7 +178,11 @@ def reset_cache() -> None:
 def action_key(tool, payload: str) -> tuple:
     """Key for "always allow this kind of action"."""
     tag = getattr(tool, "tag", str(tool)) if not isinstance(tool, str) else tool
-    first = next((line.strip() for line in str(payload or "").splitlines() if line.strip()), "")
+    first = ""
+    if tag == "bash":
+        first = first_command(str(payload or ""))
+    if not first:
+        first = next((line.strip() for line in str(payload or "").splitlines() if line.strip()), "")
     # Первые три слова: «git push origin» покрывает другую ветку, но не «rm -rf build».
     words = first.split()[:3]
     return (tag, " ".join(words)[:80])
@@ -205,6 +217,12 @@ def needs_confirmation(tool, payload: str = "") -> bool:
     mode = confirm_mode()
     if mode == "off":
         return False
+    tag = getattr(tool, "tag", str(tool)) if not isinstance(tool, str) else tool
+    if tag == "bash" and not executable_lines(str(payload or "")):
+        # В блоке только комментарии: выполнять нечего, спрашивать не о чем.
+        # Инструмент вернёт модели подсказку, а пользователь не увидит
+        # карточку «Разрешить», после которой ничего не происходит.
+        return False
     risk = risk_of(tool, payload)
     if risk == RISK_SAFE:
         return False
@@ -235,8 +253,9 @@ def register_confirmation(tool, payload: str = "") -> dict:
                 item.event.set()
                 _PENDING.pop(key, None)
     log.info("confirmation requested: %s (%s)", record.description[:160], record.risk)
+    command = first_command(str(payload or "")) if tag == "bash" else ""
     return {"id": record.id, "tool": tag, "description": record.description,
-            "risk": record.risk}
+            "risk": record.risk, "command": command or record.description}
 
 
 def resolve_confirmation(confirmation_id: str, approve: bool, always: bool = False):

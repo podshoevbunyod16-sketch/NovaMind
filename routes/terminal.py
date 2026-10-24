@@ -223,6 +223,18 @@ def ensure_workspace():
     return created
 
 
+def _outside_path_message(path: str) -> str:
+    """Отказ по пути: по-русски и с готовым решением.
+
+    Раньше здесь было «Path traversal запрещён» — агент и пользователь не
+    понимали, что не так с безобидным ``python -m venv /tmp/x``: песочница
+    работает только внутри рабочей папки и ждёт относительный путь.
+    """
+    return (f"Путь «{path}» не разрешён: команды выполняются только внутри рабочей "
+            f"папки ({WORKSPACE}), и только по относительным путям. "
+            "Пишите, например, «python -m venv venv» или «ls -la app.py».")
+
+
 def _validate_command_paths(segments):
     """Reject filesystem arguments that could escape the workspace."""
     network_tools = {"curl", "wget", "ping", "dig", "nslookup", "host", "ssh", "scp", "sftp", "git"}
@@ -232,7 +244,7 @@ def _validate_command_paths(segments):
                 candidate = argv[index + 1]
                 if (os.path.isabs(candidate) or candidate == ".."
                         or candidate.startswith("../") or candidate.startswith("..\\")):
-                    raise ValueError("Путь выходит за пределы рабочей папки")
+                    raise ValueError(_outside_path_message(candidate))
                 continue
             if program in network_tools and (arg.startswith(("http://", "https://", "ssh://", "git@")) or "://" in arg):
                 continue
@@ -240,14 +252,15 @@ def _validate_command_paths(segments):
                 continue
             if (os.path.isabs(arg) or arg == ".." or arg.startswith("../")
                     or arg.startswith("..\\") or "/../" in arg):
-                raise ValueError("Path traversal запрещён")
+                raise ValueError(_outside_path_message(arg))
             # Симлинк внутри рабочей папки может указывать наружу: сверяем
             # реальный путь уже существующих аргументов.
             candidate = os.path.join(WORKSPACE, arg)
             if os.path.lexists(candidate):
                 real = os.path.realpath(candidate)
                 if real != WORKSPACE and not real.startswith(WORKSPACE + os.sep):
-                    raise ValueError("Ссылка ведёт за пределы рабочей папки")
+                    raise ValueError(f"Ссылка «{arg}» ведёт за пределы рабочей папки "
+                                     f"({WORKSPACE}). Используйте обычный файл внутри неё.")
 
 
 def _tokenize(command):
