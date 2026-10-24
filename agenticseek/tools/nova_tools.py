@@ -68,12 +68,16 @@ class McpBridgeTool(BridgeTool):
 
     def __init__(self, ctx, state=None, emit=None):
         tools = getattr(ctx, "mcp_tools", None) or []
-        listing = "; ".join(f"{t['server_id']}:{t['name']}" for t in tools[:40])
+        tools = sorted(tools, key=lambda t: 0 if "search" in t["name"] else 1)
+        listing = "; ".join(f"{t['server_id']}:{t['name']}" for t in tools[:60])
         super().__init__(
             "mcp_call",
             'Вызвать инструмент MCP-сервера: {"server_id":"…","tool":"…","arguments":{}}. '
             "Доступные (server_id:tool): " + (listing or "пусто") +
-            ". Выбери подходящий сам, у пользователя server_id не спрашивай.",
+            ". Выбери подходящий сам, у пользователя server_id не спрашивай. "
+            "Для «найди/есть ли» используй search_repositories или search_code; "
+            "get_file_contents только когда путь уже известен. "
+            "Найдя 2-3 результата, сразу дай итоговый ответ.",
             self._call, risk="write", state=state, emit=emit)
         self.ctx = ctx
 

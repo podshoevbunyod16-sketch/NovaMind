@@ -35,6 +35,15 @@ from agenticseek.core.workspace import get_work_dir, resolve_workspace_path
 #: A save path must look like a relative file name, not a sentence.
 _SAVE_PATH = re.compile(r"^[A-Za-z0-9_./\-]{1,200}$")
 
+_PSEUDO_WRAP = re.compile(r"</?(?:tool_code|tool_call|function_call)>", re.I)
+
+
+def normalize_tag_calls(text: str, tag: str) -> str:
+    """<web_search>q</web_search> -> ```web_search\nq\n```"""
+    text = _PSEUDO_WRAP.sub("", text)
+    pat = re.compile(rf"<{re.escape(tag)}>\s*(.*?)\s*</{re.escape(tag)}>", re.S | re.I)
+    return pat.sub(lambda m: f"```{tag}\n{m.group(1).strip()}\n```", text)
+
 
 class Tools:
     """Base class of every tool the agents can call."""
@@ -81,6 +90,8 @@ class Tools:
         if self.tag == "undefined":
             raise RuntimeError("Tool tag is not defined")
         llm_text = str(llm_text or "")
+        if self.risk == "safe":
+            llm_text = normalize_tag_calls(llm_text, self.tag)
         start_tag = f"```{self.tag}"
         end_tag = "```"
         if start_tag not in llm_text:

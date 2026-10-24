@@ -460,6 +460,8 @@ class AgentEngine:
                 self._emit({"type": "step", "icon": "⚠️",
                             "text": "Модель вызвала недоступный инструмент — действие не выполнено"})
                 answer = cleaned
+            if self._search_observation and _is_tool_only(answer):
+                answer = self._answer_from_observation(agent)
         finally:
             self._stop_watcher(watcher)
 
@@ -581,7 +583,10 @@ class AgentEngine:
                     self._emit({"type": "step", "icon": "💾", "text": f"Сохранил {saved}"})
 
         return ("Результаты поиска (доверяй им больше, чем памяти модели):\n\n" + lines
-                + ("\n\nПрочитанные страницы:\n\n" + "\n\n".join(pages) if pages else ""))
+                + ("\n\nПрочитанные страницы:\n\n" + "\n\n".join(pages) if pages else "")
+                + "\n\nВАЖНО: данных достаточно. Ответь пользователю сейчас обычным "
+                  "текстом по-русски, со ссылками на номера источников [1], [2]. "
+                  "НЕ вызывай web_search и web_open, не пиши теги и блоки.")
 
     def _run_offline(self) -> None:
         """No language model: real search/media, honest answers (see offline.py)."""
@@ -684,6 +689,25 @@ class AgentEngine:
             log.debug("fallback answer failed", exc_info=True)
         reason = getattr(error, "user_message", "") or str(error)
         return f"Не удалось выполнить запрос: {reason}"
+
+    def _answer_from_observation(self, agent) -> str:
+        """Модель не дала ответ — отвечаем по найденным данным, без инструментов."""
+        import re
+        self._emit({"type": "step", "icon": "🧠",
+                    "text": "Собираю ответ по найденным источникам"})
+        messages = [
+            {"role": "system", "content": (
+                "Ты NovaMind. Отвечай по-русски, чётко и по делу. Инструментов нет: "
+                "не пиши теги и блоки вызова. Используй только данные ниже, "
+                "ссылайся на номера [1], [2]. Если данных мало — так и скажи.")},
+            {"role": "user", "content": f"{self.ctx.goal}\n\n{self._search_observation}"},
+        ]
+        try:
+            text = str(agent.provider.respond(messages) or "")
+        except Exception:  # noqa: BLE001
+            return ""
+        text = re.sub(r"<think>.*?</think>", "", text, flags=re.S).strip()
+        return "" if _is_tool_only(text) else text
 
     def _recover_answer(self) -> str:
         """Last attempt at a clean answer when the model only produced reasoning.
@@ -803,3 +827,16 @@ def _chunks(text: str, size: int = 48):
 def run_stream(ctx: EngineContext):
     """Convenience wrapper: run one turn and yield the events."""
     yield from AgentEngine(ctx).stream()
+
+
+
+import re as _re
+
+_TOOL_ONLY = _re.compile(
+    r"^\s*(?:<tool_code>|<tool_call>|<web_search>|<web_open>|```(?:web_search|web_open))",
+    _re.I)
+
+
+def _is_tool_only(text) -> bool:
+    t = str(text or "").strip()
+    return not t or bool(_TOOL_ONLY.match(t))

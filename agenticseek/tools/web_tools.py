@@ -72,6 +72,10 @@ class WebSearchTool(Tools):
         query = str(payload or "").strip().splitlines()[0][:300] if str(payload or "").strip() else ""
         if not query:
             return "[failure] Пустой поисковый запрос."
+        if query.strip(" \"'«»`").lower() in {"query", "запрос", "search query",
+                                              "your query", "..."}:
+            return ("[failure] «query» — это шаблон, а не запрос. Напиши реальный "
+                    "запрос или ответь пользователю по уже найденным данным.")
         if self.backend is None:
             return "[failure] Поиск недоступен: не настроен ни один бэкенд."
         try:

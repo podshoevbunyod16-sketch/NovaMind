@@ -426,6 +426,18 @@ class Agent:
             self.emit({"type": "step", "icon": "⚠️",
                        "text": f"Модель вызвала недоступный инструмент: {missing or '?'}"})
             self.memory.push("user", self.last_feedback)
+        # шаги кончились: просим итог по уже собранному, без инструментов
+        try:
+            self.memory.push("user",
+                "Лимит шагов исчерпан. НЕ вызывай инструменты. Дай итоговый ответ "
+                "пользователю по тому, что уже найдено; если данных мало, скажи честно.")
+            final = strip_unknown_blocks(self.llm_request(), set(self.tools))
+            if str(final).strip():
+                return final, self.last_feedback
+        except AgentStopped:
+            raise
+        except Exception:  # noqa: BLE001
+            pass
         return self.limit_answer(), self.last_feedback
 
     @property

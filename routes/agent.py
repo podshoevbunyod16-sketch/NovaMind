@@ -369,6 +369,8 @@ def final_answer_text(raw, goal=""):
         return ""
     if _LEGACY_ACTION.match(text):
         return ""
+    if re.match(r"(?is)^\s*(?:<tool_code>|<tool_call>|<web_search>|<web_open>)", text):
+        return ""
     answer = strip_leaked_reasoning(text, goal)
     if answer and not _looks_complete_answer(answer):
         return ""
