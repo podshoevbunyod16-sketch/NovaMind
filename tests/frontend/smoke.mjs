@@ -85,9 +85,18 @@ const AGENT_STREAM = [
   { type: 'plan', text: '1) посмотреть файлы\n2) запустить пример' },
   { type: 'task', task: { id: 'task-1', title: 'Проверить песочницу', status: 'doing', source: 'agent', steps: [] } },
   { type: 'step', icon: '📂', text: 'Смотрю файлы — ls -la' },
-  { type: 'tool', name: 'run', command: 'ls -la', code: 0, output: 'README.md  hello.py' },
+  { type: 'thought', seconds: 4.2, label: 'Думал 4 c',
+    text: 'Сначала посмотрю, что лежит в папке, потом запущу пример.' },
+  { type: 'tool', name: 'terminal', kind: 'command', label: 'Выполнил команду',
+    detail: 'ls -la', command: 'ls -la', code: 0, status: 'ok',
+    output: 'README.md  hello.py' },
   { type: 'step', icon: '✅', text: '$ python3 hello.py — код 0' },
-  { type: 'tool', name: 'run', command: 'python3 hello.py', code: 0, output: 'Привет из рабочей папки NovaMind' },
+  { type: 'tool', name: 'file_read', kind: 'read', label: 'Прочитал файл',
+    detail: 'hello.py', command: 'hello.py', code: 0, status: 'ok',
+    output: "print('Привет из рабочей папки NovaMind')" },
+  { type: 'tool', name: 'terminal', kind: 'command', label: 'Выполнил команду',
+    detail: 'python3 hello.py', command: 'python3 hello.py', code: 0, status: 'ok',
+    output: 'Привет из рабочей папки NovaMind' },
   { type: 'task', task: { id: 'task-1', title: 'Проверить песочницу', status: 'done', source: 'agent',
                            steps: [{ title: '$ python3 hello.py', status: 'done', log: 'ок' }] } },
   { type: 'token', token: 'Скрипт отработал: ' },
@@ -486,12 +495,12 @@ check('первый источник — ссылка на сайт',
   lastBubble.querySelector('.source-item')?.getAttribute('href') === 'https://example.com/a');
 check('ответ напечатан', lastBubble.querySelector('.answer').textContent.includes('12 500'));
 check('жирный текст отформатирован', Boolean(lastBubble.querySelector('.answer strong')));
-check('рассуждение показано внутри шагов, а не отдельной панелью',
-  lastBubble.querySelector('.agent-term-reason-text')?.textContent.includes('Проверю цены') === true
+check('рассуждение показано строкой «думает» в ходе работы, а не отдельной панелью',
+  lastBubble.querySelector('.agent-thought-text')?.textContent.includes('Проверю цены') === true
   && !lastBubble.querySelector('.reasoning'));
 check('рассуждение свёрнуто после ответа',
-  lastBubble.querySelector('.agent-term-reason')?.classList.contains('is-done') === true
-  && !lastBubble.querySelector('.agent-term-reason')?.open);
+  lastBubble.querySelector('.agent-thought')?.classList.contains('is-done') === true
+  && !lastBubble.querySelector('.agent-thought-text')?.open);
 
 // Сцена схлопывается при первом токене
 const stage = lastBubble.querySelector('.stage');
@@ -640,7 +649,47 @@ check('консоль чистая', consoleErrors.length === 0, consoleErrors.j
 // 8) Страница настроек: провайдеры, каталог, диагностика поиска
 // ══════════════════════════════════════════════════════════════
 console.log('\n8) Страница настроек');
-const settingsHtml = await (await fetch(BASE + '/settings')).text();
+// Панель настроек закрыта для обычных пользователей — проверяем это, а затем
+// открываем её под администратором. Код берём из окружения (ADMIN_CODE), как
+// у сервера: без него раздел настроек пропускается с предупреждением.
+async function loginAdmin() {
+  const code = process.env.ADMIN_CODE || process.env.ADMIN_PASSWORD || '';
+  if (!code) return '';
+  try {
+    const response = await fetch(BASE + '/api/admin/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: process.env.ADMIN_USER || 'admin', code }),
+    });
+    if (!response.ok) return '';
+    const data = await response.json().catch(() => ({}));
+    if (!data.success) return '';
+    const cookie = (response.headers.get('set-cookie') || '').split(';')[0];
+    return cookie;
+  } catch (_) {
+    return '';
+  }
+}
+const adminCookie = await loginAdmin();
+const guestSettings = await fetch(BASE + '/settings');
+check('обычному пользователю страница настроек закрыта', guestSettings.status === 403,
+  'HTTP ' + guestSettings.status);
+check('отказ объясняет, что панель только для администратора',
+  (await guestSettings.text()).includes('только администратору'));
+const guestApi = await fetch(BASE + '/api/settings/providers');
+check('и API настроек закрыт обычному пользователю',
+  guestApi.status === 403 && (await guestApi.json()).admin_only === true);
+
+const settingsResponse = adminCookie
+  ? await fetch(BASE + '/settings', { headers: { Cookie: adminCookie } })
+  : null;
+if (!settingsResponse || !settingsResponse.ok) {
+  console.log('  ⚠ раздел настроек пропущен: нужен вход администратора '
+    + '(ADMIN_CODE=… node tests/frontend/smoke.mjs)');
+}
+const settingsHtml = settingsResponse && settingsResponse.ok
+  ? await settingsResponse.text() : '';
+if (settingsHtml) {
 const settingsJs = await (await fetch(BASE + '/static/settings.js')).text();
 // Остальные скрипты страницы настроек тоже нужны: аккордеон, панели MCP,
 // скиллов и озвучки живут в отдельных файлах.
@@ -1099,6 +1148,10 @@ check('переключение языка не ломает страницу',
 // ══════════════════════════════════════════════════════════════
 // 9) Окно входа
 // ══════════════════════════════════════════════════════════════
+} else if (!settingsHtml) {
+  console.log('  ⚠ страница настроек не проверена (нет сессии администратора)');
+}
+
 console.log('\n9) Окно входа');
 const authHtml = await (await fetch(BASE + '/')).text();
 const authErrors = [];
@@ -1152,6 +1205,16 @@ const aiCount = () => document.querySelectorAll('.message.ai').length;
 const lastAi = () => { const all = document.querySelectorAll('.message.ai'); return all[all.length - 1]; };
 const settle = (ms = 150) => new Promise((resolve) => setTimeout(resolve, ms));
 
+// Мок сервера отдаёт admin:false — значит обычный пользователь.
+check('кнопка настроек скрыта без прав администратора',
+  document.getElementById('btnSettings')?.hidden === true);
+check('пункт «Настройки» не предлагается в командной панели', (() => {
+  window.openCmdk();
+  const labels = [...document.querySelectorAll('#cmdkList .cmdk-item, #cmdkList > *')]
+    .map((el) => el.textContent || '');
+  window.closeCmdk();
+  return !labels.some((text) => text.includes('Настройки ИИ'));
+})());
 check('нет кнопки агента', !document.getElementById('btnAgent'));
 check('нет кнопки Linux-окружения', !document.getElementById('btnLinux'));
 check('нет кнопки смены темы', !document.getElementById('btnTheme'));
@@ -1201,14 +1264,28 @@ check('задача ушла в Linux', mock.agentRequests.length === 2);
 check('ИИ показывает план', agentBubble.querySelector('.stage-plan')?.textContent.includes('посмотреть файлы') === true);
 check('шаги видны в блоке «Работа в Linux»',
   agentBubble.querySelector('.agent-term-title')?.textContent === 'Работа в Linux'
-  && agentBubble.querySelectorAll('.agent-term-row').length === 2
+  && agentBubble.querySelectorAll('.agent-term-row').length === 3
   && agentBubble.querySelector('.agent-term').textContent.includes('python3 hello.py'));
+check('«Думал 4 c» — первый шаг таймлайна',
+  agentBubble.querySelector('.agent-thought-label')?.textContent === 'Думал 4 c',
+  agentBubble.querySelector('.agent-thought-label')?.textContent);
+check('у шага размышления можно раскрыть текст',
+  agentBubble.querySelector('.agent-thought-text')?.textContent.includes('потом запущу пример') === true);
+check('шаг назван по-человечески: «Выполнил команду» и «Прочитал файл»', (() => {
+  const labels = [...agentBubble.querySelectorAll('.agent-term-label')].map((el) => el.textContent);
+  return labels.includes('Выполнил команду') && labels.includes('Прочитал файл');
+})(), [...agentBubble.querySelectorAll('.agent-term-label')].map((el) => el.textContent).join('|'));
+check('вывод команды спрятан под «Вывод», а не льётся в чат', (() => {
+  const rows = [...agentBubble.querySelectorAll('.agent-term-row')];
+  return rows.every((row) => !row.querySelector('.agent-term-out')
+    || row.querySelector('.agent-term-outwrap'));
+})());
 check('блок шагов стоит над ответом', (() => {
   const box = agentBubble.querySelector('.agent-term');
   const answer = agentBubble.querySelector('.answer');
   return !!box && !!(box.compareDocumentPosition(answer) & window.Node.DOCUMENT_POSITION_FOLLOWING);
 })());
-check('счётчик шагов по-русски', agentBubble.querySelector('.agent-term-meta')?.textContent.startsWith('2 шага'),
+check('счётчик шагов по-русски', agentBubble.querySelector('.agent-term-meta')?.textContent.startsWith('4 шага'),
   agentBubble.querySelector('.agent-term-meta')?.textContent);
 check('после ответа блок свёрнут в одну строку',
   agentBubble.querySelector('.agent-term').classList.contains('is-done')

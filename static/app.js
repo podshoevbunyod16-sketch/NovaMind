@@ -533,6 +533,23 @@ function sceneMarkup(scene) {
     </div>`;
 }
 
+//: Подписи шагов таймлайна, если сервер их не прислал (старые записи трасс).
+const TOOL_LABELS = {
+  terminal: 'Выполнил команду', bash: 'Выполнил команду', python: 'Выполнил Python',
+  file_read: 'Прочитал файл', file_find: 'Нашёл файлы', file_finder: 'Нашёл файлы',
+  file_write: 'Создал файл', file_edit: 'Изменил файл',
+  web_search: 'Поиск в интернете', web_open: 'Открыл страницу', mcp_call: 'MCP',
+  image: 'Создал изображение', audio: 'Создал аудио', video: 'Создал видео',
+  remember: 'Запомнил', recall: 'Вспомнил', forget: 'Забыл',
+  task: 'Завёл задачу', task_done: 'Закрыл задачу', schedule: 'Задача по расписанию',
+  skill_create: 'Сохранил навык',
+};
+const TOOL_ICONS = {
+  command: '⌨️', read: '📄', find: '🔎', write: '📝', edit: '✏️',
+  search: '🌐', fetch: '📥', mcp: '🔌', media: '🖼', memory: '🧠',
+  task: '📋', skill: '📚', tool: '🔧',
+};
+
 function createAssistantTurn(options = {}) {
   const name = options.name || 'NovaMind';
   hideWelcome();
@@ -562,7 +579,7 @@ function createAssistantTurn(options = {}) {
   let timer = null;
   let elapsedEl = null;
   let stepsEl = null;
-  let reasoningBox = null;
+  let liveThought = null;          // строка «Думает…», пока идёт рассуждение
   let reasoningText = '';
   let answerText = '';
   let sourcesData = [];
@@ -640,7 +657,24 @@ function createAssistantTurn(options = {}) {
       if (text) api.step(scene === 'write' ? '✍️' : '🔎', text);
     },
 
+    /**
+     * Служебная заметка («Передаю задачу исполнителю», ошибка). Пока таймлайна
+     * нет — это шаг сцены; после первого инструмента — тонкая строка в нём,
+     * чтобы порядок «думал → сделал → заметка» не терялся.
+     */
     step(icon, text) {
+      const timeline = bubble.querySelector('.agent-term');
+      if (timeline && text) {
+        const note = document.createElement('div');
+        note.className = 'agent-note';
+        note.innerHTML = `<span class="agent-note-ico">${icon || '•'}</span>`
+          + `<span class="agent-note-txt">${escapeHtml(text)}</span>`;
+        timeline.querySelector('.agent-term-log').appendChild(note);
+        api.refreshTermMeta(timeline);
+        if (traceData.length < 60) traceData.push({ kind: 'step', icon: icon || '•', text: text || '' });
+        scrollToBottom();
+        return;
+      }
       ensureStage(null, '');
       if (!stepsEl) return;
       const previous = stepsEl.querySelector('.is-last');
@@ -731,8 +765,9 @@ function createAssistantTurn(options = {}) {
       if (!meta) return;
       const rows = box.querySelectorAll('.agent-term-row').length;
       const confirms = box.querySelectorAll('.agent-confirm').length;
-      const reasons = box.querySelectorAll('.agent-term-reason').length;
-      const count = rows + confirms + reasons;
+      // «Думал N c» — тоже шаг работы, но не действие: считаем вместе.
+      const thoughts = box.querySelectorAll('.agent-thought').length;
+      const count = rows + confirms + thoughts;
       const failed = box.querySelectorAll('.agent-term-row.is-error').length;
       const pending = box.querySelectorAll('.agent-confirm:not(.is-approved):not(.is-denied)').length;
       const n10 = count % 10, n100 = count % 100;
@@ -746,14 +781,15 @@ function createAssistantTurn(options = {}) {
     },
 
     /**
-     * Команды, которые ИИ выполняет в песочнице.
+     * Один шаг работы: команда, файл, MCP-инструмент, поиск, страница.
      *
-     * Отдельного терминала в чате нет: во время работы блок раскрыт,
-     * а как только пошёл финальный ответ — сворачивается в одну строку.
+     * Строка называет действие словами («Прочитал файл», «Изменил файл app.py»),
+     * а не только печатает команду: так видно, что именно сделал агент.
+     * Вывод команды свёрнут в «Вывод» — шаг не превращается в полотно текста.
      */
     tool(event = {}) {
-      const command = event.command || '';
-      if (!command) return;
+      const detail = event.detail || event.command || '';
+      if (!detail && !event.output) return;
       const box = api.ensureTerm();
       // Блок появляется ещё на рассуждении; «Работа в Linux» — только когда
       // реально выполнилась команда в окружении.
@@ -761,26 +797,77 @@ function createAssistantTurn(options = {}) {
         const title = box.querySelector('.agent-term-title');
         if (title) title.textContent = 'Работа в Linux';
       }
-      const failed = Number(event.code) !== 0;
+      const kind = event.kind || 'command';
+      const failed = event.status === 'error' || Number(event.code) !== 0;
+      const label = event.label || TOOL_LABELS[event.name] || 'Выполнил шаг';
+      const icon = event.icon || TOOL_ICONS[kind] || '•';
       const row = document.createElement('div');
-      row.className = `agent-term-row${failed ? ' is-error' : ''}`;
+      row.className = `agent-term-row kind-${kind}${failed ? ' is-error' : ''}`;
+      row.dataset.kind = kind;
+      row.dataset.name = event.name || 'run';
       row.innerHTML = `
         <span class="agent-term-sign">${failed ? '✕' : '›'}</span>
-        <code class="agent-term-cmd">${escapeHtml(command)}</code>
+        <span class="agent-term-ico" aria-hidden="true">${icon}</span>
+        <span class="agent-term-label">${escapeHtml(label)}</span>
+        <code class="agent-term-cmd">${escapeHtml(detail)}</code>
         <span class="agent-term-code">${escapeHtml(String(event.code ?? 0))}</span>`;
       if (event.output) {
+        const wrap = document.createElement('details');
+        wrap.className = 'agent-term-outwrap';
+        const head = document.createElement('summary');
+        head.textContent = failed ? 'Ошибка' : 'Вывод';
         const out = document.createElement('pre');
         out.className = 'agent-term-out';
         out.textContent = String(event.output).slice(0, 1200);
-        row.appendChild(out);
+        wrap.append(head, out);
+        row.appendChild(wrap);
       }
       box.querySelector('.agent-term-log').appendChild(row);
       api.refreshTermMeta(box);
       if (traceData.length < 60) {
-        traceData.push({ kind: 'tool', name: event.name || 'run',
-          command: command, code: event.code ?? 0 });
+        traceData.push({ kind: 'tool', name: event.name || 'run', icon: icon,
+          label: label, detail: detail, code: event.code ?? 0 });
       }
       // Блок остаётся свёрнутым: раскрывается только по нажатию пользователя
+      scrollToBottom();
+    },
+
+    /**
+     * «Думал N c» — шаг размышления с длительностью.
+     *
+     * Приходит после ответа модели, перед её первым действием: так видно, что
+     * пауза в работе — это размышление, а не зависание. Текст рассуждения,
+     * если он есть, прячется в «Что думал» и не мешает читать ответ.
+     */
+    thought(event = {}) {
+      const seconds = Number(event.seconds || 0);
+      const label = event.label || (seconds >= 1 ? `Думал ${Math.round(seconds)} c` : 'Думал');
+      const text = String(event.text || '').trim();
+      const box = api.ensureTerm();
+      let row = liveThought;
+      liveThought = null;
+      if (!row) {
+        row = document.createElement('div');
+        row.className = 'agent-thought';
+        box.querySelector('.agent-term-log').appendChild(row);
+      }
+      row.classList.remove('is-live');
+      row.innerHTML = `<span class="agent-thought-ico" aria-hidden="true">🧠</span>
+        <span class="agent-thought-label">${escapeHtml(label)}</span>`;
+      if (text) {
+        const details = document.createElement('details');
+        details.className = 'agent-thought-text';
+        const summary = document.createElement('summary');
+        summary.textContent = 'Что думал';
+        const body = document.createElement('div');
+        body.textContent = text.slice(0, 1200);
+        details.append(summary, body);
+        row.appendChild(details);
+      }
+      api.refreshTermMeta(box);
+      if (traceData.length < 60) {
+        traceData.push({ kind: 'thought', label: label, text: text.slice(0, 400) });
+      }
       scrollToBottom();
     },
 
@@ -843,22 +930,24 @@ function createAssistantTurn(options = {}) {
     reasoningToken(token) {
       if (!token) return;
       reasoningText += token;
-      if (!reasoningBox) {
-        const term = api.ensureTerm();
-        api.setTermOpen(term, true);
-        reasoningBox = document.createElement('details');
-        reasoningBox.className = 'agent-term-reason';
-        reasoningBox.innerHTML = `
-          <summary>
-            <span class="agent-term-reason-ico">🧠</span>
-            <span>Рассуждение</span>
-            <span class="caret">▶</span>
-          </summary>
-          <div class="agent-term-reason-text"></div>`;
-        term.querySelector('.agent-term-log').appendChild(reasoningBox);
+      const term = api.ensureTerm();
+      api.setTermOpen(term, true);
+      if (!liveThought) {
+        // Строка «Думает…»: пока модель рассуждает, длительности ещё нет.
+        // Когда придёт thought, эта же строка станет «Думал N c».
+        liveThought = document.createElement('div');
+        liveThought.className = 'agent-thought is-live';
+        liveThought.innerHTML = `
+          <span class="agent-thought-ico" aria-hidden="true">🧠</span>
+          <span class="agent-thought-label">Думает…</span>
+          <details class="agent-thought-text" open>
+            <summary>Рассуждение</summary>
+            <div></div>
+          </details>`;
+        term.querySelector('.agent-term-log').appendChild(liveThought);
         api.refreshTermMeta(term);
       }
-      reasoningBox.querySelector('.agent-term-reason-text').textContent = reasoningText;
+      liveThought.querySelector('.agent-thought-text div').textContent = reasoningText;
       scrollToBottom();
     },
 
@@ -1025,9 +1114,11 @@ function createAssistantTurn(options = {}) {
       api.finishTerm();
       stopTimer();
       wrap.classList.remove('is-working');
-      if (reasoningBox) {
-        reasoningBox.classList.add('is-done');
-        reasoningBox.removeAttribute('open');
+      if (liveThought) {
+        liveThought.classList.add('is-done');
+        liveThought.classList.remove('is-live');
+        const details = liveThought.querySelector('.agent-thought-text');
+        if (details) details.removeAttribute('open');
       }
 
       const seconds = ((Date.now() - startedAt) / 1000).toFixed(1);
@@ -1885,7 +1976,48 @@ function stopRecording() {
 }
 
 // ========== САЙДБАР ==========
-function openSettings() { window.location.href = '/settings'; }
+// ========== ДОСТУП К НАСТРОЙКАМ ==========
+// Панель настроек — только администратору. Сервер отдаёт её 403 обычному
+// пользователю; здесь мы просто не показываем кнопку, ведущую в отказ.
+let serverAdmin = localStorage.getItem('nova_is_admin') === 'true';
+// Кнопку в шапке не показываем «на секунду» до ответа сервера: сразу прячем.
+document.addEventListener('DOMContentLoaded', applySettingsAccess);
+
+function applySettingsAccess() {
+  const button = document.getElementById('btnSettings');
+  if (button) button.hidden = !serverAdmin;
+  const card = document.getElementById('user-card');
+  if (card) {
+    // Карточка профиля остаётся (там выход), но настройки открывает только админ.
+    card.title = serverAdmin ? 'Настройки AI' : 'Профиль';
+    card.classList.toggle('is-settings-entry', serverAdmin);
+  }
+}
+
+async function loadSettingsAccess() {
+  try {
+    const response = await fetch('/api/session/check', { headers: { Accept: 'application/json' } });
+    if (response.ok) {
+      const data = await response.json();
+      if (typeof data.admin === 'boolean') {
+        serverAdmin = data.admin;
+        localStorage.setItem('nova_is_admin', serverAdmin ? 'true' : 'false');
+      }
+    }
+  } catch (_) {
+    // Сервер не ответил — остаётся значение из localStorage (вход уже был).
+  }
+  applySettingsAccess();
+  return serverAdmin;
+}
+
+function openSettings() {
+  if (!serverAdmin) {
+    showNotification('Настройки доступны только администратору', 'warn');
+    return;
+  }
+  window.location.href = '/settings';
+}
 
 const DRAWER_BREAKPOINT = 860;
 // Чуть у́же, чем раньше, чтобы сайдбар не перекрывал чат на телефоне.
@@ -2070,7 +2202,12 @@ function initSidebarSwipe() {
 }
 
 if (document.readyState === 'loading') {
-  document.addEventListener('DOMContentLoaded', () => { initNav(); initSidebarSwipe(); });
+  document.addEventListener('DOMContentLoaded', () => {
+    initNav();
+    initSidebarSwipe();
+    // Кнопка настроек появляется только у администратора (сервер тоже закрыт).
+    loadSettingsAccess();
+  });
 } else {
   initNav();
   initSidebarSwipe();
@@ -2313,10 +2450,20 @@ function agentTraceHtml(steps, reasoning) {
   const list = Array.isArray(steps) ? steps : [];
   if (!list.length && !reasoning) return '';
   let rows = list.map((step) => {
+    if (step.kind === 'thought') {
+      // «Думал N c» — тот же шаг таймлайна в истории, а не отдельная панель.
+      return `<div class="agent-trace-row"><span class="agent-trace-ico">🧠</span>` +
+        `<span>${escapeHtml(String(step.label || 'Думал'))}</span></div>`;
+    }
     if (step.kind === 'tool') {
-      const label = step.command || step.name || 'команда';
-      return `<div class="agent-trace-row"><span class="agent-trace-ico">⌨️</span>` +
-        `<code class="agent-trace-cmd">${escapeHtml(String(label))}</code></div>`;
+      // Новые записи знают подпись и деталь; старые — только команду.
+      const detail = step.detail || step.command || step.name || 'команда';
+      const icon = step.icon || '⌨️';
+      const label = step.label
+        ? `<span class="agent-trace-label">${escapeHtml(String(step.label))}</span>` : '';
+      const failed = Number(step.code) ? ' is-error' : '';
+      return `<div class="agent-trace-row${failed}"><span class="agent-trace-ico">${escapeHtml(icon)}</span>` +
+        `${label}<code class="agent-trace-cmd">${escapeHtml(String(detail))}</code></div>`;
     }
     if (step.kind === 'plan') {
       return `<div class="agent-trace-row"><span class="agent-trace-ico">🗺</span>` +
@@ -2397,7 +2544,7 @@ const CMDK_ACTIONS = [
   { icon: '✨', label: 'Спокойный режим анимаций', hint: '', run: () => toggleCalmMotion() },
   { icon: '🧹', label: 'Очистить чат', hint: '', run: () => clearChat() },
   { icon: '➕', label: 'Новый диалог', hint: '', run: () => newChat() },
-  { icon: '⚙️', label: 'Настройки ИИ и провайдеров', hint: '', run: () => openSettings() },
+  { id: 'settings', icon: '⚙️', label: 'Настройки ИИ и провайдеров', hint: '', run: () => openSettings() },
   { icon: '🩺', label: 'Проверить поиск и модель', hint: '', run: () => checkHealth(true) },
   { icon: '🔊', label: 'Озвучить последний ответ', hint: '', run: () => speakText(lastAnswerText()) },
   { icon: '/help', label: 'Команда: список команд', hint: '/help', run: () => sendMessage('/help') },
@@ -2429,7 +2576,9 @@ function closeCmdk() {
 
 function filterCmdk() {
   const query = (document.getElementById('cmdkInput')?.value || '').trim().toLowerCase();
-  cmdkFiltered = CMDK_ACTIONS.filter((action) =>
+  // Пункт «Настройки» видят только администраторы: остальным он не нужен.
+  const actions = CMDK_ACTIONS.filter((action) => serverAdmin || action.id !== 'settings');
+  cmdkFiltered = actions.filter((action) =>
     !query || action.label.toLowerCase().includes(query) || (action.hint || '').toLowerCase().includes(query));
   cmdkIndex = 0;
   renderCmdk();

@@ -188,7 +188,7 @@ def test_dangerous_command_asks_and_runs_after_approval(admin_client, sandbox, m
     events = ndjson(admin_client.post("/api/agent/stream",
                                       json={"message": "запусти git push origin main"}))
     confirm = events_of(events, "confirm")[0]
-    assert confirm["tool"] == "bash" and confirm["risk"] == "danger"
+    assert confirm["tool"] == "terminal" and confirm["risk"] == "danger"
     assert "git push origin main" in confirm["command"]
     assert events_of(events, "confirm_result")[0]["approved"] is True
     assert events_of(events, "tool")[0]["code"] in (0, 1)      # команда дошла до песочницы
@@ -229,7 +229,7 @@ def test_confirm_off_skips_the_question(admin_client, sandbox, monkeypatch):
     events = ndjson(admin_client.post("/api/agent/stream",
                                       json={"message": "запусти git push origin main"}))
     assert events_of(events, "confirm") == []
-    assert events_of(events, "tool")[0]["name"] == "bash"
+    assert events_of(events, "tool")[0]["name"] == "terminal"
 
 
 # ══════════════ блок bash из одних комментариев ══════════════

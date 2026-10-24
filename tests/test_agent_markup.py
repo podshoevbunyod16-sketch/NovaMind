@@ -60,7 +60,7 @@ def test_legacy_bash_tag_actually_runs(admin_client, sandbox, monkeypatch):
     events = _post(admin_client, "создай сайт на flask")
 
     tool = events_of(events, "tool")[0]
-    assert tool["name"] == "bash" and "printf" in tool["command"]
+    assert tool["name"] == "terminal" and "printf" in tool["command"]
     assert (sandbox / "legacy.txt").read_text(encoding="utf-8") == "shop"
     # Пользователь не видит XML-протокол.
     assert "<bash" not in answer_of(events)
@@ -78,7 +78,7 @@ def test_invented_output_never_reaches_the_user(admin_client, sandbox, monkeypat
     reply = answer_of(events)
     assert "Successfully installed" not in reply
     assert "bash_output" not in reply and "<bash" not in reply
-    assert events_of(events, "tool")[0]["name"] == "bash"
+    assert events_of(events, "tool")[0]["name"] == "terminal"
 
 
 def test_written_python_file_is_not_executed(admin_client, sandbox, monkeypatch):

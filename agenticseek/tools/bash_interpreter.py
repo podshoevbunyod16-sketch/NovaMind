@@ -113,7 +113,10 @@ def _rejected(line: str, error: Exception) -> str:
 
 
 class BashTool(Tools):
-    tag = "bash"
+    #: В таймлайне это «терминал»: модель вызывает ```terminal, а старый
+    #: ```bash остаётся синонимом (см. ``agent.alias_tools``).
+    tag = "terminal"
+    aliases = ("bash",)
     name = "Bash"
     description = "Выполнить одну shell-команду в рабочей папке (без sudo, без сети наружу)."
     risk = "write"

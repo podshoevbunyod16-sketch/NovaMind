@@ -43,6 +43,8 @@ from agenticseek import policy
 from agenticseek.core.errors import AgenticSeekError, AgentStopped, StepLimitReached
 from agenticseek.core.logger import Logger
 from agenticseek.core.markup import normalize_answer, sanitize_answer
+from agenticseek.timeline import (MIN_THOUGHT_SECONDS, plan_text, thought_event,
+                                  tool_event)
 from agenticseek.core.memory import Memory
 from agenticseek.core.utility import pretty_print
 from agenticseek.core.workspace import get_work_dir, resolve_workspace_path
@@ -95,7 +97,12 @@ class Agent:
         self.logger = Logger(f"{self.type}.log")
         self.memory = Memory(self.prompt, session_id=f"{self.type}:{name}")
         self.tools: dict = {}
+        #: Дополнительные имена инструментов (редко нужны: алиасы берутся из
+        #: ``tool.aliases``). Протокол переехал на terminal/file_read/file_write,
+        #: но ответы со старыми ```bash``` и ```file_finder``` не теряются.
+        self.alias_tools: dict = {}
         self.blocks_result: list = []
+        self._thought: tuple[float, str] | None = None
         self.last_answer = ""
         self.last_feedback = ""
         # ── runtime hooks, attached by the engine ─────────────────────────
@@ -161,6 +168,12 @@ class Agent:
         except Exception:  # noqa: BLE001 — UI errors must not stop the agent
             self.logger.warning("event sink failed")
 
+    def _emit_thought(self, seconds: float, said: str = "") -> None:
+        """Событие «Думал N c» с текстом, который модель сказала перед действием."""
+        if seconds < MIN_THOUGHT_SECONDS:
+            return
+        self.emit(thought_event(seconds, said))
+
     def request_stop(self) -> None:
         """Ask the agent to stop after the current tool call (/api/agent/stop)."""
         self.stop = True
@@ -184,7 +197,41 @@ class Agent:
 
     # ── system prompt ─────────────────────────────────────────────────────
     def available_tools(self) -> list[str]:
-        return [tag for tag in self.tools if tag != "json"]
+        """Канонические теги инструментов — без дублей по алиасам."""
+        tags: list[str] = []
+        for tag, tool in self.tools.items():
+            canonical = getattr(tool, "tag", tag) or tag
+            if canonical != "json" and canonical not in tags:
+                tags.append(canonical)
+        return tags
+
+    def register_tool(self, tag: str, tool) -> None:
+        """Добавить инструмент, если такого действия ещё нет.
+
+        У агента уже может быть свой ``bash``, а движок присылает ``terminal`` —
+        это одно действие. Без проверки блок выполнялся бы дважды.
+        """
+        canonical = getattr(tool, "tag", tag) or tag
+        for key, existing in self.tools.items():
+            if (getattr(existing, "tag", key) or key) == canonical:
+                return
+        self.tools[tag] = tool
+
+    def _tool_lines(self) -> list[str]:
+        """Строки промпта: канонический тег, описание и старые синонимы."""
+        lines: list[str] = []
+        seen: set[str] = set()
+        for tag, tool in self.tools.items():
+            canonical = getattr(tool, "tag", tag) or tag
+            if canonical == "json" or canonical in seen:
+                continue
+            seen.add(canonical)
+            aliases = [alias for alias in (getattr(tool, "aliases", ()) or ())
+                       if alias != canonical]
+            suffix = f" (старый тег ```{'``` / ```'.join(aliases)}``` тоже работает)" \
+                if aliases else ""
+            lines.append(f"- ```{canonical}``` — {tool.description}{suffix}")
+        return lines
 
     def system_prompt(self) -> str:
         """Vendored prompt + the tools that really exist in this run."""
@@ -201,7 +248,7 @@ class Agent:
         if tags:
             parts.append(
                 "\n=== ДОСТУПНЫЕ ИНСТРУМЕНТЫ ЭТОГО ЗАПУСКА ===\n"
-                + "\n".join(f"- ```{tag}``` — {self.tools[tag].description}" for tag in tags)
+                + "\n".join(self._tool_lines())
                 + "\nВызывай только эти теги. Если нужного действия нет — объясни это словами."
             )
         else:
@@ -229,6 +276,7 @@ class Agent:
         self.check_limits()
         messages = self.memory.get()
         messages[0] = {"role": "system", "content": self.system_prompt()}
+        started = time.monotonic()
         try:
             answer = self.provider.respond(messages)
         except AgenticSeekError:
@@ -237,6 +285,9 @@ class Agent:
             raise AgenticSeekError(
                 f"{type(error).__name__}: {error}", "Модель недоступна.") from error
         answer = strip_think(answer)
+        # Сколько модель думала до этого шага. Показываем только если дальше
+        # будет действие: у простого ответа «Думал 2 c» — лишний шум.
+        self._thought = (time.monotonic() - started, plan_text(answer))
         if not str(answer or "").strip():
             raise AgenticSeekError("Model returned an empty answer",
                                    "Модель вернула пустой ответ.")
@@ -267,8 +318,9 @@ class Agent:
     def _refuse(self, tag: str, payload: str, save_path: str, reason: str):
         """Report a blocked action: the user must see why nothing happened."""
         feedback = f"[failure] {reason}"
-        self.emit({"type": "tool", "name": tag, "command": save_path or _describe(tag, payload, ""),
-                   "code": 1, "output": feedback})
+        self.emit(tool_event(tag, str(payload), ok=False, saved=save_path,
+                             command=save_path or _describe(tag, payload, ""),
+                             output=feedback, code=1))
         if self.state is not None:
             try:
                 self.state.add_tool(tag, False)
@@ -278,7 +330,7 @@ class Agent:
 
     def run_tool(self, tag: str, payload: str, save_path: str | None = None):
         """Execute one block. Returns ``(ok, feedback)``; never raises for tool errors."""
-        tool = self.tools.get(tag)
+        tool = self.all_tools().get(tag)
         if tool is None:
             return False, (f"[failure] Инструмент «{tag}» недоступен. "
                            f"Доступно: {', '.join(self.available_tools()) or 'ничего'}.")
@@ -352,13 +404,42 @@ class Agent:
                 self.record(tag, payload, ok, feedback)
             except Exception:  # noqa: BLE001 — persistence must not stop the run
                 self.logger.warning("run recorder failed")
-        self.emit({
-            "type": "tool", "name": tag,
-            "command": _describe(tag, payload, saved),
-            "code": 0 if ok else 1,
-            "output": clip(output, 1200),
-        })
+        self.emit(tool_event(tag, str(payload), ok=ok, saved=saved,
+                             command=_describe(tag, payload, saved),
+                             output=output, code=0 if ok else 1))
         return ok, feedback
+
+    def all_tools(self) -> dict:
+        """Инструменты + старые теги: ``bash`` → ``terminal``, ``file_finder`` → ``file_find``.
+
+        Алиасы регистрируются из ``tool.aliases``, поэтому промпты, сохранённые
+        навыки и модели со старым протоколом продолжают работать, а
+        пользователь видит канонический шаг таймлайна.
+        """
+        merged = dict(self.alias_tools)
+        merged.update(self.tools)
+        for tag, tool in list(self.tools.items()):
+            merged.setdefault(getattr(tool, "tag", tag) or tag, tool)
+            for alias in getattr(tool, "aliases", ()) or ():
+                merged.setdefault(alias, tool)
+        return merged
+
+    def _unique_tools(self):
+        """Пары (канонический тег, инструмент) без дублей по алиасам."""
+        seen = set()
+        for tag, tool in self.all_tools().items():
+            canonical = getattr(tool, "tag", tag) or tag
+            if canonical == "json" or canonical in seen:
+                continue
+            seen.add(canonical)
+            yield canonical, tool
+
+    def _has_action(self, text: str) -> bool:
+        for _tag, tool in self._unique_tools():
+            blocks, _path = tool.load_exec_block(text)
+            if blocks:
+                return True
+        return False
 
     def execute_blocks(self, text: str):
         """Execute every block of an answer, stopping at the first failure.
@@ -368,9 +449,13 @@ class Agent:
         """
         executed = 0
         feedback_parts = []
-        for tag, tool in list(self.tools.items()):
-            if tag == "json":
-                continue
+        if self._thought and self._has_action(text):
+            # «Думал 4 c» появляется перед первым действием блока — как в
+            # современных агентах, где видно паузу перед командой.
+            seconds, said = self._thought
+            self._emit_thought(seconds, said)
+        self._thought = None
+        for tag, tool in self._unique_tools():
             # У каждого блока свой путь: несколько ```python:path``` в одном
             # ответе раньше писались в один и тот же последний файл.
             for payload, save_path in tool.load_blocks(text):
@@ -424,13 +509,13 @@ class Agent:
                 self.last_feedback = feedback
                 self.memory.push("user", feedback)
                 continue
-            cleaned = strip_unknown_blocks(answer, set(self.tools))
+            cleaned = strip_unknown_blocks(answer, set(self.all_tools()))
             if cleaned == str(answer or "").strip() or unknown >= 1:
                 return cleaned, self.last_feedback
             # Модель вызвала инструмент, которого в этом запуске нет: говорим ей
             # об этом и даём один шанс ответить словами, а не показываем блок.
             unknown += 1
-            missing = _unknown_tag(str(answer or ""), set(self.tools))
+            missing = _unknown_tag(str(answer or ""), set(self.all_tools()))
             self.last_feedback = (f"[failure] Инструмент «{missing or 'неизвестный'}» "
                                   "недоступен в этом запуске. Ответь пользователю словами.")
             self.emit({"type": "step", "icon": "⚠️",
