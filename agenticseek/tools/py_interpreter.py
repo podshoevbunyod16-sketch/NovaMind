@@ -21,6 +21,7 @@ import uuid
 
 from agenticseek.core.agent import clip
 from agenticseek.tools import sandbox
+from agenticseek.tools.gui_hint import gui_hint
 from agenticseek.tools.safety import is_unsafe
 from agenticseek.tools.tools import Tools
 
@@ -87,8 +88,10 @@ class PythonTool(Tools):
         text = (result.get("stdout") or "") + (result.get("stderr") or "")
         text = text.strip()
         if result["code"] != 0:
-            return (f"[failure] Python завершился с кодом {result['code']}:\n"
-                    f"{clip(text or '(нет вывода)', 3000)}")
+            message = (f"[failure] Python завершился с кодом {result['code']}:\n"
+                       f"{clip(text or '(нет вывода)', 3000)}")
+            hint = gui_hint(text)
+            return message + ("\n" + hint if hint else "")
         if not text:
             # Так выглядит блок из одних import/def: он «прошёл», но ничего не
             # сделал. Модель должна понять, что файл так не создаётся.

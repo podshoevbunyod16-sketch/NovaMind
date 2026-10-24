@@ -40,10 +40,12 @@ class CoderAgent(Agent):
 
     def __init__(self, name, prompt_path, provider, verbose=False):
         super().__init__(name, prompt_path, provider, verbose, None)
+        # Канонические теги таймлайна: terminal/file_find. Старые ```bash``` и
+        # ```file_finder``` остаются синонимами (см. ``Tools.aliases``).
         self.tools = {
-            "bash": BashTool(),
+            "terminal": BashTool(),
             "python": PythonTool(),
-            "file_finder": FileFinderTool(),
+            "file_find": FileFinderTool(),
         }
         self.max_turns = MAX_ATTEMPTS
 

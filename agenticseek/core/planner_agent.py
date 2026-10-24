@@ -81,7 +81,7 @@ class PlannerAgent(Agent):
         self.shared_tools = dict(tools or {})
         for agent in self.agents.values():
             for tag, tool in self.shared_tools.items():
-                agent.tools.setdefault(tag, tool)
+                agent.register_tool(tag, tool)
 
     # ── plan parsing ──────────────────────────────────────────────────────
     def parse_plan(self, text: str) -> list[dict]:

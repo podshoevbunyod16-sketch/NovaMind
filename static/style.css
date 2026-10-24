@@ -1093,36 +1093,61 @@ button, input, select, textarea, .stage, .sources-head, .msg-actions {
 .agent-term-row:last-child { border-bottom: none; }
 .agent-term-sign { color: #5ae6a0; flex-shrink: 0; }
 .agent-term-row.is-error .agent-term-sign, .agent-term-row.is-error .agent-term-code { color: #ff8f8f; }
+/* Строка таймлайна: иконка, действие словами, деталь, вывод под катом */
+.agent-term-row .agent-term-ico { flex-shrink: 0; }
+.agent-term-label { flex-shrink: 0; color: var(--txt); }
 .agent-term-cmd {
   font-family: var(--mono, ui-monospace, monospace); font-size: 11px; color: #8fd3ff;
   overflow-wrap: anywhere; flex: 1; min-width: 0;
 }
+/* Файлы читаются как путь, а не как команда: без синего моно-акцента. */
+.agent-term-row.kind-read .agent-term-cmd,
+.agent-term-row.kind-edit .agent-term-cmd,
+.agent-term-row.kind-write .agent-term-cmd,
+.agent-term-row.kind-find .agent-term-cmd { color: #d8c9ff; }
 .agent-term-code { font-size: 10.5px; color: #5ae6a0; }
+.agent-term-outwrap {
+  width: 100%; margin: 3px 0 1px 18px; font-size: 10.5px; color: var(--txt-dim);
+}
+.agent-term-outwrap > summary { cursor: pointer; list-style: none; opacity: .8; }
+.agent-term-outwrap > summary::-webkit-details-marker { display: none; }
+.agent-term-outwrap > summary:hover { opacity: 1; }
+.agent-trace-label { flex-shrink: 0; color: var(--txt); }
+.agent-trace-row.is-error .agent-trace-cmd { color: #ff8f8f; }
 .agent-term-out {
-  width: 100%; margin: 2px 0 2px 18px; padding: 7px 9px; max-height: 200px; overflow: auto;
+  margin: 4px 0 2px; padding: 7px 9px; max-height: 200px; overflow: auto;
   font-family: var(--mono, ui-monospace, monospace); font-size: 10.5px; line-height: 1.5;
   white-space: pre-wrap; color: #cfd6e4; background: rgba(0, 0, 0, .3); border-radius: 8px;
 }
 
-/* Рассуждение модели — сворачиваемая строка внутри блока шагов */
-.agent-term-reason { border-bottom: 1px dashed rgba(255, 255, 255, .05); }
-.agent-term-reason:last-child { border-bottom: none; }
-.agent-term-reason > summary {
-  display: flex; align-items: center; gap: 7px; padding: 5px 3px;
-  cursor: pointer; list-style: none; font-size: 11.5px; color: var(--txt-dim);
+/* Шаг размышления: «Думал 4 c» — такой же элемент таймлайна, как команда. */
+.agent-thought {
+  display: flex; align-items: flex-start; gap: 7px; padding: 5px 3px; flex-wrap: wrap;
+  font-size: 11.5px; color: var(--txt-dim);
+  border-bottom: 1px dashed rgba(255, 255, 255, .05);
 }
-.agent-term-reason > summary::-webkit-details-marker { display: none; }
-.agent-term-reason > summary:hover { color: var(--txt); }
-.agent-term-reason-ico { flex-shrink: 0; }
-.agent-term-reason > summary .caret {
-  margin-left: auto; font-size: 9px; transition: transform .18s ease;
+.agent-thought:last-child { border-bottom: none; }
+.agent-thought.is-live .agent-thought-label { color: #c9b8ff; }
+.agent-thought-label { flex-shrink: 0; }
+.agent-thought-text { width: 100%; margin: 2px 0 2px 18px; font-size: 11px; }
+.agent-thought-text > summary {
+  cursor: pointer; list-style: none; color: var(--txt-dim);
 }
-.agent-term-reason[open] > summary .caret { transform: rotate(180deg); }
-.agent-term-reason-text {
-  margin: 2px 3px 8px 18px; padding: 8px 10px; max-height: 240px; overflow: auto;
-  font-size: 11px; line-height: 1.55; color: var(--txt-dim); white-space: pre-wrap;
+.agent-thought-text > summary::-webkit-details-marker { display: none; }
+.agent-thought-text > summary:hover { color: var(--txt); }
+.agent-thought-text > div {
+  margin-top: 5px; padding: 8px 10px; max-height: 240px; overflow: auto;
+  line-height: 1.55; color: var(--txt-dim); white-space: pre-wrap;
   background: rgba(255, 255, 255, .035); border-radius: 8px;
 }
+
+/* Служебная строка: «Передаю задачу исполнителю», ошибка, остановка. */
+.agent-note {
+  display: flex; gap: 7px; padding: 4px 3px; font-size: 11px; color: var(--txt-dim);
+  border-bottom: 1px dashed rgba(255, 255, 255, .05);
+}
+.agent-note:last-child { border-bottom: none; }
+.agent-note-txt { overflow-wrap: anywhere; }
 .agent-task {
   display: flex; align-items: center; gap: 8px; margin: 10px 0; padding: 7px 11px;
   border: 1px solid rgba(179, 156, 255, .3); border-radius: 11px; background: rgba(179, 156, 255, .1); font-size: 12px;

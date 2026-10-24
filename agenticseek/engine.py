@@ -61,7 +61,8 @@ from agenticseek.router import AgentRouter
 from agenticseek.state import RunState
 from agenticseek.tools import sandbox, shell_text
 from agenticseek.tools.bash_interpreter import BashTool
-from agenticseek.tools.file_finder import FileEditTool, FileFinderTool
+from agenticseek.tools.file_finder import (FileEditTool, FileFinderTool, FileReadTool,
+                                          FileWriteTool)
 from agenticseek.tools.nova_tools import build_nova_tools
 from agenticseek.tools.py_interpreter import PythonTool
 from agenticseek.tools.web_tools import WebOpenTool, WebSearchTool
@@ -75,11 +76,17 @@ CLEAN_ANSWER_SYSTEM = (
     "без рассуждений, без английских черновиков и без пояснений о том, как ты думаешь. "
     "Если данных не хватает — скажи это одной короткой честной фразой.")
 #: Blocks that run code: they are never re-dispatched from a plain answer.
-EXECUTION_TAGS = {"bash", "python", "json"}
+#: Запуск команд и кода. В ответе собеседника такой блок — пример, а не
+#: действие: «как создать venv?» не должен выполнять свой же ответ. Правки
+#: файлов сюда не входят — это всегда намерение, его передают программисту.
+EXECUTION_TAGS = {"terminal", "bash", "python", "json"}
 #: Tools that touch the machine. The web agent must not get them: its context is
 #: untrusted page text, and shell access there is one prompt injection away from
 #: running a stranger's command. Coding/file work goes to the agents built for it.
-EXECUTION_TOOL_TAGS = {"bash", "python", "file_finder", "file_edit"}
+EXECUTION_TOOL_TAGS = {"terminal", "bash", "python", "file_find", "file_finder",
+                       "file_read", "file_write", "file_edit"}
+#: Инструменты, которым нужна рабочая папка (в гостевом запуске их нет).
+SANDBOX_TAGS = {"terminal", "python", "file_find", "file_read", "file_write", "file_edit"}
 #: ```tag\npayload``` blocks of an answer.
 _BLOCK = re.compile(r"```([a-zA-Z_][\w-]*)\n(.*?)```", re.S)
 #: Human names of media kinds for the answer text.
@@ -282,9 +289,13 @@ class AgentEngine:
         self._attach_shared(planner, agents, shared)
         if not ctx.workspace:
             # Keep the tool set honest: without the sandbox there is nothing to run.
+            # Убираем и алиасы (```bash```, ```file_finder```): иначе гостевой
+            # промпт обещает инструменты, которых в этом запуске нет.
             for agent in agents:
-                for tag in ("bash", "python", "file_finder", "file_edit"):
-                    agent.tools.pop(tag, None)
+                for tag in list(agent.tools):
+                    tool = agent.tools[tag]
+                    if getattr(tool, "tag", tag) in SANDBOX_TAGS:
+                        agent.tools.pop(tag, None)
             planner.agents.pop("coder", None)
             planner.agents.pop("file", None)
 
@@ -325,16 +336,29 @@ class AgentEngine:
         if ctx.read_page is not None:
             tools["web_open"] = WebOpenTool(ctx.read_page, state=self.state)
         if ctx.workspace:
-            tools["bash"] = BashTool()
+            tools["terminal"] = BashTool()
             tools["python"] = PythonTool()
-            tools["file_finder"] = FileFinderTool()
+            tools["file_read"] = FileReadTool()
+            tools["file_write"] = FileWriteTool()
+            tools["file_find"] = FileFinderTool()
             tools["file_edit"] = FileEditTool()
         if ctx.tools_ctx is not None:
             tools.update(build_nova_tools(ctx.tools_ctx, state=self.state, emit=self._emit))
         return tools
 
+    @staticmethod
+    def _with_aliases(tools: dict) -> dict:
+        """Инструменты + старые теги (``bash``, ``file_finder``): промпты и
+        сохранённые навыки могут ссылаться на них, а блоки не должны теряться."""
+        merged = dict(tools)
+        for tool in list(tools.values()):
+            for alias in getattr(tool, "aliases", ()) or ():
+                merged.setdefault(alias, tool)
+        return merged
+
     def _attach_shared(self, planner, agents, shared: dict) -> None:
         ctx = self.ctx
+        shared = self._with_aliases(shared)
         if ctx.strict_mcp:
             only = {tag: tool for tag, tool in shared.items() if tag == "mcp_call"}
             if only:
@@ -352,9 +376,10 @@ class AgentEngine:
             if agent.role == "talk":
                 continue
             for tag, tool in shared.items():
-                if agent.role == "web" and tag in EXECUTION_TOOL_TAGS:
+                canonical = getattr(tool, "tag", tag) or tag
+                if agent.role == "web" and canonical in EXECUTION_TOOL_TAGS:
                     continue
-                agent.tools.setdefault(tag, tool)
+                agent.register_tool(tag, tool)
         planner.add_shared_tools({tag: tool for tag, tool in shared.items()})
 
     def _build_browser(self):
@@ -633,7 +658,8 @@ class AgentEngine:
         required = tuple(required or ())
         for role in ("code", "files", "web"):
             agent = self.router.by_role(role)
-            tools = getattr(agent, "tools", None) or {}
+            tools = agent.all_tools() if hasattr(agent, "all_tools") else \
+                (getattr(agent, "tools", None) or {})
             if agent is not None and tools and all(tag in tools for tag in required):
                 return agent
         return None
@@ -650,14 +676,16 @@ class AgentEngine:
         role = getattr(agent, "role", "")
         if role in ("code", "files", "project"):
             return ()
-        own = set(getattr(agent, "available_tools", lambda: [])())
+        # Алиасы тоже «свои»: ```bash``` выполняет terminal этого же агента.
+        own = set(getattr(agent, "all_tools", lambda: {})().keys()) \
+            or set(getattr(agent, "available_tools", lambda: [])())
         missing: list[str] = []
         for tag, payload in _BLOCK.findall(str(text or "")):
             tag = tag.strip().lower()
             if tag in own or tag in missing:
                 continue
             if tag in EXECUTION_TAGS - {"json"}:
-                if tag == "bash" and not shell_text.has_commands(payload):
+                if tag in ("bash", "terminal") and not shell_text.has_commands(payload):
                     continue          # блок-комментарий: выполнять нечего
                 if tag == "python" and not payload.strip():
                     continue

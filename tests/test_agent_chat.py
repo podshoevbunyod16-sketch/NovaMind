@@ -121,7 +121,7 @@ def test_linux_flag_is_true_only_after_workspace_action(admin_client, monkeypatc
     script(monkeypatch, ["```bash\npwd\n```", "Готово."])
     events = ndjson(admin_client.post("/api/agent/stream", json={"message": "запусти pwd"}))
     result = next(event for event in events if event["type"] == "result")
-    assert result["linux"] is True and "bash" in result["tools"]
+    assert result["linux"] is True and "terminal" in result["tools"]
 
 
 def test_git_command_runs_through_the_sandbox(admin_client, monkeypatch, sandbox):
@@ -130,7 +130,7 @@ def test_git_command_runs_through_the_sandbox(admin_client, monkeypatch, sandbox
     tool = next(event for event in events if event["type"] == "tool")
     assert tool["command"].startswith("git status")
     result = next(event for event in events if event["type"] == "result")
-    assert "bash" in result["tools"]
+    assert "terminal" in result["tools"]
 
 
 def test_workspace_tools_are_hidden_from_guest_prompt(client, sandbox, monkeypatch):

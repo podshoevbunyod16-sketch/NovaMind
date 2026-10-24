@@ -466,8 +466,11 @@ def test_ai_status_endpoint_reports_offline_model(client, monkeypatch):
     assert data["configured"] is True
 
 
-def test_pages_render_with_liquid_glass(client):
-    for path in ("/", "/chat", "/settings", "/admin/login", "/composio"):
+def test_pages_render_with_liquid_glass(client, admin_client):
+    for path in ("/", "/chat", "/admin/login", "/composio"):
         body = client.get(path).get_data(as_text=True)
         assert "liquid-glass.css" in body, path
         assert "lg-grain" in body or path == "/admin/login", path
+    # Настройки открываются только администратору — проверяем под ним.
+    body = admin_client.get("/settings").get_data(as_text=True)
+    assert "liquid-glass.css" in body and "lg-grain" in body

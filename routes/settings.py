@@ -11,6 +11,31 @@ import skills_registry
 settings_bp = Blueprint("settings", __name__)
 
 
+#: Что остаётся доступным без входа администратора: сами страницы чата и
+#: переключатель языка интерфейса (это настройка пользователя, а не сервера).
+OPEN_ENDPOINTS = {
+    "settings.index", "settings.chat_page", "settings.admin_login_page",
+    "settings.get_ui_language", "settings.set_ui_language",
+}
+
+
+@settings_bp.before_request
+def _panel_admin_only():
+    """Панель настроек — только администратору.
+
+    Раньше ``/settings`` открывался любому вошедшему: обычный пользователь
+    видел ключи провайдеров, каталог моделей, MCP-серверы и импорт навыков.
+    Теперь страница и её API закрыты, а интерфейс прячет вход (см. app.js).
+    """
+    from routes.terminal import is_admin
+    if is_admin() or request.endpoint in OPEN_ENDPOINTS:
+        return None
+    if request.path.startswith("/api/"):
+        return jsonify({"error": "Настройки доступны только администратору",
+                        "admin_only": True}), 403
+    return render_template("settings_denied.html"), 403
+
+
 def _admin_only():
     """Подключать/удалять MCP-серверы может только админ (MCP_ADMIN_ONLY=0 отключает проверку)."""
     import os

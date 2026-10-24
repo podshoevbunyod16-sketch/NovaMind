@@ -159,7 +159,7 @@ def test_planner_reports_failed_step(admin_client, sandbox, monkeypatch):
     events = ndjson(admin_client.post("/api/agent/stream",
                                       json={"message": "сначала запусти код, затем напиши вывод"}))
     tool = events_of(events, "tool")[0]
-    assert tool["name"] == "bash" and tool["code"] == 1
+    assert tool["name"] == "terminal" and tool["code"] == 1
     assert "Итог" in answer_of(events)
 
 

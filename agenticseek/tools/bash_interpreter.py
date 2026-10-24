@@ -30,6 +30,7 @@ import signal
 from agenticseek.core.agent import clip
 from agenticseek.core.errors import AgenticSeekError
 from agenticseek.tools import sandbox
+from agenticseek.tools.gui_hint import gui_hint
 from agenticseek.tools.safety import is_unsafe
 from agenticseek.tools.shell_text import executable_lines, is_slow, server_hint
 from agenticseek.tools.tools import Tools
@@ -94,7 +95,9 @@ def _failure(line: str, result: dict, timeout: float, text: str) -> str:
         # строк их здесь быть не должно.
         return (f"[failure] {line[:200]}: песочница не увидела команду. "
                 "Напиши саму команду, без строк-комментариев.")
-    return f"[failure] {line[:200]} → код {code}:\n{clip(output, 3000)}"
+    message = f"[failure] {line[:200]} → код {code}:\n{clip(output, 3000)}"
+    hint = gui_hint(output)
+    return message + ("\n" + hint if hint else "")
 
 
 def _rejected(line: str, error: Exception) -> str:
@@ -110,7 +113,10 @@ def _rejected(line: str, error: Exception) -> str:
 
 
 class BashTool(Tools):
-    tag = "bash"
+    #: В таймлайне это «терминал»: модель вызывает ```terminal, а старый
+    #: ```bash остаётся синонимом (см. ``agent.alias_tools``).
+    tag = "terminal"
+    aliases = ("bash",)
     name = "Bash"
     description = "Выполнить одну shell-команду в рабочей папке (без sudo, без сети наружу)."
     risk = "write"
