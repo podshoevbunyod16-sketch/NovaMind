@@ -135,9 +135,109 @@ def test_status_lists_real_voices_when_key_present(gemini_key):
     assert all(voice["available"] for voice in voices)
 
 
-def test_groq_voices_are_english_only():
-    voices = [voice for voice in tts_service.voice_catalog("groq")]
-    assert voices and all(voice["languages"] == ["en"] for voice in voices)
+def test_groq_voices_follow_orpheus_models():
+    """Голоса Groq зависят от модели: English → en, Arabic Saudi → ar."""
+    english = tts_service.voice_catalog("groq", "canopylabs/orpheus-v1-english")
+    arabic = tts_service.voice_catalog("groq", "canopylabs/orpheus-arabic-saudi")
+    assert english and all(voice["languages"] == ["en"] for voice in english)
+    assert arabic and all(voice["languages"] == ["ar"] for voice in arabic)
+    # Русского голоса Groq не обещает — интерфейс не должен это скрывать.
+    assert not [voice for voice in tts_service.voice_catalog("groq")
+                if "ru" in voice["languages"]]
+
+
+def _pollinations_catalog_stub(monkeypatch):
+    """Живой каталог Pollinations без сети: две модели с разными endpoint'ами."""
+    entries = [
+        {"id": "openai/tts-1", "name": "OpenAI TTS", "endpoint": "speech",
+         "voices": ["alloy", "nova"], "aliases": [], "paid_only": False,
+         "health": "healthy", "description": "speech model"},
+        {"id": "openai/gpt-audio-mini", "name": "GPT Audio Mini", "endpoint": "chat",
+         "voices": ["alloy"], "aliases": ["openai-audio"], "paid_only": False,
+         "health": "healthy", "description": "chat model"},
+        {"id": "elevenlabs/eleven-v3", "name": "ElevenLabs v3", "endpoint": "speech",
+         "voices": ["rachel"], "aliases": [], "paid_only": True,
+         "health": "healthy", "description": "paid model"},
+    ]
+    monkeypatch.setattr(tts_service.mg, "pollinations_tts_catalog",
+                        lambda force=False, allow_fetch=True: [dict(item) for item in entries])
+    return entries
+
+
+def test_models_follow_live_provider_catalog(monkeypatch):
+    _pollinations_catalog_stub(monkeypatch)
+    models = {item["id"]: item for item in tts_service.model_catalog("pollinations")}
+    assert set(models) >= {"openai/tts-1", "openai/gpt-audio-mini", "elevenlabs/eleven-v3"}
+    assert models["openai/tts-1"]["endpoint"] == "speech"
+    assert models["openai/gpt-audio-mini"]["endpoint"] == "chat"
+    assert models["openai/gpt-audio-mini"]["voices_count"] == 1
+    assert models["elevenlabs/eleven-v3"]["paid"] is True
+    # Бесплатные модели стоят выше платных.
+    order = [item["id"] for item in tts_service.model_catalog("pollinations")]
+    assert order.index("openai/tts-1") < order.index("elevenlabs/eleven-v3")
+
+
+def test_alias_selects_real_pollinations_model(monkeypatch):
+    monkeypatch.setenv("POLLINATIONS_API_KEY", "pk-test")
+    _pollinations_catalog_stub(monkeypatch)
+    model, error = tts_service.resolve_model("pollinations", "openai-audio")
+    assert error == ""
+    assert model["id"] == "openai/gpt-audio-mini"
+
+
+def test_model_selection_is_saved_and_used(monkeypatch):
+    monkeypatch.setenv("POLLINATIONS_API_KEY", "pk-test")
+    _pollinations_catalog_stub(monkeypatch)
+    monkeypatch.setattr(mg, "generate_media", lambda *a, **k: fake_audio(*a, **k))
+    saved = tts_service.save_settings({
+        "provider": "pollinations", "model": "openai/tts-1", "voice": "nova"})
+    assert saved["model"] == "openai/tts-1" and saved["voice"] == "nova"
+    events = list(tts_service.synthesize("Привет! Это проверка выбранной модели."))
+    assert events[0]["type"] == "start"
+    assert events[0]["model"] == "openai/tts-1"
+    assert events[0]["voice"] == "nova"
+
+
+def test_voice_of_another_model_is_rejected(monkeypatch):
+    monkeypatch.setenv("POLLINATIONS_API_KEY", "pk-test")
+    _pollinations_catalog_stub(monkeypatch)
+    with pytest.raises(ValueError, match="недоступен"):
+        tts_service.save_settings({"provider": "pollinations",
+                                   "model": "openai/gpt-audio-mini", "voice": "nova"})
+
+
+def test_unknown_model_is_rejected(monkeypatch):
+    monkeypatch.setenv("POLLINATIONS_API_KEY", "pk-test")
+    _pollinations_catalog_stub(monkeypatch)
+    with pytest.raises(ValueError, match="не найдена"):
+        tts_service.save_settings({"provider": "pollinations", "model": "нет-такой"})
+
+
+def test_paid_model_requires_explicit_confirmation(monkeypatch):
+    monkeypatch.setenv("POLLINATIONS_API_KEY", "pk-test")
+    _pollinations_catalog_stub(monkeypatch)
+    with pytest.raises(ValueError, match="платная"):
+        tts_service.save_settings({"provider": "pollinations", "model": "elevenlabs/eleven-v3"})
+    saved = tts_service.save_settings({"provider": "pollinations",
+                                       "model": "elevenlabs/eleven-v3",
+                                       "confirm_paid": True})
+    assert saved["model"] == "elevenlabs/eleven-v3"
+
+
+def test_terms_error_has_actionable_hint():
+    explanation = tts_service.explain_error(
+        "Groq вернул HTTP 400: model_terms_required", {"provider": "groq", "id": "canopylabs/orpheus-v1-english"})
+    assert "Accept terms" in explanation["hint"]
+    assert "console.groq.com/playground" in explanation["action_url"]
+
+
+def test_status_lists_models_for_provider(monkeypatch):
+    monkeypatch.setenv("POLLINATIONS_API_KEY", "pk-test")
+    _pollinations_catalog_stub(monkeypatch)
+    status = tts_service.status()
+    assert status["available"] is True
+    assert status["provider"] == "pollinations"
+    assert status["models"] and all(item["provider"] == "pollinations" for item in status["models"])
 
 
 def test_custom_endpoint_appears_when_url_set(monkeypatch):
@@ -179,6 +279,26 @@ def test_synthesize_returns_audio_for_each_chunk(tts_provider, monkeypatch):
     assert all(chunk["mime"] == "audio/wav" for chunk in chunks)
     assert all(chunk["url"].startswith("/media/") for chunk in chunks)
     assert [chunk["index"] for chunk in chunks] == sorted(chunk["index"] for chunk in chunks)
+
+
+def test_groq_limit_reduces_chunk_size(monkeypatch):
+    """Orpheus принимает 200 символов: части не должны быть длиннее лимита модели."""
+    monkeypatch.setenv("GROQ_API_KEY", "gsk-test")
+    import groq_rotation
+    monkeypatch.setattr(groq_rotation, "GROQ_KEYS",
+                        [{"key": "gsk-test", "index": 0, "exhausted_at": None}])
+    prompts = []
+
+    def capturing(model, prompt, options=None, on_status=None, confirm=None):
+        prompts.append(prompt)
+        return fake_audio(model, prompt, options)
+
+    monkeypatch.setattr(mg, "generate_media", capturing)
+    text = "Этот ответ довольно длинный. " * 30
+    chunks, error = tts_service.synthesize_all(text, provider="groq")
+    assert error == ""
+    assert prompts and max(len(prompt) for prompt in prompts) <= 200
+    assert len(chunks) > 1
 
 
 def test_start_event_describes_provider_and_voice(tts_provider):
@@ -300,6 +420,23 @@ def test_voices_endpoint_filters(client):
     assert all("en" in voice["languages"] for voice in english["voices"])
     google = client.get("/api/tts/voices?provider=google_ai_studio").get_json()
     assert google["voices"] and all(v["provider"] == "google_ai_studio" for v in google["voices"])
+
+
+def test_models_endpoint_lists_catalog(client, monkeypatch):
+    _pollinations_catalog_stub(monkeypatch)
+    response = client.get("/api/tts/models?provider=pollinations")
+    assert response.status_code == 200
+    data = response.get_json()
+    assert data["count"] == len(data["models"])
+    assert {item["id"] for item in data["models"]} >= {"openai/tts-1", "openai/gpt-audio-mini"}
+    assert data["models"][0]["voices"]
+
+
+def test_voices_endpoint_filters_by_model(client):
+    voices = client.get(
+        "/api/tts/voices?provider=groq&model=canopylabs/orpheus-arabic-saudi").get_json()
+    assert voices["voices"] and {voice["id"] for voice in voices["voices"]} == {
+        "fahad", "sultan", "lulwa", "noura"}
 
 
 def test_settings_endpoint_roundtrip(client, tts_provider):

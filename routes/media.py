@@ -567,8 +567,10 @@ def media_tts():
         model = _legacy_model("groq", "canopylabs/orpheus-v1-english", "audio", "groq_tts",
                               {"voice": data.get("voice") or "autumn"})
     else:
-        model = _legacy_model("pollinations", "openai-audio", "audio", "pollinations_audio",
-                              {"voice": data.get("voice") or "nova"})
+        # openai-audio — это алиас чат-модели openai/gpt-audio-mini: она принимает
+        # только /v1/chat/completions (на /v1/audio/speech отвечает 400).
+        model = _legacy_model("pollinations", "openai/gpt-audio-mini", "audio", "pollinations_audio",
+                              {"voice": data.get("voice") or "alloy", "endpoint": "chat"})
     return _legacy_generate(model, text, {"voice": data.get("voice")})
 
 

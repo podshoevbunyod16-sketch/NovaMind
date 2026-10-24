@@ -236,7 +236,7 @@ nova read https://docs.python.org/…   # прочитать страницу
 
 Сейчас подтверждённый бесплатный API есть у:
 `gemini-3.8-flash-tts` и `gemini-3.8-flash-lite-tts` (Google AI Studio, нужен `GEMINI_API_KEY`),
-`playai-tts` (Groq, нужен `GROQ_API_KEY`), `flux`, `turbo`, `openai-audio` (Pollinations, ключ не нужен).
+`canopylabs/orpheus-v1-english` и `canopylabs/orpheus-arabic-saudi` (Groq, нужен `GROQ_API_KEY`; `playai-tts` отключён провайдером 31.12.2025), `flux`, `turbo` (Pollinations, без ключа) и `openai/tts-1`, `openai/gpt-audio-mini` (Pollinations, нужен ключ).
 Для изображений Google и для видео бесплатного API нет — эти модели помечены `PAID`,
 а видео можно подключить своим endpoint'ом (`VIDEO_API_URL`).
 
