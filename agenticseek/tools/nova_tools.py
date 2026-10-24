@@ -64,19 +64,23 @@ class BridgeTool(Tools):
 
 
 class McpBridgeTool(BridgeTool):
-    """``mcp_call`` — call a tool of a connected MCP server."""
+    """mcp_call: модель видит список инструментов; не-админ только читает."""
 
     def __init__(self, ctx, state=None, emit=None):
+        tools = getattr(ctx, "mcp_tools", None) or []
+        listing = "; ".join(f"{t['server_id']}:{t['name']}" for t in tools[:40])
         super().__init__(
             "mcp_call",
-            "Вызвать инструмент MCP-сервера: {\"server_id\":\"…\",\"tool\":\"…\",\"arguments\":{}}",
+            'Вызвать инструмент MCP-сервера: {"server_id":"…","tool":"…","arguments":{}}. '
+            "Доступные (server_id:tool): " + (listing or "пусто") +
+            ". Выбери подходящий сам, у пользователя server_id не спрашивай.",
             self._call, risk="write", state=state, emit=emit)
         self.ctx = ctx
 
     def risk_for(self, payload: str) -> str:
         action = parse_json(payload)
         name = str(action.get("tool") or "").lower()
-        return "danger" if any(hint in name for hint in _MCP_WRITE_HINTS) else "write"
+        return "danger" if any(h in name for h in _MCP_WRITE_HINTS) else "write"
 
     def _call(self, payload: str) -> str:
         action = parse_json(payload)
@@ -91,6 +95,10 @@ class McpBridgeTool(BridgeTool):
         if not server_id or not tool:
             return ("[failure] Нужны server_id и tool. Пример: "
                     '{"server_id":"github","tool":"search_repositories","arguments":{"query":"x"}}')
+        # админ: без ограничений; остальные: только чтение
+        if not getattr(self.ctx, "is_admin", False) and \
+                any(h in tool.lower() for h in _MCP_WRITE_HINTS):
+            return "[failure] Инструмент меняет данные: доступен только администратору. Поиск и чтение разрешены."
         try:
             result = self.ctx.call_mcp(server_id, tool, arguments if isinstance(arguments, dict) else {})
         except Exception as error:  # noqa: BLE001

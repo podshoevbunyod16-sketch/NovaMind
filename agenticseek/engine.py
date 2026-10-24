@@ -326,20 +326,20 @@ class AgentEngine:
         return tools
 
     def _attach_shared(self, planner, agents, shared: dict) -> None:
-        """Give the tool-using agents the NovaMind tools.
-
-        The casual agent stays tool-free on purpose: it is the one executor that
-        a manipulated message can reach, so it must not be able to run anything.
-        In strict-MCP mode nothing but the MCP gateway survives.
-        """
         ctx = self.ctx
         if ctx.strict_mcp:
-            shared = {tag: tool for tag, tool in shared.items() if tag == "mcp_call"}
-            for agent in agents:
-                if agent.role != "talk":
-                    agent.tools = dict(shared)
-            self._emit({"type": "step", "icon": "🔒",
-                        "text": "Строгий режим MCP: доступен только mcp_call"})
+            only = {tag: tool for tag, tool in shared.items() if tag == "mcp_call"}
+            if only:
+                shared = only
+                for agent in agents:
+                    if agent.role != "talk":
+                        agent.tools = dict(shared)
+                self._emit({"type": "step", "icon": "🔒",
+                            "text": "Строгий режим MCP: доступен только mcp_call"})
+            else:
+                self._emit({"type": "step", "icon": "⚠️",
+                            "text": "MCP не подключён: строгий режим снят, работаю обычными "
+                                    "инструментами. Подключи сервер в Настройках → MCP"})
         for agent in agents:
             if agent.role == "talk":
                 continue

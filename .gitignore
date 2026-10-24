@@ -23,3 +23,5 @@ uploads/
 !.env.example
 mcp_connections.json
 .npm/
+
+*.bak

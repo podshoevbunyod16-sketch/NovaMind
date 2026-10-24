@@ -10,6 +10,18 @@ import skills_registry
 
 settings_bp = Blueprint("settings", __name__)
 
+
+def _admin_only():
+    """Подключать/удалять MCP-серверы может только админ (MCP_ADMIN_ONLY=0 отключает проверку)."""
+    import os
+    if os.getenv("MCP_ADMIN_ONLY", "1") == "0":
+        return None
+    from routes.terminal import is_admin
+    if not is_admin():
+        return jsonify({"error": "Только администратор"}), 403
+    return None
+
+
 @settings_bp.route('/')
 def index():
     return render_template('auth.html', google_client_id=GOOGLE_CLIENT_ID)
@@ -149,6 +161,9 @@ def settings_mcp_catalog():
 
 @settings_bp.route('/api/settings/mcp/connect', methods=['POST'])
 def settings_mcp_connect():
+    denied = _admin_only()
+    if denied:
+        return denied
     try:
         server_id = mcp_registry.save_connection(request.get_json(silent=True) or {})
         result = mcp_registry.test_connection(server_id)
@@ -163,6 +178,9 @@ def settings_mcp_connect():
 
 @settings_bp.route('/api/settings/mcp/<server_id>/test', methods=['POST'])
 def settings_mcp_test(server_id):
+    denied = _admin_only()
+    if denied:
+        return denied
     try:
         result = mcp_registry.test_connection(server_id)
         return jsonify(result), (200 if result.get("connected") else 502)
@@ -182,6 +200,9 @@ def settings_mcp_tools(server_id):
 
 @settings_bp.route('/api/settings/mcp/<server_id>', methods=['DELETE'])
 def settings_mcp_delete(server_id):
+    denied = _admin_only()
+    if denied:
+        return denied
     mcp_registry.remove_connection(server_id)
     return jsonify({"success": True})
 

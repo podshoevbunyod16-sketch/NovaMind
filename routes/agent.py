@@ -825,6 +825,8 @@ def agent_stream():
     run_id, cancel = register_run()
     media_kind = requested_media_kind(goal)
     owner = _owner_name()
+    from routes.terminal import is_admin as _is_admin
+    admin_flag = bool(_is_admin())
     memory_key = ""
     try:
         import memory as memory_module
@@ -837,6 +839,7 @@ def agent_stream():
         started = time.time()
         tools_ctx = NovaToolsContext(goal, chat_id or "", emit=lambda event: None,
                                      signed=signed, owner=owner, memory_key=memory_key)
+        tools_ctx.is_admin = admin_flag
         memory_block = ""
         if memory_key:
             try:

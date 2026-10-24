@@ -27,9 +27,17 @@ CATALOG = [
 
 def _read() -> dict[str, dict[str, Any]]:
     try:
-        return json.loads(STORE.read_text(encoding="utf-8"))
+        data = json.loads(STORE.read_text(encoding="utf-8"))
     except (FileNotFoundError, ValueError, OSError):
-        return {}
+        data = {}
+    if not data:  # запасной источник: переменная окружения (на Render диск стирается)
+        raw = os.getenv("MCP_CONNECTIONS_JSON", "")
+        if raw:
+            try:
+                data = json.loads(raw)
+            except ValueError:
+                data = {}
+    return data
 
 
 def _write(data: dict[str, dict[str, Any]]) -> None:
