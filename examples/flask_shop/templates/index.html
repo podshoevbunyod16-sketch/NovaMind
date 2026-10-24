@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+{% block title %}Каталог · Лавка{% endblock %}
+{% block content %}
+  <h1>Каталог</h1>
+  <form method="get" action="{{ url_for('index') }}" class="row" style="margin-bottom:16px">
+    <input type="search" name="q" value="{{ query }}" placeholder="Поиск по товарам">
+    <select name="category">
+      <option value="">Все категории</option>
+      {% for name in categories %}
+        <option value="{{ name }}" {% if name == category %}selected{% endif %}>{{ name }}</option>
+      {% endfor %}
+    </select>
+    <button class="btn" type="submit">Найти</button>
+  </form>
+  {% if products %}
+    <div class="grid">
+      {% for product in products %}
+        <article class="card">
+          <h3><a href="{{ url_for('product', product_id=product['id']) }}">{{ product['title'] }}</a></h3>
+          <div class="muted">{{ product['category'] }}</div>
+          <div class="price">{{ product['price'] | money }}</div>
+          <div class="muted">{{ product['description'] }}</div>
+          <form method="post" action="{{ url_for('cart_add', product_id=product['id']) }}">
+            <input type="hidden" name="next" value="{{ url_for('cart_page') }}">
+            <button class="btn" type="submit"
+                    {% if product['stock'] <= 0 %}disabled{% endif %}>
+              {% if product['stock'] > 0 %}В корзину{% else %}Нет в наличии{% endif %}
+            </button>
+          </form>
+        </article>
+      {% endfor %}
+    </div>
+  {% else %}
+    <p class="muted">Ничего не найдено. Измените запрос или категорию.</p>
+  {% endif %}
+{% endblock %}

@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block title %}Оформление · Лавка{% endblock %}
+{% block content %}
+  <h1>Оформление заказа</h1>
+  <p class="muted">К оплате: <strong>{{ total | money }}</strong></p>
+  <form method="post" action="{{ url_for('checkout') }}" class="card">
+    <label for="customer">Имя</label>
+    <input id="customer" name="customer" value="{{ form.get('customer', '') }}" required>
+    <label for="phone">Телефон</label>
+    <input id="phone" name="phone" value="{{ form.get('phone', '') }}" required>
+    <label for="address">Адрес доставки</label>
+    <textarea id="address" name="address" rows="3" required>{{ form.get('address', '') }}</textarea>
+    <p><button class="btn" type="submit">Подтвердить заказ</button></p>
+  </form>
+{% endblock %}

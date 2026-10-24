@@ -205,6 +205,9 @@ def test_denied_command_is_not_executed(admin_client, sandbox, monkeypatch):
     assert events_of(events, "confirm_result")[0]["approved"] is False
     assert events_of(events, "tool") == []
     assert "запретил" in model_text(seen, -1).lower()
+    # Отказ объяснён: иначе «🚫 Запрещено» выглядело как поломка.
+    steps = [event.get("text", "") for event in events_of(events, "step")]
+    assert any("разрешение не получено" in step for step in steps)
 
 
 def test_safe_actions_are_never_confirmed(admin_client, sandbox, monkeypatch):
@@ -227,3 +230,28 @@ def test_confirm_off_skips_the_question(admin_client, sandbox, monkeypatch):
                                       json={"message": "запусти git push origin main"}))
     assert events_of(events, "confirm") == []
     assert events_of(events, "tool")[0]["name"] == "bash"
+
+
+# ══════════════ блок bash из одних комментариев ══════════════
+
+def test_comment_only_bash_block_does_not_ask(monkeypatch):
+    """Пользователь не должен видеть «Разрешить», после которого ничего не будет."""
+    _mode(monkeypatch, "write")
+    assert policy.needs_confirmation("bash", "# в корне проекта") is False
+    assert policy.needs_confirmation("bash", "\n  \n") is False
+    assert policy.needs_confirmation("bash", "# комментарий\nls -la") is True
+
+
+def test_confirmation_card_shows_the_command_not_the_comment(monkeypatch):
+    _mode(monkeypatch, "danger")
+    record = policy.register_confirmation("bash", "# создам окружение\ngit push origin main")
+    assert record["command"] == "git push origin main"
+    assert "git push origin main" in record["description"]
+    assert "# создам окружение" not in record["command"]
+
+
+def test_always_rule_ignores_leading_comment(monkeypatch):
+    _mode(monkeypatch, "danger")
+    policy.mark_always_allowed("bash", "# шаг\ngit push origin main")
+    assert policy.needs_confirmation("bash", "git push origin main") is False
+    assert policy.needs_confirmation("bash", "rm -rf build") is True

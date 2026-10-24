@@ -21,6 +21,7 @@ import re
 import shlex
 import signal
 import subprocess
+import sys
 import threading
 import time
 import uuid
@@ -76,6 +77,35 @@ _UNQUOTED_SEMICOLON = re.compile(r"""('[^']*'|"[^"]*")|;""")
 
 # Знаки перенаправления, которые понимает песочница.
 REDIRECT_OPS = (">", ">>", "2>", "2>>", "&>")
+
+#: Программы, которые должны запускаться тем же интерпретатором, что и сервер.
+#: Иначе агент ставит пакет одним Python (`venv/bin/python`), а приложение
+#: запускает другим (`/usr/bin/python3`) и получает ModuleNotFoundError.
+_INTERPRETER_PROGRAMS = {"python", "python3", "pip", "pip3", "pytest"}
+
+
+def _server_python_enabled() -> bool:
+    return (os.getenv("TERMINAL_SERVER_PYTHON", "1") or "").strip().lower() not in (
+        "0", "false", "off", "no")
+
+
+def _with_server_interpreter(argv):
+    """`python3`/`pip`/`pytest` из песочницы → интерпретатор сервера.
+
+    Правило включается ``TERMINAL_SERVER_PYTHON=0``: тогда программа берётся
+    из PATH, как раньше.
+    """
+    if not argv or not _server_python_enabled():
+        return list(argv or [])
+    program = os.path.basename(str(argv[0] or ""))
+    if program not in _INTERPRETER_PROGRAMS:
+        return list(argv)
+    rest = list(argv[1:])
+    if program in ("python", "python3"):
+        return [sys.executable, *rest]
+    module = "pip" if program.startswith("pip") else program   # pytest
+    return [sys.executable, "-m", module, *rest]
+
 
 _run_lock = threading.Semaphore(MAX_CONCURRENT)
 
@@ -223,6 +253,18 @@ def ensure_workspace():
     return created
 
 
+def _outside_path_message(path: str) -> str:
+    """Отказ по пути: по-русски и с готовым решением.
+
+    Раньше здесь было «Path traversal запрещён» — агент и пользователь не
+    понимали, что не так с безобидным ``python -m venv /tmp/x``: песочница
+    работает только внутри рабочей папки и ждёт относительный путь.
+    """
+    return (f"Путь «{path}» не разрешён: команды выполняются только внутри рабочей "
+            f"папки ({WORKSPACE}), и только по относительным путям. "
+            "Пишите, например, «python -m venv venv» или «ls -la app.py».")
+
+
 def _validate_command_paths(segments):
     """Reject filesystem arguments that could escape the workspace."""
     network_tools = {"curl", "wget", "ping", "dig", "nslookup", "host", "ssh", "scp", "sftp", "git"}
@@ -232,7 +274,7 @@ def _validate_command_paths(segments):
                 candidate = argv[index + 1]
                 if (os.path.isabs(candidate) or candidate == ".."
                         or candidate.startswith("../") or candidate.startswith("..\\")):
-                    raise ValueError("Путь выходит за пределы рабочей папки")
+                    raise ValueError(_outside_path_message(candidate))
                 continue
             if program in network_tools and (arg.startswith(("http://", "https://", "ssh://", "git@")) or "://" in arg):
                 continue
@@ -240,14 +282,15 @@ def _validate_command_paths(segments):
                 continue
             if (os.path.isabs(arg) or arg == ".." or arg.startswith("../")
                     or arg.startswith("..\\") or "/../" in arg):
-                raise ValueError("Path traversal запрещён")
+                raise ValueError(_outside_path_message(arg))
             # Симлинк внутри рабочей папки может указывать наружу: сверяем
             # реальный путь уже существующих аргументов.
             candidate = os.path.join(WORKSPACE, arg)
             if os.path.lexists(candidate):
                 real = os.path.realpath(candidate)
                 if real != WORKSPACE and not real.startswith(WORKSPACE + os.sep):
-                    raise ValueError("Ссылка ведёт за пределы рабочей папки")
+                    raise ValueError(f"Ссылка «{arg}» ведёт за пределы рабочей папки "
+                                     f"({WORKSPACE}). Используйте обычный файл внутри неё.")
 
 
 def _tokenize(command):
@@ -528,7 +571,8 @@ def run_command(command, timeout=None, cancel=None):
 
         env = _sandbox_env()
         last = len(prepared) - 1
-        for index, (segment, program) in enumerate(prepared):
+        for index, (raw_segment, program) in enumerate(prepared):
+            segment = _with_server_interpreter(raw_segment)
             stdin = processes[-1].stdout if processes else subprocess.DEVNULL
             stdout = stdout_handle if (index == last and stdout_handle) else subprocess.PIPE
             stderr = stderr_handle if (index == last and stderr_handle) else subprocess.PIPE

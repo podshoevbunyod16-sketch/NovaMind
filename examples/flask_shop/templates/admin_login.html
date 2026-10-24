@@ -1,0 +1,11 @@
+{% extends "base.html" %}
+{% block title %}Вход в админку · Лавка{% endblock %}
+{% block content %}
+  <h1>Вход в админку</h1>
+  <form method="post" action="{{ url_for('admin_login') }}" class="card" style="max-width:360px">
+    <label for="password">Пароль</label>
+    <input id="password" name="password" type="password" required>
+    <p class="muted">По умолчанию <code>admin</code>, меняется переменной SHOP_ADMIN_PASSWORD.</p>
+    <p><button class="btn" type="submit">Войти</button></p>
+  </form>
+{% endblock %}
