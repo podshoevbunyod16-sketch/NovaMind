@@ -3,9 +3,11 @@ routes/tts.py — HTTP-API озвучки ответов (text-to-speech).
 
 Маршруты:
 
-* ``GET  /api/tts/status``   — доступна ли озвучка, какие провайдеры и голоса
-  реально настроены, текущие настройки и лимиты;
-* ``GET  /api/tts/voices``   — список голосов (можно фильтровать по провайдеру);
+* ``GET  /api/tts/status``   — доступна ли озвучка, какие провайдеры, модели и
+  голоса реально настроены, текущие настройки и лимиты;
+* ``GET  /api/tts/models``   — живой список TTS-моделей провайдера (голоса,
+  тариф, endpoint, лимит символов); ``?refresh=1`` перечитывает каталог;
+* ``GET  /api/tts/voices``   — список голосов (по провайдеру и/или модели);
 * ``GET  /api/tts/settings`` — настройки озвучки;
 * ``POST /api/tts/settings`` — сохранить настройки (единственное место хранения —
   ``runtime_settings.json`` через ``config.speech_settings``);
@@ -56,21 +58,46 @@ def _ndjson(event: dict) -> str:
 @tts_bp.route("/api/tts/status")
 def tts_status():
     """Реальное состояние озвучки — без выдуманных «подключено»."""
-    data = tts_service.status()
+    refresh = (request.args.get("refresh") or "").strip() in {"1", "true", "yes"}
+    data = tts_service.status(refresh=refresh)
     signed, _ = _signed_in()
     limit = security.tts_limiter.limit_for(signed)
     data["rate_limit"] = {"limit": limit, "window": security.tts_limiter.window()}
     return jsonify(data)
 
 
+@tts_bp.route("/api/tts/models")
+def tts_models():
+    """Список TTS-моделей провайдера — для выбора в том же окне настроек.
+
+    Модели и голоса берутся из каталога провайдера, а не из захардкоженного
+    списка: у Pollinations каталог меняется, у Groq важна модель Orpheus.
+    ``refresh=1`` — принудительно перечитать каталог (кнопка «Проверить»).
+    """
+    provider = (request.args.get("provider") or "").strip().lower()
+    refresh = (request.args.get("refresh") or "").strip() in {"1", "true", "yes"}
+    models = tts_service.model_catalog(provider, refresh=refresh,
+                                       allow_fetch=refresh or not provider)
+    catalog_error = ""
+    try:
+        import media_generation as mg
+        catalog_error = getattr(mg, "_POLL_TTS_CACHE", {}).get("error") or ""
+    except Exception:  # noqa: BLE001 — диагностика не критична
+        catalog_error = ""
+    return jsonify({"models": models, "count": len(models), "provider": provider or None,
+                    "refresh": refresh, "catalog_error": catalog_error})
+
+
 @tts_bp.route("/api/tts/voices")
 def tts_voices():
     provider = (request.args.get("provider") or "").strip().lower()
+    model_id = (request.args.get("model") or "").strip()
     lang = (request.args.get("lang") or "").strip().lower()
-    voices = tts_service.voice_catalog(provider)
+    voices = tts_service.voice_catalog(provider, model_id=model_id)
     if lang:
         voices = [item for item in voices if lang in item.get("languages", [])]
-    return jsonify({"voices": voices, "count": len(voices), "lang": lang or None})
+    return jsonify({"voices": voices, "count": len(voices), "lang": lang or None,
+                    "provider": provider or None, "model": model_id or None})
 
 
 @tts_bp.route("/api/tts/settings")

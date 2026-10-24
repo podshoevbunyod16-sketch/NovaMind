@@ -249,6 +249,8 @@
               <div>
                 <strong id="speechHeadline">Проверяю TTS-провайдера…</strong>
                 <small id="speechDetails">Запрос к серверу…</small>
+                <a class="speech-action-link" id="speechActionLink" hidden
+                   target="_blank" rel="noopener"></a>
               </div>
               <button class="outline-btn" id="refreshSpeech" type="button">↻ Проверить</button>
             </div>
@@ -256,6 +258,9 @@
             <div class="speech-grid">
               <label class="speech-field">Провайдер
                 <select id="speechProvider"><option value="">Автоматически</option></select>
+              </label>
+              <label class="speech-field">Модель TTS
+                <select id="speechModel"><option value="">По умолчанию</option></select>
               </label>
               <label class="speech-field">Голос
                 <select id="speechVoice"><option value="">По умолчанию</option></select>
@@ -273,15 +278,21 @@
               </label>
             </div>
 
+            <div class="speech-model-info" id="speechModelInfo">
+              Список моделей и голосов запрашивается у провайдера.
+            </div>
+
             <div class="speech-actions">
               <button class="refresh-btn" id="saveSpeech" type="button">Сохранить настройки озвучки</button>
+              <button class="outline-btn" id="refreshTtsModels" type="button">↻ Обновить модели</button>
               <button class="outline-btn" id="testSpeech" type="button">▶ Прослушать пример</button>
               <button class="outline-btn" id="stopSpeech" type="button">⏹ Остановить</button>
             </div>
             <p class="speech-note" id="speechNote">
-              Озвучка идёт через TTS-провайдера на сервере. Если провайдер не настроен,
-              кнопка честно переключается на браузерный синтез речи — без ключей и без
-              выдачи его за ответ модели.
+              Озвучка идёт через TTS-провайдера на сервере. Модель и голоса берутся из
+              каталога провайдера, поэтому в списке видно только то, что реально существует.
+              Если провайдер не настроен, кнопка честно переключается на браузерный синтез
+              речи — без ключей и без выдачи его за ответ модели.
             </p>
           </div>
         </div>
@@ -329,6 +340,6 @@
   <script src="/static/settings.js?v=acc2"></script>
   <script src="/static/mcp-settings.js?v=acc2"></script>
   <script src="/static/skills-settings.js?v=acc2"></script>
-  <script src="/static/speech-settings.js?v=1"></script>
+  <script src="/static/speech-settings.js?v=2"></script>
 </body>
 </html>
