@@ -21,6 +21,7 @@ import re
 import shlex
 import signal
 import subprocess
+import sys
 import threading
 import time
 import uuid
@@ -76,6 +77,35 @@ _UNQUOTED_SEMICOLON = re.compile(r"""('[^']*'|"[^"]*")|;""")
 
 # Знаки перенаправления, которые понимает песочница.
 REDIRECT_OPS = (">", ">>", "2>", "2>>", "&>")
+
+#: Программы, которые должны запускаться тем же интерпретатором, что и сервер.
+#: Иначе агент ставит пакет одним Python (`venv/bin/python`), а приложение
+#: запускает другим (`/usr/bin/python3`) и получает ModuleNotFoundError.
+_INTERPRETER_PROGRAMS = {"python", "python3", "pip", "pip3", "pytest"}
+
+
+def _server_python_enabled() -> bool:
+    return (os.getenv("TERMINAL_SERVER_PYTHON", "1") or "").strip().lower() not in (
+        "0", "false", "off", "no")
+
+
+def _with_server_interpreter(argv):
+    """`python3`/`pip`/`pytest` из песочницы → интерпретатор сервера.
+
+    Правило включается ``TERMINAL_SERVER_PYTHON=0``: тогда программа берётся
+    из PATH, как раньше.
+    """
+    if not argv or not _server_python_enabled():
+        return list(argv or [])
+    program = os.path.basename(str(argv[0] or ""))
+    if program not in _INTERPRETER_PROGRAMS:
+        return list(argv)
+    rest = list(argv[1:])
+    if program in ("python", "python3"):
+        return [sys.executable, *rest]
+    module = "pip" if program.startswith("pip") else program   # pytest
+    return [sys.executable, "-m", module, *rest]
+
 
 _run_lock = threading.Semaphore(MAX_CONCURRENT)
 
@@ -541,7 +571,8 @@ def run_command(command, timeout=None, cancel=None):
 
         env = _sandbox_env()
         last = len(prepared) - 1
-        for index, (segment, program) in enumerate(prepared):
+        for index, (raw_segment, program) in enumerate(prepared):
+            segment = _with_server_interpreter(raw_segment)
             stdin = processes[-1].stdout if processes else subprocess.DEVNULL
             stdout = stdout_handle if (index == last and stdout_handle) else subprocess.PIPE
             stderr = stderr_handle if (index == last and stderr_handle) else subprocess.PIPE

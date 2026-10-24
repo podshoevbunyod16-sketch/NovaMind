@@ -110,3 +110,22 @@ def test_redirect_inside_workspace_works(admin_client, sandbox):
     result = _run(admin_client, "echo отчёт > note.txt")
     assert result["code"] == 0
     assert (sandbox / "note.txt").read_text(encoding="utf-8").strip() == "отчёт"
+
+
+def test_sandbox_python_is_the_server_interpreter(admin_client, sandbox):
+    """`python3` в песочнице = тот же интерпретатор, что у сервера.
+
+    Иначе пакет, поставленный агентом, не виден приложению: на телефоне это
+    совпадает, а в venv — нет (ModuleNotFoundError при верном коде).
+    """
+    import sys
+    result = _run(admin_client, "python3 -c 'import sys; print(sys.executable)'")
+    assert result["code"] == 0
+    assert result["stdout"].strip() == sys.executable
+
+
+def test_server_interpreter_can_be_disabled(admin_client, sandbox, monkeypatch):
+    monkeypatch.setenv("TERMINAL_SERVER_PYTHON", "0")
+    import routes.terminal as term
+    assert term._with_server_interpreter(["python3", "-c", "1"]) == ["python3", "-c", "1"]
+    assert term._with_server_interpreter(["pip", "install", "x"]) == ["pip", "install", "x"]

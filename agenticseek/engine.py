@@ -44,6 +44,7 @@ from typing import Callable, Optional
 import database
 from agenticseek import policy
 from agenticseek.core.agent import Agent, clip, dumps, strip_unknown_blocks
+from agenticseek.core.markup import sanitize_answer
 from agenticseek.core.browser import create_browser
 from agenticseek.core.browser_agent import BrowserAgent, NO_BROWSER_TEXT
 from agenticseek.core.casual_agent import CasualAgent
@@ -399,10 +400,11 @@ class AgentEngine:
                 self._emit({"type": "step", "icon": "✅", "text": "Разрешено"})
             else:
                 # Молчаливое «Запрещено» выглядело как поломка: пользователь не
-                # понимал, что карточку нужно нажать и что окно ожидания closes.
+                # понимал, что карточку нужно нажать и что окно ожидания закрывается.
+                waited = policy.confirm_timeout()
                 self._emit({"type": "step", "icon": "🚫",
-                            "text": "Действие не выполнено: разрешение не получено "
-                                    f"(ждал {policy.confirm_timeout():.0f} c). "
+                            "text": "Действие не выполнено: разрешение не получено"
+                                    + (f" (ждал {waited:.0f} c)" if waited >= 1 else "") + ". "
                                     "Повторите запрос и нажмите «Разрешить» в карточке "
                                     "«Нужно разрешение» — она в этом же сообщении."})
             return approved
@@ -768,7 +770,9 @@ class AgentEngine:
         return ""
 
     def _finalize(self, text: str) -> str:
-        text = str(text or "").strip()
+        # Теги <bash>/<bash code_output> в ответе — не текст для пользователя:
+        # команды остаются блоками, сочинённый моделью «вывод» убирается.
+        text = sanitize_answer(str(text or "")).strip()
         if text and self.ctx.finalize is not None:
             try:
                 text = str(self.ctx.finalize(text) or "").strip()

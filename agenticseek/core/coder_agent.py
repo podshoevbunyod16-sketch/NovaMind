@@ -28,7 +28,9 @@ from agenticseek.tools.bash_interpreter import BashTool
 from agenticseek.tools.file_finder import FileFinderTool
 from agenticseek.tools.py_interpreter import PythonTool
 
-MAX_ATTEMPTS = max(1, min(int(os.getenv("AGENTICSEEK_CODER_ATTEMPTS", "4")), 10))
+#: Ходов программиста за один запрос. Сборка проекта с одной правкой требует
+#: минимум пяти (файлы → проверка → правка → проверка → ответ), поэтому 6.
+MAX_ATTEMPTS = max(1, min(int(os.getenv("AGENTICSEEK_CODER_ATTEMPTS", "6")), 12))
 _INTERACTIVE = re.compile(r"\b(input\s*\(|curses|sys\.stdin\.read|while\s+True\s*:)")
 
 

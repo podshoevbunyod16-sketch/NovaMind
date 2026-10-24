@@ -267,12 +267,55 @@ def test_bash_comments_are_stripped_but_commands_run(monkeypatch):
     assert "#" not in output
 
 
-def test_bash_comment_at_end_of_line_survives(monkeypatch):
-    """`ls -la   # список` — это команда с inline-комментарием, её выполняем."""
+def test_bash_inline_comment_is_removed(monkeypatch):
+    """`ls -la # список` — команда + комментарий; песочница запускает без него.
+
+    Песочница не использует shell (аргументы идут прямо в exec), поэтому «#» и
+    слово после него попали бы в `ls` как лишние пути, и команда падала бы.
+    """
     tool, calls = _bash_tool(monkeypatch, lambda command, timeout: {
         "code": 0, "stdout": "ok", "stderr": ""})
     tool.execute("ls -la   # список файлов")
-    assert calls[0][0] == "ls -la   # список файлов"
+    assert calls[0][0] == "ls -la"
+
+
+def test_bash_keeps_hash_inside_quotes(monkeypatch):
+    """`echo '# не комментарий'` — «#» внутри кавычек остаётся частью команды."""
+    tool, calls = _bash_tool(monkeypatch, lambda command, timeout: {
+        "code": 0, "stdout": "ok", "stderr": ""})
+    tool.execute("""echo '# не комментарий'""")
+    assert calls[0][0] == "echo '# не комментарий'"
+
+
+def test_bash_refuses_to_start_a_web_server(monkeypatch, tmp_path):
+    """`python3 app.py` с app.run() занимал бы терминал до таймаута."""
+    (tmp_path / "app.py").write_text(
+        "from flask import Flask\napp = Flask(__name__)\napp.run()\n", encoding="utf-8")
+    tool, calls = _bash_tool(monkeypatch, lambda command, timeout: {
+        "code": 0, "stdout": "", "stderr": ""})
+    tool.work_dir = str(tmp_path)
+
+    output = tool.execute("python3 app.py")
+    assert output.startswith("[failure]") and "test client" in output
+    assert calls == [], "до песочницы дело доходить не должно"
+
+    assert "test client" in tool.execute("flask run")
+    assert calls == []
+
+
+def test_bash_still_runs_scripts_that_only_use_flask(monkeypatch, tmp_path):
+    """Скрипт-проверка (test client) — обычная команда, её выполняем."""
+    (tmp_path / "smoke.py").write_text(
+        "from app import app\nprint(app.test_client().get('/').status_code)\n",
+        encoding="utf-8")
+    tool, calls = _bash_tool(monkeypatch, lambda command, timeout: {
+        "code": 0, "stdout": "200", "stderr": ""})
+    tool.work_dir = str(tmp_path)
+    assert "[success]" in tool.execute("python3 smoke.py")
+    assert calls and calls[0][0] == "python3 smoke.py"
+    # И байт-компиляция тоже не считается сервером.
+    tool.execute("python3 -m py_compile app.py")
+    assert len(calls) == 2
 
 
 def test_bash_timeout_is_reported_as_timeout(monkeypatch):
@@ -290,7 +333,7 @@ def test_bash_sigkill_explains_memory(monkeypatch):
     output = tool.execute("python -m venv venv")
     assert "SIGKILL" in output
     assert "памяти" in output
-    assert "pip install --user" in output, "на Termux должна быть подсказка про --user"
+    assert "pip install" in output, "на Termux должна быть подсказка про установку пакетов"
 
 
 def test_slow_commands_get_a_longer_timeout(monkeypatch):

@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block title %}{{ product['title'] }} · Лавка{% endblock %}
+{% block content %}
+  <p><a href="{{ url_for('index') }}">← в каталог</a></p>
+  <article class="card">
+    <h1>{{ product['title'] }}</h1>
+    <div class="muted">{{ product['category'] }}</div>
+    <div class="price">{{ product['price'] | money }}</div>
+    <p>{{ product['description'] }}</p>
+    <div class="muted">На складе: {{ product['stock'] }} шт.</div>
+    <form method="post" action="{{ url_for('cart_add', product_id=product['id']) }}" class="row">
+      <input type="number" name="quantity" value="1" min="1" max="{{ product['stock'] or 1 }}">
+      <button class="btn" type="submit" {% if product['stock'] <= 0 %}disabled{% endif %}>
+        Добавить в корзину
+      </button>
+    </form>
+  </article>
+{% endblock %}
