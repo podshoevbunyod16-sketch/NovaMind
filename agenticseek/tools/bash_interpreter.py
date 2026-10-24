@@ -39,7 +39,9 @@ from agenticseek.tools.tools import Tools
 
 DEFAULT_TIMEOUT = float(os.getenv("AGENTICSEEK_BASH_TIMEOUT", "12"))
 #: Сколько ждём команду, которая заведомо долгая (venv, установка пакетов, сборка).
-SLOW_TIMEOUT = float(os.getenv("AGENTICSEEK_SLOW_TIMEOUT", "180"))
+#: Меньше хода агента (AGENT_TIMEOUT = 180 c): иначе одна установка съедает
+#: весь ход, и модель не успевает даже ответить пользователю.
+SLOW_TIMEOUT = float(os.getenv("AGENTICSEEK_SLOW_TIMEOUT", "120"))
 #: Верхняя граница, чтобы одна команда не занимала сервер навсегда.
 MAX_TIMEOUT = float(os.getenv("AGENTICSEEK_MAX_TIMEOUT", "300"))
 MAX_LINES = 12
@@ -87,7 +89,8 @@ def _failure(line: str, result: dict, timeout: float, text: str) -> str:
             f"Вывод до остановки:\n{clip(output, 2000)}",
             "Что делать: не повторяй ту же команду — сократи её "
             "(`| head -20`, `-q`, `--without-pip`), разбей на несколько шагов "
-            "или подними лимит AGENTICSEEK_SLOW_TIMEOUT.",
+            f"или подними лимиты (AGENTICSEEK_SLOW_TIMEOUT сейчас {timeout:.0f} c, "
+            "AGENT_TIMEOUT — длина всего хода).",
         ]
         if "venv" in line.lower():
             parts.append(_VENV_HINT)

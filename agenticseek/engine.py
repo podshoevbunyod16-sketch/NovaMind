@@ -387,13 +387,24 @@ class AgentEngine:
             record = policy.register_confirmation(tool, payload)
             self._emit({"type": "confirm", "id": record["id"], "tool": record["tool"],
                         "description": record["description"], "risk": record["risk"],
-                        "command": record.get("command") or record["description"]})
+                        "command": record.get("command") or record["description"],
+                        # Карточка показывает обратный отсчёт: иначе непонятно, что
+                        # вопрос вообще закроется и через сколько.
+                        "timeout": policy.confirm_timeout()})
             self._emit({"type": "step", "icon": "🔐",
                         "text": f"Жду подтверждения: {record['description'][:160]}"})
             approved = policy.await_confirmation(record)
             self._emit({"type": "confirm_result", "id": record["id"], "approved": approved})
-            self._emit({"type": "step", "icon": "✅" if approved else "🚫",
-                        "text": "Разрешено" if approved else "Запрещено"})
+            if approved:
+                self._emit({"type": "step", "icon": "✅", "text": "Разрешено"})
+            else:
+                # Молчаливое «Запрещено» выглядело как поломка: пользователь не
+                # понимал, что карточку нужно нажать и что окно ожидания closes.
+                self._emit({"type": "step", "icon": "🚫",
+                            "text": "Действие не выполнено: разрешение не получено "
+                                    f"(ждал {policy.confirm_timeout():.0f} c). "
+                                    "Повторите запрос и нажмите «Разрешить» в карточке "
+                                    "«Нужно разрешение» — она в этом же сообщении."})
             return approved
 
         return confirm

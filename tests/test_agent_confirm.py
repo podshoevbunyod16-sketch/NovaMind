@@ -205,6 +205,9 @@ def test_denied_command_is_not_executed(admin_client, sandbox, monkeypatch):
     assert events_of(events, "confirm_result")[0]["approved"] is False
     assert events_of(events, "tool") == []
     assert "запретил" in model_text(seen, -1).lower()
+    # Отказ объяснён: иначе «🚫 Запрещено» выглядело как поломка.
+    steps = [event.get("text", "") for event in events_of(events, "step")]
+    assert any("разрешение не получено" in step for step in steps)
 
 
 def test_safe_actions_are_never_confirmed(admin_client, sandbox, monkeypatch):
