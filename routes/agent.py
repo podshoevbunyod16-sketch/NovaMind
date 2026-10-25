@@ -506,6 +506,17 @@ def _trace_entries(chunk):
         entry = {"kind": "tool", "name": event.get("name") or "tool",
                  "command": clip(str(event.get("command") or ""), 300),
                  "code": event.get("code")}
+        if event.get("label"):
+            entry["label"] = clip(str(event.get("label")), 120)
+        if event.get("detail"):
+            entry["detail"] = clip(str(event.get("detail")), 200)
+        if event.get("icon"):
+            entry["icon"] = str(event.get("icon"))[:16]
+        if event.get("status") == "error" or (event.get("code") not in (None, 0)):
+            err_msg = str(event.get("error") or event.get("output") or "").strip()
+            err_msg = re.sub(r"^\[failure\]\s*", "", err_msg, flags=re.I).strip()
+            if err_msg:
+                entry["error"] = clip(err_msg, 500)
         if event.get("path"):
             entry["path"] = str(event.get("path"))[:200]
         return [entry]

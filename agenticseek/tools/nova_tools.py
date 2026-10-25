@@ -23,16 +23,54 @@ model never sees a tool it cannot use.
 from __future__ import annotations
 
 import json
+import logging
+import re
 from typing import Any
 
 from agenticseek.core.agent import dumps
 from agenticseek.tools.tools import Tools
 
+mcp_log = logging.getLogger("novamind.mcp")
+
 MAX_PAYLOAD = 20000
+MAX_MCP_SEARCH_CALLS = 3
 
 #: MCP tool names that change state on the remote service: always confirmed.
 _MCP_WRITE_HINTS = ("delete", "remove", "create", "update", "post", "send", "write",
                     "merge", "close", "comment", "push", "upload", "invite", "archive")
+
+_GITHUB_SEARCH_TOOLS = {
+    "search_repositories", "search_code", "search_issues",
+    "search_users", "search_pull_requests",
+}
+_REPO_SEARCH_GOAL_RE = re.compile(
+    r"(?i)(?<![\wа-яё])(?:программ\w*|репозитори\w*|проект\w*|бот\w*|библиотек\w*|"
+    r"утилит\w*|приложени\w*|сервис\w*|скрипт\w*|repo|repos|repositories|projects|"
+    r"programs|bots)(?![\wа-яё])"
+)
+_EXPLICIT_CODE_GOAL_RE = re.compile(
+    r"(?i)(?:search_code|строк\w*\s+кода|внутри\s+кода|идентификатор|функци\w*\s+в\s+репозитории)"
+)
+_CODE_QUALIFIER_RE = re.compile(r"(?i)\b(?:repo:|path:|filename:|extension:|symbol:)")
+_HTTP_STATUS_RE = re.compile(r"\b(400|401|403|404|408|409|413|422|429|500|502|503|504)\b")
+_QUERY_FILLER_RE = re.compile(
+    r"(?i)(?<![\wа-яё])(?:пожалуйста|найди(?:те)?|найти|поищи(?:те)?|покажи(?:те)?|"
+    r"используй(?:те)?|через|помощью|несколько|программ\w*|репозитори\w*|на\s+github|"
+    r"на\s+гитхаб\w*|в\s+github|mcp)(?![\wа-яё])"
+)
+
+
+def _compact_github_query(raw_query: str) -> str:
+    """Укорачивает слишком длинный разговорный запрос для GitHub Search API."""
+    q = re.sub(r"\s+", " ", str(raw_query or "")).strip()
+    if len(q) <= 90:
+        return q
+    cleaned = _QUERY_FILLER_RE.sub(" ", q)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" ,.;:!?")
+    if not cleaned:
+        cleaned = q
+    words = cleaned.split()
+    return " ".join(words[:8])[:100]
 
 
 class BridgeTool(Tools):
@@ -78,18 +116,68 @@ class McpBridgeTool(BridgeTool):
             'Вызвать инструмент MCP-сервера: {"server_id":"…","tool":"…","arguments":{}}. '
             "Доступные (server_id:tool): " + (listing or "пусто") +
             ". Выбери подходящий сам, у пользователя server_id не спрашивай. "
-            "Для «найди/есть ли» используй search_repositories или search_code; "
+            "Для запросов «найди программы/репозитории/проекты/ботов» на GitHub используй "
+            'search_repositories (НЕ search_code) с коротким запросом (2–4 слова) и "minimal_output": true. '
+            "Перед первым поиском на GitHub MCP вызови get_me один раз; "
+            f"не делай больше {MAX_MCP_SEARCH_CALLS} поисковых вызовов за запуск. "
             "get_file_contents только когда путь уже известен. "
-            "Найдя 2-3 результата, сразу дай итоговый ответ.",
+            "Найдя 2–3 результата, сразу дай итоговый ответ.",
             self._call, risk="write", state=state, emit=emit)
         self.ctx = ctx
+        self.tools_catalog = tools
+        self.last_error_code: int | None = None
+        self._local_get_me_done: set[str] = set()
+        self._local_search_count: int = 0
 
     def risk_for(self, payload: str) -> str:
         action = parse_json(payload)
         name = str(action.get("tool") or "").lower()
         return "danger" if any(h in name for h in _MCP_WRITE_HINTS) else "write"
 
+    def _server_tool_names(self, server_id: str) -> set[str]:
+        return {
+            str(t.get("name") or t.get("tool") or "").strip()
+            for t in self.tools_catalog
+            if str(t.get("server_id") or t.get("server") or "").strip() == server_id
+            and (t.get("name") or t.get("tool"))
+        }
+
+    def _is_github_server(self, server_id: str, tool: str) -> bool:
+        names = self._server_tool_names(server_id)
+        if "get_me" in names or "search_repositories" in names:
+            return True
+        if "github" in server_id.lower():
+            return True
+        for entry in self.tools_catalog:
+            if str(entry.get("server_id") or "") == server_id:
+                if "github" in str(entry.get("server_name") or "").lower():
+                    return True
+        return tool in _GITHUB_SEARCH_TOOLS and (not names or "get_me" in names)
+
+    def _get_me_set(self) -> set[str]:
+        done = getattr(self.ctx, "_mcp_get_me_done", None)
+        if isinstance(done, set):
+            return done
+        try:
+            self.ctx._mcp_get_me_done = self._local_get_me_done
+            return self.ctx._mcp_get_me_done
+        except Exception:  # noqa: BLE001
+            return self._local_get_me_done
+
+    def _search_count(self) -> int:
+        return int(getattr(self.ctx, "_mcp_search_count", self._local_search_count) or 0)
+
+    def _inc_search_count(self) -> int:
+        nxt = self._search_count() + 1
+        self._local_search_count = nxt
+        try:
+            self.ctx._mcp_search_count = nxt
+        except Exception:  # noqa: BLE001
+            pass
+        return nxt
+
     def _call(self, payload: str) -> str:
+        self.last_error_code = None
         action = parse_json(payload)
         server_id = str(action.get("server_id") or action.get("server") or "").strip()
         tool = str(action.get("tool") or action.get("name") or "").strip()
@@ -99,17 +187,75 @@ class McpBridgeTool(BridgeTool):
                 arguments = json.loads(arguments)
             except ValueError:
                 arguments = {}
+        arguments = dict(arguments) if isinstance(arguments, dict) else {}
         if not server_id or not tool:
             return ("[failure] Нужны server_id и tool. Пример: "
-                    '{"server_id":"github","tool":"search_repositories","arguments":{"query":"x"}}')
+                    '{"server_id":"github","tool":"search_repositories","arguments":{"query":"x","minimal_output":true}}')
         # админ: без ограничений; остальные: только чтение
         if not getattr(self.ctx, "is_admin", False) and \
                 any(h in tool.lower() for h in _MCP_WRITE_HINTS):
             return "[failure] Инструмент меняет данные: доступен только администратору. Поиск и чтение разрешены."
+
+        # Для запросов «найди программы/репозитории/ботов» заменяем search_code на search_repositories.
+        goal = str(getattr(self.ctx, "goal", "") or "")
+        query_val = str(arguments.get("query") or arguments.get("q") or "")
+        server_names = self._server_tool_names(server_id)
+        if tool == "search_code" and not _CODE_QUALIFIER_RE.search(query_val):
+            wants_repos = bool(_REPO_SEARCH_GOAL_RE.search(goal)) or (
+                not _EXPLICIT_CODE_GOAL_RE.search(goal) and len(query_val) > 50
+            )
+            if wants_repos and (not server_names or "search_repositories" in server_names):
+                tool = "search_repositories"
+
+        if tool == "search_repositories":
+            arguments["minimal_output"] = True
+            if "query" in arguments:
+                arguments["query"] = _compact_github_query(str(arguments["query"]))
+
+        is_search = "search" in tool.lower()
+        if is_search and self._search_count() >= MAX_MCP_SEARCH_CALLS:
+            return (f"[failure] Достигнут лимит поисковых вызовов MCP за запуск "
+                    f"(не более {MAX_MCP_SEARCH_CALLS}). Дай итоговый ответ по уже найденным данным.")
+
+        done_get_me = self._get_me_set()
+        if tool == "get_me":
+            done_get_me.add(server_id)
+        elif is_search and server_id not in done_get_me and self._is_github_server(server_id, tool):
+            done_get_me.add(server_id)
+            try:
+                self.ctx.call_mcp(server_id, "get_me", {})
+                if self.state is not None:
+                    self.state.add_note(f"MCP {server_id}:get_me")
+            except Exception as pre_err:  # noqa: BLE001 — не блокируем поиск при отсутствии get_me у кастомного мока
+                pre_code = (getattr(pre_err, "status_code", None)
+                            or getattr(getattr(pre_err, "response", None), "status_code", None))
+                if not getattr(pre_err, "_mcp_logged", False):
+                    mcp_log.warning("MCP get_me перед поиском [%s] status=%s: %s",
+                                    server_id, pre_code or "error", pre_err)
+
+        if is_search:
+            self._inc_search_count()
+
         try:
-            result = self.ctx.call_mcp(server_id, tool, arguments if isinstance(arguments, dict) else {})
+            result = self.ctx.call_mcp(server_id, tool, arguments)
         except Exception as error:  # noqa: BLE001
-            return f"[failure] MCP {server_id}:{tool} не выполнен: {error}"
+            status_code = (
+                getattr(error, "status_code", None)
+                or getattr(getattr(error, "response", None), "status_code", None)
+            )
+            err_text = str(error).strip() or type(error).__name__
+            if status_code is None:
+                m = _HTTP_STATUS_RE.search(err_text)
+                if m:
+                    status_code = int(m.group(1))
+            self.last_error_code = status_code
+            if not getattr(error, "_mcp_logged", False):
+                mcp_log.error("MCP вызов не выполнен [%s:%s] status=%s: %s",
+                              server_id, tool, status_code or "error", err_text[:500])
+            prefix = f"MCP {server_id}:{tool}"
+            if status_code and str(status_code) not in err_text:
+                prefix += f" (HTTP {status_code})"
+            return f"[failure] {prefix}: {err_text}"
         if self.state is not None:
             self.state.add_note(f"MCP {server_id}:{tool}")
         return f"[success] MCP {server_id}:{tool}:\n{dumps(result)[:6000]}"

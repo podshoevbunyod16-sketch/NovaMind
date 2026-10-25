@@ -164,7 +164,20 @@ def tool_event(tag: str, payload: str, *, ok: bool = True, saved: str = "",
         label = _ERROR_LABELS.get(kind, label)
     if tag == "file_finder" and kind == "find":
         label = "Файлы не найдены" if not ok else "Нашёл файлы"
-    return {
+
+    resolved_code = (1 if not ok else 0) if code is None else code
+    if not ok and tag == "mcp_call" and resolved_code in (None, 1):
+        http_match = re.search(r"\b(400|401|403|404|408|409|413|422|429|500|502|503|504)\b",
+                               str(output or ""))
+        if http_match:
+            resolved_code = int(http_match.group(1))
+
+    clipped_output = _clip(output, 1200)
+    clean_error = ""
+    if not ok and clipped_output:
+        clean_error = re.sub(r"^\[failure\]\s*", "", clipped_output, flags=re.I).strip()
+
+    event_dict = {
         "type": "tool",
         "name": tag,
         "kind": kind,
@@ -173,10 +186,13 @@ def tool_event(tag: str, payload: str, *, ok: bool = True, saved: str = "",
         "detail": _clip(detail, 200),
         "command": command or detail,
         "files": files,
-        "code": (1 if not ok else 0) if code is None else code,
+        "code": resolved_code,
         "status": "ok" if ok else "error",
-        "output": _clip(output, 1200),
+        "output": clipped_output,
     }
+    if clean_error:
+        event_dict["error"] = clean_error
+    return event_dict
 
 
 def summary(steps: int, errors: int = 0, thought_seconds: float = 0.0) -> str:

@@ -50,6 +50,9 @@ TASK_EXAMPLES = (
     ("запусти тесты и почини упавшие", "code"),
 )
 
+ROLE_PRIORITY = ("code", "files", "web", "talk")
+MCP_ROLE_PRIORITY = ("files", "code", "web")
+
 ROLE_KEYWORDS = {
     "web": ("http://", "https://", "интернет", "в сети", "поиск", "поищи", "найди",
             "найти", "погугл", "новост", "что нового", "нового в", "погод", "курс",
@@ -64,6 +67,79 @@ ROLE_KEYWORDS = {
     "talk": ("привет", "здравствуй", "как дела", "спасибо", "кто ты", "что умеешь"),
 }
 
+#: Падежные, числовые и глагольные окончания русского языка (без словообразовательных
+#: суффиксов вроде «-ор», «-ика», «-аж», чтобы «курсор» не совпадал с «курс»,
+#: а «багаж» — с «баг»).
+_RU_ENDINGS = (
+    r"(?:а|я|у|ю|о|е|и|ы|ь|й|ом|ем|ём|ой|ей|ёй|ою|ею|ью|"
+    r"ов|ев|ёв|ам|ям|ами|ями|ах|ях|те|ть|ти)?"
+)
+
+_MARKER_OVERRIDES = {
+    "в сети": r"(?<![\wа-яё])в\s+сет[иь](?![\wа-яё])",
+    "что нового": r"(?<![\wа-яё])что\s+нового(?![\wа-яё])",
+    "нового в": r"(?<![\wа-яё])нового\s+в(?![\wа-яё])",
+    "сколько стоит": r"(?<![\wа-яё])сколько\s+сто[ия]т(?![\wа-яё])",
+    "статья": r"(?<![\wа-яё])(?:стать(?:я|и|е|ю|ей|ёй|ям|ями|ях)|статей)(?![\wа-яё])",
+    "папк": r"(?<![\wа-яё])(?:папк(?:а|и|е|у|ой|ою|ам|ами|ах)|папок)(?![\wа-яё])",
+    "рабочая папка": r"(?<![\wа-яё])рабоч(?:ая|ей|ую)\s+папк(?:а|и|е|у|ой|ою)(?![\wа-яё])",
+    "список файлов": r"(?<![\wа-яё])спис(?:ок|ка|ку|ком|ке)\s+файлов(?![\wа-яё])",
+    "забудь": r"(?<![\wа-яё])(?:забуд(?:ь|ьте)|забыть)(?![\wа-яё])",
+    "прочитай": r"(?<![\wа-яё])(?:прочит(?:ай|айте|ать)|прочти(?:те)?)(?![\wа-яё])",
+    "ошибк": r"(?<![\wа-яё])(?:ошибк(?:а|и|е|у|ой|ою|ам|ами|ах)|ошибок)(?![\wа-яё])",
+    "сборк": r"(?<![\wа-яё])(?:сборк(?:а|и|е|у|ой|ою|ам|ами|ах)|сборок)(?![\wа-яё])",
+    "напиши программ": r"(?<![\wа-яё])напи(?:ши|шите|сать)\s+программ(?:у|ы|а)?(?![\wа-яё])",
+    "рефактор": r"(?<![\wа-яё])(?:от)?рефактор(?:инг(?:а|у|ом|е)?|ить|и|ьте)?(?![\wа-яё])",
+    "погугл": r"(?<![\wа-яё])погугл(?:и|ить|ите|ил[аио]?)(?![\wа-яё])",
+    "узнай": r"(?<![\wа-яё])узна(?:й|йте|ть)(?![\wа-яё])",
+    "найди": r"(?<![\wа-яё])найд(?:и|ите|ём)(?![\wа-яё])",
+    "поищи": r"(?<![\wа-яё])поищ(?:и|ите|ем)(?![\wа-яё])",
+    "запусти": r"(?<![\wа-яё])запуст(?:и|ите|ить)(?![\wа-яё])",
+    "выполни": r"(?<![\wа-яё])выполн(?:и|ите|ить)(?![\wа-яё])",
+    "установи": r"(?<![\wа-яё])установ(?:и|ите|ить)(?![\wа-яё])",
+    "запомни": r"(?<![\wа-яё])запомн(?:и|ите|ить)(?![\wа-яё])",
+    "вспомни": r"(?<![\wа-яё])вспомн(?:и|ите|ить)(?![\wа-яё])",
+    "напомни": r"(?<![\wа-яё])напомн(?:и|ите|ить)(?![\wа-яё])",
+    "что умеешь": r"(?<![\wа-яё])что\s+(?:ты\s+)?умеешь(?![\wа-яё])",
+}
+
+
+def _compile_marker(marker: str) -> re.Pattern:
+    """Компилирует ключевое слово с границами слов и русскими окончаниями."""
+    key = marker.strip().lower()
+    if key in _MARKER_OVERRIDES:
+        return re.compile(_MARKER_OVERRIDES[key], re.I)
+    if key.startswith(("http://", "https://")):
+        return re.compile(rf"(?<![\wа-яё]){re.escape(key)}", re.I)
+    if re.fullmatch(r"[a-z0-9_.-]+", key):
+        return re.compile(rf"(?<![\wа-яё]){re.escape(key)}(?![\wа-яё])", re.I)
+    parts = []
+    for token in key.split():
+        if re.fullmatch(r"[a-z0-9_.-]+", token):
+            parts.append(re.escape(token))
+        else:
+            stem = token[:-1] if len(token) >= 4 and token[-1] in "аяоьеуюй" else token
+            parts.append(re.escape(stem) + _RU_ENDINGS)
+    return re.compile(rf"(?<![\wа-яё])" + r"\s+".join(parts) + rf"(?![\wа-яё])", re.I)
+
+
+_ROLE_PATTERNS: dict[str, tuple[tuple[str, re.Pattern], ...]] = {
+    role: tuple((marker, _compile_marker(marker)) for marker in markers)
+    for role, markers in ROLE_KEYWORDS.items()
+}
+
+#: Поисковые запросы с упоминанием MCP или GitHub маршрутизируем агенту, у
+#: которого реально подключён ``mcp_call`` (в движке это в первую очередь
+#: ``FileAgent`` / ``CoderAgent``; ``BrowserAgent`` навязывает цикл
+#: ``web_search`` → ``web_open`` и падает при ``strict_mcp`` без браузера).
+_MCP_TARGET_RE = re.compile(
+    r"(?<![\wа-яё])(?:mcp|github|гитхаб(?:а|у|ом|е)?)(?![\wа-яё])", re.I)
+_SEARCH_VERB_RE = re.compile(
+    r"(?<![\wа-яё])(?:найд(?:и|ите|ём)|найти|поищ(?:и|ите|ем)|"
+    r"поиск(?:ай|ать|а|у|ом|е)?|ищ(?:и|ите|у)|искать|погугл(?:и|ить|ите)|"
+    r"узна(?:й|йте|ть)|покаж(?:и|ите)|посмотр(?:и|ите|еть)|провер(?:ь|ьте|ить)|"
+    r"подбер(?:и|ите)|выбер(?:и|ите)|есть\s+ли|search|find|lookup)(?![\wа-яё])", re.I)
+
 #: «Создай сайт», «сделай интернет-магазин», «напиши бота» — это работа для
 #: кодера, хотя слова «сайт» и «интернет» одновременно являются маркерами
 #: веб-поиска. Без этой проверки запрос «создай интернет-магазин на Flask»
@@ -76,6 +152,8 @@ _BUILD_VERB = re.compile(
 _BUILD_OBJECT = ("сайт", "магазин", "приложени", "бот", "апи", "api", "парсер", "скрипт",
                  "сервис", "лендинг", "панел", "дашборд", "игр", "программ", "функци",
                  "класс", "модул", "flask", "django", "fastapi", "react", "telegram")
+_BUILD_OBJECT_RE = re.compile(
+    r"(?<![\wа-яё])(?:" + "|".join(re.escape(obj) for obj in _BUILD_OBJECT) + r")", re.I)
 #: Запросы-поиски внутри «создай»-фразы не превращают её в кодинг: «создай
 #: список книг, найди в интернете» — по-прежнему про поиск. Достаточно, чтобы
 #: не было глагола-действия над объектом создания.
@@ -123,7 +201,29 @@ def is_build_request(text: str) -> bool:
         return False
     if _SEARCH_ONLY.search(low):
         return False   # «найди, как создать сайт» — это поиск, а не разработка
-    return any(marker in low for marker in _BUILD_OBJECT)
+    return bool(_BUILD_OBJECT_RE.search(low))
+
+
+def is_mcp_search_request(text: str) -> bool:
+    """Есть ли в запросе ``mcp`` или ``github`` вместе с глаголом поиска."""
+    low = str(text or "").strip().lower()
+    if not low:
+        return False
+    return bool(_MCP_TARGET_RE.search(low) and _SEARCH_VERB_RE.search(low))
+
+
+def _agent_has_mcp(agent) -> bool:
+    """Проверяет, зарегистрирован ли у агента инструмент ``mcp_call``."""
+    if agent is None:
+        return False
+    if callable(getattr(agent, "all_tools", None)):
+        if "mcp_call" in (agent.all_tools() or {}):
+            return True
+    if callable(getattr(agent, "available_tools", None)):
+        if "mcp_call" in (agent.available_tools() or ()):
+            return True
+    tools = getattr(agent, "tools", None) or {}
+    return "mcp_call" in tools
 
 
 class AgentRouter:
@@ -160,6 +260,18 @@ class AgentRouter:
     def planner(self):
         return self.by_type("planner_agent")
 
+    def mcp_agent(self):
+        """Возвращает агента с ``mcp_call`` (приоритет: ``files`` → ``code`` → ``web``)."""
+        for role in MCP_ROLE_PRIORITY:
+            agent = self.by_role(role)
+            if _agent_has_mcp(agent):
+                return agent
+        for agent in self.agents:
+            if getattr(agent, "type", "") != "planner_agent" and getattr(agent, "role", "") != "talk":
+                if _agent_has_mcp(agent):
+                    return agent
+        return self.by_role("files") or self.by_role("code")
+
     def is_complex(self, text: str) -> str:
         try:
             if self.complexity(text):
@@ -182,6 +294,9 @@ class AgentRouter:
 
     def choose_role(self, text: str) -> str:
         """Pick ``web``/``files``/``code``/``talk`` for the request."""
+        if is_mcp_search_request(text):
+            agent = self.mcp_agent()
+            return agent.role if agent is not None else "files"
         if self.mode == "llm" and self.classify is not None:
             examples = "\n".join(f"- {sample!r} -> {label}" for sample, label in TASK_EXAMPLES)
             answer = self._ask(
@@ -196,11 +311,17 @@ class AgentRouter:
 
     def heuristic_role(self, text: str) -> str:
         low = str(text or "").lower()
+        if is_mcp_search_request(low):
+            agent = self.mcp_agent()
+            return agent.role if agent is not None else "files"
         if is_build_request(low):
             return "code"
         best, best_score = "talk", 0
-        for role, markers in ROLE_KEYWORDS.items():
-            score = sum(1 for marker in markers if marker in low)
+        # При равенстве положительных баллов выигрывает роль выше в ROLE_PRIORITY:
+        # code → files → web → talk.
+        for role in ROLE_PRIORITY:
+            patterns = _ROLE_PATTERNS.get(role, ())
+            score = sum(1 for _marker, pattern in patterns if pattern.search(low))
             if score > best_score:
                 best, best_score = role, score
         return best
@@ -224,6 +345,12 @@ class AgentRouter:
             if planner is not None:
                 self.last_reason = "complex → planner"
                 return planner
+
+        if is_mcp_search_request(text):
+            mcp = self.mcp_agent()
+            if mcp is not None:
+                self.last_reason = f"mcp search → {mcp.role}"
+                return mcp
 
         role = self.choose_role(text)
         agent = self.by_role(role)

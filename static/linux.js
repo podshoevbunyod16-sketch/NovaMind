@@ -31,7 +31,10 @@
     try {
       const check = await getJson('/api/session/check');
       if (check.signed_in) return;
-      await getJson('/api/session/login', { method: 'POST', body: JSON.stringify({ nick }) });
+      const login = await getJson('/api/session/login', { method: 'POST', body: JSON.stringify({ nick }) });
+      if (login && login.admin && typeof window.loadSettingsAccess === 'function') {
+        await window.loadSettingsAccess();
+      }
     } catch (_) { /* Без сессии чат всё равно работает — просто без Linux. */ }
   }
 

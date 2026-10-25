@@ -9,7 +9,7 @@
 """
 import pytest
 
-from agenticseek.router import AgentRouter, is_build_request
+from agenticseek.router import AgentRouter, is_build_request, is_mcp_search_request
 from tests.agent_helpers import answer_of, events_of, model_text, ndjson, script
 
 
@@ -57,6 +57,54 @@ def test_search_requests_still_go_to_web(text):
 
 def test_short_message_goes_to_talk():
     assert _router().select_agent("привет").role == "talk"
+
+
+ROUTER_10_CASES = [
+    # 1. Границы слов (латиница): «digital» не должен давать балл «git».
+    ("explain digital marketing strategy", "talk"),
+    # 2. Границы слов + суффикс: «курсор» не должен срабатывать как «курс».
+    ("мигает курсор на экране телефона", "talk"),
+    # 3. Русские окончания: «курсы» совпадает с «курс».
+    ("покажи свежие курсы валют в банке", "web"),
+    # 4. Русские окончания во множественном числе и падежах для files.
+    ("прочитайте файлы в рабочих папках", "files"),
+    # 5. Русские окончания для code («исправьте», «ошибки», «функциях»).
+    ("исправьте ошибки в функциях", "code"),
+    # 6. Равенство баллов (1 у code «баг», 1 у web «найди») → приоритет code.
+    ("найди баг в модуле", "code"),
+    # 7. Равенство баллов (1 у files «файл», 1 у web «найди») → приоритет files.
+    ("найди файл конфигурации", "files"),
+    # 8. Запрос с «mcp» и глаголом поиска → агент с MCP-инструментами (files).
+    ("найди через mcp подключённые инструменты", "files"),
+    # 9. Запрос с «github» и глаголом поиска → агент с MCP-инструментами (files).
+    ("поищи на github программы для анализа логов", "files"),
+    # 10. Настоящее слово «git» по границам слова → code.
+    ("проверь ветку через git в терминале", "code"),
+]
+
+
+@pytest.mark.parametrize(("phrase", "expected_role"), ROUTER_10_CASES)
+def test_router_10_phrases_expected_roles(phrase, expected_role):
+    router = AgentRouter([
+        _Agent("talk", []),
+        _Agent("code", ["bash", "python", "mcp_call"]),
+        _Agent("files", ["file_edit", "mcp_call"]),
+        _Agent("web", ["web_search", "mcp_call"]),
+    ])
+    assert router.mode == "heuristic"
+    assert router.select_agent(phrase).role == expected_role
+
+
+def test_mcp_search_picks_whichever_agent_actually_has_mcp_call():
+    """Если mcp_call зарегистрирован только у одного агента, роутер выбирает именно его."""
+    router = AgentRouter([
+        _Agent("talk", []),
+        _Agent("code", ["bash", "mcp_call"]),
+        _Agent("files", ["file_edit"]),
+        _Agent("web", ["web_search"]),
+    ])
+    assert is_mcp_search_request("найди репозитории на github") is True
+    assert router.select_agent("найди репозитории на github").role == "code"
 
 
 # ══════════════ передача хода тому, у кого есть инструмент ══════════════

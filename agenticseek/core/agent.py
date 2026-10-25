@@ -404,9 +404,10 @@ class Agent:
                 self.record(tag, payload, ok, feedback)
             except Exception:  # noqa: BLE001 — persistence must not stop the run
                 self.logger.warning("run recorder failed")
+        err_code = getattr(tool, "last_error_code", None) if not ok else None
         self.emit(tool_event(tag, str(payload), ok=ok, saved=saved,
                              command=_describe(tag, payload, saved),
-                             output=output, code=0 if ok else 1))
+                             output=output, code=0 if ok else (err_code or 1)))
         return ok, feedback
 
     def all_tools(self) -> dict:

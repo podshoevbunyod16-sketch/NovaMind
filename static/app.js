@@ -811,22 +811,36 @@ function createAssistantTurn(options = {}) {
         <span class="agent-term-label">${escapeHtml(label)}</span>
         <code class="agent-term-cmd">${escapeHtml(detail)}</code>
         <span class="agent-term-code">${escapeHtml(String(event.code ?? 0))}</span>`;
-      if (event.output) {
+      const rawOutput = String(event.error || event.output || '');
+      if (rawOutput) {
+        const cleanOutput = failed
+          ? rawOutput.replace(/^\[failure\]\s*/i, '').trim()
+          : String(event.output || '');
         const wrap = document.createElement('details');
         wrap.className = 'agent-term-outwrap';
+        if (failed) wrap.open = true;
         const head = document.createElement('summary');
-        head.textContent = failed ? 'Ошибка' : 'Вывод';
+        if (failed) {
+          const firstLine = cleanOutput.split(/\r?\n/).map((s) => s.trim()).find(Boolean) || '';
+          head.textContent = firstLine ? `Ошибка: ${firstLine.slice(0, 180)}` : 'Ошибка';
+        } else {
+          head.textContent = 'Вывод';
+        }
         const out = document.createElement('pre');
         out.className = 'agent-term-out';
-        out.textContent = String(event.output).slice(0, 1200);
+        out.textContent = cleanOutput.slice(0, 1200);
         wrap.append(head, out);
         row.appendChild(wrap);
       }
       box.querySelector('.agent-term-log').appendChild(row);
       api.refreshTermMeta(box);
       if (traceData.length < 60) {
-        traceData.push({ kind: 'tool', name: event.name || 'run', icon: icon,
-          label: label, detail: detail, code: event.code ?? 0 });
+        const traceItem = { kind: 'tool', name: event.name || 'run', icon: icon,
+          label: label, detail: detail, code: event.code ?? 0 };
+        if (failed && rawOutput) {
+          traceItem.error = rawOutput.replace(/^\[failure\]\s*/i, '').trim().slice(0, 400);
+        }
+        traceData.push(traceItem);
       }
       // Блок остаётся свёрнутым: раскрывается только по нажатию пользователя
       scrollToBottom();
@@ -2462,8 +2476,11 @@ function agentTraceHtml(steps, reasoning) {
       const label = step.label
         ? `<span class="agent-trace-label">${escapeHtml(String(step.label))}</span>` : '';
       const failed = Number(step.code) ? ' is-error' : '';
+      const errBlock = (failed && (step.error || step.output))
+        ? `<pre class="agent-term-out">${escapeHtml(String(step.error || step.output).slice(0, 500))}</pre>`
+        : '';
       return `<div class="agent-trace-row${failed}"><span class="agent-trace-ico">${escapeHtml(icon)}</span>` +
-        `${label}<code class="agent-trace-cmd">${escapeHtml(String(detail))}</code></div>`;
+        `${label}<code class="agent-trace-cmd">${escapeHtml(String(detail))}</code>${errBlock}</div>`;
     }
     if (step.kind === 'plan') {
       return `<div class="agent-trace-row"><span class="agent-trace-ico">🗺</span>` +

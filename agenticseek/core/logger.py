@@ -39,7 +39,7 @@ def get_logger(name: str = "agenticseek") -> logging.Logger:
         directory = runtime_log_dir()
         os.makedirs(directory, exist_ok=True)
         handler = logging.FileHandler(os.path.join(directory, f"{name.split('.')[-1]}.log"),
-                                      encoding="utf-8")
+                                      mode="a", encoding="utf-8")
         handler.setFormatter(logging.Formatter(
             "%(asctime)s %(levelname)s [%(name)s] %(message)s"))
         logger.addHandler(handler)
