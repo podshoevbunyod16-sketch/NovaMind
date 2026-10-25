@@ -29,6 +29,46 @@
 from __future__ import annotations
 
 import re
+import json
+
+
+def normalize_tool_json(text: str) -> str:
+    """Convert a standalone model tool envelope, not JSON examples in prose.
+
+    Only used in the execution loop, never by the display sanitizer. Delegation
+    still goes through run_tool, permissions, confirmation and sandbox checks.
+    """
+    original = str(text or "")
+    candidate = original.strip()
+    fence = re.fullmatch(r"```(?:json)?\s*\n(.*?)\n```", candidate, re.S)
+    if fence:
+        candidate = fence.group(1).strip()
+    try:
+        value = json.loads(candidate)
+    except (ValueError, TypeError):
+        return original
+    if not isinstance(value, dict):
+        return original
+    name = value.get("tool")
+    if not isinstance(name, str) or not re.fullmatch(r"[a-zA-Z_][\w-]*", name):
+        return original
+    if "tool_input" in value:
+        payload = value["tool_input"]
+    elif "arguments" in value:
+        payload = value["arguments"]
+    else:
+        return original
+    # Text-based tools expect a string, structured tools expect JSON.
+    text_keys = {"terminal": "command", "bash": "command", "shell": "command",
+                 "python": "code", "web_search": "query", "web_open": "url"}
+    if isinstance(payload, dict) and name in text_keys:
+        payload = payload.get(text_keys[name])
+    if isinstance(payload, (dict, list)):
+        payload = json.dumps(payload, ensure_ascii=False)
+    if not isinstance(payload, str) or not payload.strip() or "```" in payload:
+        return original
+    name = {"shell": "terminal"}.get(name, name)
+    return _fence(name, payload).strip()
 
 #: Тег действия: `<bash>`, `<bash code>`, `<python>`, `<py>`. Варианты с
 #: «output»/«result» в атрибутах — это сочинённый вывод, его не выполняем.

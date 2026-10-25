@@ -42,7 +42,7 @@ import time
 from agenticseek import policy
 from agenticseek.core.errors import AgenticSeekError, AgentStopped, StepLimitReached
 from agenticseek.core.logger import Logger
-from agenticseek.core.markup import normalize_answer, sanitize_answer
+from agenticseek.core.markup import normalize_answer, normalize_tool_json, sanitize_answer
 from agenticseek.timeline import (MIN_THOUGHT_SECONDS, plan_text, thought_event,
                                   tool_event)
 from agenticseek.core.memory import Memory
@@ -334,6 +334,13 @@ class Agent:
         if tool is None:
             return False, (f"[failure] Инструмент «{tag}» недоступен. "
                            f"Доступно: {', '.join(self.available_tools()) or 'ничего'}.")
+        # Resolve command aliases before confirmation: MCP writes must be checked
+        # as MCP writes, never disguised as an innocuous terminal command.
+        if tag in ("terminal", "bash") and not save_path:
+            from agenticseek.tools.terminal_commands import dispatch
+            routed = dispatch(self, payload)
+            if routed is not None:
+                return routed
         signature = self._signature(tag, payload, save_path)
         repeats = self._signatures.get(signature, 0) + 1
         self._signatures[signature] = repeats
@@ -501,7 +508,7 @@ class Agent:
             # Модель может ответить тегами <bash>…</bash> вместо блока ```bash:
             # приводим к протоколу, иначе команда не выполнится, а теги попадут
             # в ответ пользователю.
-            answer = normalize_answer(answer)
+            answer = normalize_tool_json(normalize_answer(answer))
             self.memory.push("assistant", answer)
             self.last_answer = answer
             feedback, executed = self.execute_blocks(answer)
@@ -539,7 +546,8 @@ class Agent:
     def label(self) -> str:
         return {"planner_agent": "Планировщик", "code_agent": "Программист",
                 "file_agent": "Файловый агент", "browser_agent": "Веб-агент",
-                "casual_agent": "Собеседник"}.get(self.type, "Агент")
+                "casual_agent": "Собеседник",
+                "orchestrator_agent": "Оркестратор"}.get(self.type, "Агент")
 
     def limit_answer(self) -> str:
         """Honest message when the agent ran out of turns."""
