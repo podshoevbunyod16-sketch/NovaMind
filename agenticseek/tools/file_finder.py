@@ -43,7 +43,10 @@ _SECRET_NAMES = re.compile(
 
 
 class FileFinderTool(Tools):
-    tag = "file_finder"
+    #: Поиск по файлам. Чтение вынесено в отдельный ``file_read``, поэтому в
+    #: таймлайне шаг честно называется «Нашёл файл», а не «Прочитал файл».
+    tag = "file_find"
+    aliases = ("file_finder",)
     name = "FileFinder"
     description = "Найти или прочитать файл в рабочей папке: name=... | action=read name=..."
     risk = "safe"
@@ -205,3 +208,69 @@ def parse_json_payload(payload: str) -> dict:
     except ValueError:
         return {}
     return value if isinstance(value, dict) else {}
+
+
+class FileReadTool(Tools):
+    """``file_read`` — прочитать файл рабочей папки.
+
+    Заменяет ``file_finder action=read``: в таймлайне это шаг «Прочитал файл»,
+    а не поиск. Скрытые файлы и секреты по-прежнему не читаются.
+    """
+
+    tag = "file_read"
+    name = "FileRead"
+    description = "Прочитать файл: путь строкой или {\"path\": \"app.py\"}"
+    risk = "safe"
+
+    def execute(self, payload: str) -> str:
+        params = parse_json_payload(payload) or _parse_params(payload)
+        name = (params.get("path") or params.get("name") or params.get("file")
+                or _first_line(payload))
+        name = str(name or "").strip().strip("`")
+        if not name:
+            return ("[failure] file_read: нужен путь. Пример:\n"
+                    "```file_read\ntemplates/index.html\n```")
+        if _SECRET_NAMES.search(os.path.basename(name)):
+            return f"[failure] Файл «{name}» похож на секрет — читать его запрещено."
+        # Тот же разбор, что у file_finder: поведение чтения не меняется.
+        reader = FileFinderTool()
+        try:
+            target = reader.resolve_path(name)
+        except PermissionError:
+            return f"[failure] Путь «{name}» вне рабочей папки."
+        except ValueError:
+            return "[failure] Пустое имя файла."
+        return reader._read(file_path=target, original=name)
+
+
+class FileWriteTool(Tools):
+    """``file_write:путь`` — создать файл. Содержимое пишет движок.
+
+    Блок с путём после тега сохраняется на диск до вызова инструмента, поэтому
+    здесь остаётся только подтвердить запись и подсказать, как проверить файл.
+    """
+
+    tag = "file_write"
+    name = "FileWrite"
+    description = "Создать файл: путь после тега, содержимое — тело блока"
+    risk = "write"
+
+    def execute(self, payload: str) -> str:
+        saved = str(getattr(self, "saved_path", "") or "")
+        if not saved:
+            return ("[failure] file_write: нужен путь после тега, например\n"
+                    "```file_write:app.py\nprint('hello')\n```")
+        if saved.endswith(".py"):
+            check = f"`python3 -m py_compile {saved}` или `python3 {saved}`"
+        else:
+            check = f"`head -20 {saved}`"
+        return (f"[success] Файл сохранён: {saved}\n"
+                f"Проверь его отдельной командой в блоке bash: {check}.")
+
+
+def _first_line(payload: str) -> str:
+    for line in str(payload or "").splitlines():
+        line = line.strip()
+        if line and "=" not in line:
+            return line
+    return ""

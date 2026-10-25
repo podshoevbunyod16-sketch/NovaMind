@@ -167,7 +167,7 @@ def test_full_turn_builds_the_shop_in_one_answer(admin_client, sandbox, monkeypa
 
     tools = events_of(events, "tool")
     assert all(tool["code"] == 0 for tool in tools), tools
-    assert tools[-1]["name"] == "bash" and "SMOKE OK" in tools[-1]["output"]
+    assert tools[-1]["name"] == "terminal" and "SMOKE OK" in tools[-1]["output"]
     assert "магазин собран" in answer_of(events)
 
 
@@ -208,7 +208,7 @@ def test_model_sees_its_error_and_fixes_it(admin_client, sandbox, monkeypatch):
     events = ndjson(admin_client.post("/api/agent/stream", json={"message": "создай интернет-магазин на flask"}))
     tools = events_of(events, "tool")
 
-    smoke_runs = [tool for tool in tools if tool["name"] == "bash"]
+    smoke_runs = [tool for tool in tools if tool["name"] == "terminal"]
     # Первая проверка упала и модель это увидела.
     assert len(smoke_runs) == 2, smoke_runs
     assert smoke_runs[0]["code"] == 1 and "SyntaxError" in smoke_runs[0]["output"]

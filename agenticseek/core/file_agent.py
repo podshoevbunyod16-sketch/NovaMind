@@ -30,8 +30,8 @@ class FileAgent(Agent):
     def __init__(self, name, prompt_path, provider, verbose=False):
         super().__init__(name, prompt_path, provider, verbose, None)
         self.tools = {
-            "file_finder": FileFinderTool(),
-            "bash": BashTool(),
+            "file_find": FileFinderTool(),
+            "terminal": BashTool(),
         }
         self.max_turns = MAX_STEPS
 

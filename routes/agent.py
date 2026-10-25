@@ -91,12 +91,32 @@ def is_complex_request(text: str) -> bool:
     return looks_complex(text)
 
 
-_MEDIA_VERB = re.compile(
-    r"(сгенери|сгенерь|созда|сдела|нарису|нарисую|покажи|озвуч|озвучь|прочитай\s+вслух|"
-    r"скажи\s+голосом|запиши\s+(?:голос|аудио)|спой|синтезир|"
-    r"generate|create|draw|make|render|speak|say|voice)",
-    re.I,
-)
+#: Глаголы, после которых «сгенерировать» — это ещё не медиа.
+#: Раньше здесь был широкий набор, и «покажи, что выводит код» или
+#: «создай приложение с анимацией» уходили в генерацию картинки/видео вместо
+#: работы с кодом. Теперь медиа требует ЯВНОГО объекта (картинка/видео/аудио).
+_CREATE_VERB = re.compile(r"(сгенер|созда|сдела|generate|create|make)", re.I)
+_SHOW_VERB = re.compile(r"(покажи|show|display)", re.I)
+#: «Нарисуй», «озвучь», «спой» — медиа и без существительного. Функции вида
+#: `draw_square(` и `drawSq` не считаем: это код, а не просьба нарисовать.
+_DRAW_VERB = re.compile(r"(?<![\w])(?:нарису\w*|draw|sketch|render)(?![\w(])", re.I)
+_VOICE_VERB = re.compile(r"(?<![\w])(?:озвуч\w*|прочитай\s+вслух|скажи\s+голосом|спой|"
+                         r"speak|synthesize|voice\s+over)", re.I)
+#: Запуск кода — это исполнение, а не генерация.
+_RUN_CODE = re.compile(r"(запусти|запустить|выполни|выполнить|run|execute|debug|исправь|"
+                       r"что\s+выводит|проверь\s+код)", re.I)
+_CODE_HINT = re.compile(r"(^|\s)(python|javascript|typescript|java|c\+\+|bash|shell|html|css|"
+                        r"```|import\s|def\s|class\s|print\(|console\.log|\bкод\b|скрипт)",
+                       re.I)
+_IMAGE_NOUN = re.compile(r"(изображени|картинк|фото|иллюстрац|постер|арт\b|image|picture|photo|"
+                         r"illustration|poster)", re.I)
+_VIDEO_NOUN = re.compile(r"(видео|ролик|клип|video|clip|анимаци|animation|gif)", re.I)
+_AUDIO_NOUN = re.compile(r"(аудио|озвучк|голос|музык|audio|voice|music|speech|mp3)", re.I)
+#: Признаки разработки: приложение/сайт/программа важнее слова «анимация».
+_APP_NOUN = re.compile(r"(приложени|сайт|программ|скрипт|бот[аеу]?\b|игр[уыае]?\b|сервис|"
+                       r"интерфейс|дашборд|app\b|application|website|program|script|game\b|"
+                       r"python|flask|django|tkinter|pygame|html|css|react)", re.I)
+_FENCED = re.compile(r"```.*?```", re.S)
 
 _THINK_BLOCK = re.compile(r"<think(?:ing)?>.*?</think(?:ing)?>", re.S | re.I)
 
@@ -218,28 +238,50 @@ def strict_mcp_request(text: str) -> bool:
 
 
 def requested_media_kind(text: str):
-    """Возвращает media action только для явного запроса генерации.
+    """Вид медиа, если пользователь ЯВНО просит сгенерировать картинку/видео/аудио.
 
-    Список глаголов расширен: «озвучь приветствие», «покажи закат», «сделай
-    ролик» — это такие же явные запросы, как «нарисуй». Иначе модель могла
-    ответить текстом вместо реальной генерации.
+    История двух ошибок (обе видны в журнале с телефона):
+
+    * «Запусти этот код … и покажи, что он выводит» → сгенерировалась картинка:
+      слово «покажи» считалось глаголом генерации, а внутри кода было
+      `draw_square`, что давало «картинку». Теперь код сначала вырезается, а без
+      явного объекта («картинка», «видео», «аудио») генерации нет;
+    * «создай приложение с красивой анимацией» → уходило в генерацию видео
+      из-за слова «анимация». Теперь при упоминании приложения/сайта/игры это
+      разработка, а не видео.
+
+    Возвращает ``"image"``, ``"video"``, ``"audio"`` или ``None`` (обычный ход).
     """
-    value = str(text or "").lower()
-    if not _MEDIA_VERB.search(value):
+    raw = str(text or "")
+    # Код — данные, а не просьба нарисовать: `draw_square`, `render()`, `show()`
+    # внутри него не должны превращать запрос в генерацию.
+    prose = _FENCED.sub(" ", raw)
+    if _CODE_HINT.search(prose):
+        prose = " ".join(line for line in prose.splitlines()
+                         if not re.search(r"[=;{}()\[\]]|^\s{2,}\S", line))
+    if not prose.strip():
+        prose = raw
+
+    if _RUN_CODE.search(prose) and not _IMAGE_NOUN.search(prose) \
+            and not _VIDEO_NOUN.search(prose) and not _AUDIO_NOUN.search(prose):
+        return None            # «запусти и покажи вывод» — это про код
+
+    if _VOICE_VERB.search(prose):
+        return "audio"
+    if _DRAW_VERB.search(prose):
+        return "image"
+
+    build_verb = bool(_CREATE_VERB.search(prose) or _SHOW_VERB.search(prose))
+    if not build_verb:
         return None
-    if re.search(r"(изображени|картинк|фото|иллюстрац|постер|image|picture|photo|draw)", value):
-        return "image"
-    if re.search(r"(видео|ролик|клип|video|clip|анимаци)", value):
+    if _AUDIO_NOUN.search(prose) and not _APP_NOUN.search(prose):
+        return "audio"
+    if _VIDEO_NOUN.search(prose) and not _APP_NOUN.search(prose):
         return "video"
-    if re.search(r"(аудио|озвуч|голос|музык|audio|voice|music|вслух|speech)", value):
-        return "audio"
-    # Глагол без существительного — тоже явный запрос: «нарисуй кота»,
-    # «озвучь приветствие». Без этого такие просьбы уходили в текстовый
-    # ответ, и картинка не появлялась.
-    if re.search(r"\b(нарису|нарисую|draw|render|sketch)", value):
+    if _IMAGE_NOUN.search(prose) and not _APP_NOUN.search(prose):
         return "image"
-    if re.search(r"\b(озвуч|прочитай\s+вслух|скажи\s+голосом|спой|speak|voice)", value):
-        return "audio"
+    # «Создай приложение с анимацией», «сделай сайт с красивыми картинками» —
+    # это разработка: медиа-инструмент тут только помешает.
     return None
 
 

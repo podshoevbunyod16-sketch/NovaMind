@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="ru" data-glass-theme="aurora">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#070713">
+  <title>Настройки закрыты — Khirad</title>
+  <link rel="stylesheet" href="/static/liquid-glass.css">
+  <style>
+    body { min-height: 100vh; display: grid; place-items: center; padding: 24px; }
+    .denied-card {
+      max-width: 460px; padding: 32px 28px; border-radius: 22px; text-align: center;
+      background: rgba(20, 22, 38, .72); border: 1px solid var(--glass-border, rgba(255,255,255,.14));
+      box-shadow: 0 24px 60px rgba(0, 0, 0, .45);
+    }
+    .denied-ico { font-size: 40px; line-height: 1; }
+    .denied-card h1 { font-size: 20px; margin: 14px 0 8px; }
+    .denied-card p { margin: 0 0 20px; color: var(--txt-dim, #a5a8c0); font-size: 14px; line-height: 1.55; }
+    .denied-actions { display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; }
+    .denied-actions a {
+      padding: 10px 18px; border-radius: 12px; text-decoration: none; font-size: 14px;
+      color: inherit; border: 1px solid var(--glass-border, rgba(255,255,255,.18));
+    }
+    .denied-actions a.primary { background: linear-gradient(135deg, #6c5ce7, #3f8cff); border: none; color: #fff; }
+  </style>
+</head>
+<body>
+  <div class="lg-grain" aria-hidden="true"></div>
+  <div class="lg-vignette" aria-hidden="true"></div>
+  <main class="denied-card">
+    <div class="denied-ico" aria-hidden="true">🔒</div>
+    <h1>Настройки доступны только администратору</h1>
+    <p>
+      Провайдеры, ключи, модели, MCP-серверы и навыки меняют работу всего сервера,
+      поэтому панель открыта только администратору. Чат и ИИ-агент работают как обычно.
+    </p>
+    <div class="denied-actions">
+      <a class="primary" href="/chat">Вернуться в чат</a>
+      <a href="/admin/login">Вход для администратора</a>
+    </div>
+  </main>
+</body>
+</html>

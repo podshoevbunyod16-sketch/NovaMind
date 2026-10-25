@@ -95,25 +95,30 @@ class Tools:
         if self.tag == "undefined":
             raise RuntimeError("Tool tag is not defined")
         llm_text = str(llm_text or "")
+<<<<<<< HEAD
         if self.risk == "safe":
             llm_text = normalize_tag_calls(llm_text, self.tag)
         start_tag = f"```{self.tag}"
+=======
+        opener = self._opener()
+>>>>>>> origin/arena/5fd31ee0-novamind
         end_tag = "```"
-        if start_tag not in llm_text:
+        if not opener.search(llm_text):
             return []
 
         found: list[tuple[str, "str | None"]] = []
         index = 0
         while True:
-            start = llm_text.find(start_tag, index)
-            if start == -1:
+            match = opener.search(llm_text, index)
+            if match is None:
                 break
+            start = match.start()
             line_start = llm_text.rfind("\n", 0, start) + 1
             leading = llm_text[line_start:start]
-            end = llm_text.find(end_tag, start + len(start_tag))
+            end = llm_text.find(end_tag, match.end())
             if end == -1:
                 break
-            content = llm_text[start + len(start_tag):end]
+            content = llm_text[match.end():end]
             if leading:
                 content = "\n".join(
                     line[len(leading):] if line.startswith(leading) else line
@@ -134,6 +139,16 @@ class Tools:
         self.executable_blocks_found = bool(found)
         return found
 
+    def _opener(self):
+        """Регэксп открывающего тега блока: ``self.tag`` и старые алиасы.
+
+        Модель может ответить ```bash```, хотя инструмент теперь называется
+        ``terminal``: блок обязан найтись, иначе шаг молча пропадает.
+        """
+        tags = [self.tag, *(getattr(self, "aliases", ()) or ())]
+        names = "|".join(re.escape(tag) for tag in tags)
+        return re.compile(r"```(?:" + names + r")(?![A-Za-z0-9_])")
+
     def load_exec_block(self, llm_text: str):
         """Extract this tool's blocks from a model answer (старый API).
 
@@ -145,9 +160,7 @@ class Tools:
         if self.tag == "undefined":
             raise RuntimeError("Tool tag is not defined")
         llm_text = str(llm_text or "")
-        start_tag = f"```{self.tag}"
-        end_tag = "```"
-        if start_tag not in llm_text:
+        if not self._opener().search(llm_text):
             return None, None
 
         found = self.load_blocks(llm_text)

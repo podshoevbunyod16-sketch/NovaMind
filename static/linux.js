@@ -138,6 +138,8 @@
           case 'plan': turn.plan(event); break;
           case 'step': turn.step(event.icon, event.text); break;
           case 'tool': turn.tool(event); break;
+          // «Думал 4 c» — такой же шаг таймлайна, как команда или файл.
+          case 'thought': if (turn.thought) turn.thought(event); break;
           case 'confirm': if (turn.confirm) turn.confirm(event); break;
           case 'confirm_result': if (turn.confirmResult) turn.confirmResult(event); break;
           case 'task': turn.taskChip(event.task); break;

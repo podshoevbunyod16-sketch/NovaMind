@@ -251,7 +251,7 @@ def test_agent_writes_file_then_runs_it(admin_client, monkeypatch, sandbox):
     events = ndjson(admin_client.post("/api/agent/stream",
                                       json={"message": "напиши скрипт calc.py и посчитай 6*7"}))
     tools = events_of(events, "tool")
-    assert [tool["name"] for tool in tools][:2] == ["python", "bash"]
+    assert [tool["name"] for tool in tools][:2] == ["python", "terminal"]
     assert "42" in tools[1]["output"].strip()
     assert (sandbox / "calc.py").read_text(encoding="utf-8").strip() == "print(6 * 7)"
     assert answer_of(events) == "Ответ: 42"

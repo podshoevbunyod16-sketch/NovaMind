@@ -213,7 +213,7 @@ def test_agent_greps_and_lists_tree(admin_client, sandbox, monkeypatch):
     events = _ndjson(admin_client.post("/api/agent/stream",
                                        json={"message": "найди функцию hello в коде проекта"}))
     tools = [event["name"] for event in events if event["type"] == "tool"]
-    assert tools == ["bash", "bash"]
+    assert tools == ["terminal", "terminal"]
     assert "1:def hello():" in events_of(events, "tool")[0]["output"]
     assert "main.py" in events_of(events, "tool")[1]["output"]
     assert "Нашёл функцию" in _answer(events)

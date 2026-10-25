@@ -75,7 +75,7 @@ def test_web_agent_cannot_run_bash_block(admin_client, sandbox, monkeypatch):
     steps = [event.get("text", "") for event in events_of(events, "step")]
     assert "Передаю задачу исполнителю: Программист" in steps
     tools = events_of(events, "tool")
-    assert tools and tools[0]["name"] == "bash"
+    assert tools and tools[0]["name"] == "terminal"
     assert (sandbox / "report.txt").read_text(encoding="utf-8").strip() == "made by coder"
     assert answer_of(events) == "Готово: файл создан."
 

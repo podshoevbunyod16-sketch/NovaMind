@@ -82,6 +82,24 @@ _SECRET_PATTERN = re.compile(
     r"\s*[:=]?\s*(?:bearer\s+)?[\"']?([A-Za-z0-9_\-.:/+=]{6,})")
 
 
+# ── tags ──────────────────────────────────────────────────────────────────
+#: Новые имена таймлайна → проверенные имена политики. Терминал остаётся
+#: ``bash`` для правил и опасных шаблонов: переименование шага в UI не должно
+#: открывать ``git push`` без подтверждения.
+_POLICY_ALIASES = {"terminal": "bash", "file_find": "file_finder"}
+
+
+def _tag_of(tool) -> str:
+    """Тег для логики: настройки риска и шаблоны написаны на старых именах."""
+    tag = getattr(tool, "tag", str(tool)) if not isinstance(tool, str) else tool
+    return _POLICY_ALIASES.get(tag, tag)
+
+
+def _display_tag(tool) -> str:
+    """Тег для пользователя: то, что он видит в шаге и карточке."""
+    return getattr(tool, "tag", str(tool)) if not isinstance(tool, str) else tool
+
+
 # ── risk ──────────────────────────────────────────────────────────────────
 def risk_of(tool, payload: str = "") -> str:
     """Risk level of ``tool`` with this ``payload``."""
@@ -93,14 +111,14 @@ def risk_of(tool, payload: str = "") -> str:
         except Exception:  # noqa: BLE001 — a broken risk call is a danger sign
             log.warning("risk_for failed; treating the call as dangerous")
             level = RISK_DANGER
-    tag = getattr(tool, "tag", str(tool)) if not isinstance(tool, str) else tool
+    tag = _tag_of(tool)
     text = str(payload or "")
 
     if tag == "bash":
         for pattern, _reason in _DANGER_PATTERNS:
             if re.search(pattern, text, re.I):
                 return RISK_DANGER
-    if tag == "file_finder":
+    if tag in ("file_finder", "file_read"):
         return RISK_SAFE
     if tag in ("web_search", "web_open", "recall"):
         return RISK_SAFE
@@ -122,12 +140,13 @@ def describe_action(tool, payload: str = "") -> str:
     Для bash берём первую настоящую команду: строки-комментарии не выполняются,
     и показывать их в карточке «Нужно разрешение» бессмысленно.
     """
-    tag = getattr(tool, "tag", str(tool)) if not isinstance(tool, str) else tool
+    tag = _tag_of(tool)
+    display = _display_tag(tool)
     text = redact(str(payload or "")).strip()
     first = first_command(text) if tag == "bash" else ""
     if not first:
         first = next((line.strip() for line in text.splitlines() if line.strip()), "")
-    return f"{tag}: {first[:180]}" if first else tag
+    return f"{display}: {first[:180]}" if first else display
 
 
 def redact(text: str) -> str:
@@ -177,7 +196,7 @@ def reset_cache() -> None:
 
 def action_key(tool, payload: str) -> tuple:
     """Key for "always allow this kind of action"."""
-    tag = getattr(tool, "tag", str(tool)) if not isinstance(tool, str) else tool
+    tag = _tag_of(tool)
     first = ""
     if tag == "bash":
         first = first_command(str(payload or ""))
@@ -217,7 +236,7 @@ def needs_confirmation(tool, payload: str = "") -> bool:
     mode = confirm_mode()
     if mode == "off":
         return False
-    tag = getattr(tool, "tag", str(tool)) if not isinstance(tool, str) else tool
+    tag = _tag_of(tool)
     if tag == "bash" and not executable_lines(str(payload or "")):
         # В блоке только комментарии: выполнять нечего, спрашивать не о чем.
         # Инструмент вернёт модели подсказку, а пользователь не увидит
@@ -240,8 +259,9 @@ def confirmation_needed(tool, payload: str = "") -> bool:
 
 def register_confirmation(tool, payload: str = "") -> dict:
     """Create a pending confirmation; the caller then awaits it."""
-    tag = getattr(tool, "tag", str(tool)) if not isinstance(tool, str) else tool
-    record = _Pending(uuid.uuid4().hex[:12], tag, describe_action(tool, payload),
+    tag = _tag_of(tool)
+    display = _display_tag(tool)
+    record = _Pending(uuid.uuid4().hex[:12], display, describe_action(tool, payload),
                       risk_of(tool, payload), action_key(tool, payload))
     with _LOCK:
         _PENDING[record.id] = record
@@ -254,7 +274,7 @@ def register_confirmation(tool, payload: str = "") -> dict:
                 _PENDING.pop(key, None)
     log.info("confirmation requested: %s (%s)", record.description[:160], record.risk)
     command = first_command(str(payload or "")) if tag == "bash" else ""
-    return {"id": record.id, "tool": tag, "description": record.description,
+    return {"id": record.id, "tool": display, "description": record.description,
             "risk": record.risk, "command": command or record.description}
 
 
@@ -306,8 +326,8 @@ def reset_confirmations() -> None:
 
 
 # ── untrusted content ─────────────────────────────────────────────────────
-UNTRUSTED_TOOLS = {"web_search", "web_open", "file_finder", "mcp_call", "bash", "python",
-                   "image", "audio", "video", "media"}
+UNTRUSTED_TOOLS = {"web_search", "web_open", "file_finder", "file_read", "mcp_call",
+                   "bash", "python", "image", "audio", "video", "media"}
 
 
 def wrap_untrusted(tool: str, text: str) -> str:
@@ -316,7 +336,7 @@ def wrap_untrusted(tool: str, text: str) -> str:
     The closing tag is neutralised inside the payload: a page cannot "escape"
     the wrapper and continue as if it were the system prompt.
     """
-    tag = getattr(tool, "tag", str(tool)) if not isinstance(tool, str) else tool
+    tag = _tag_of(tool)
     if tag not in UNTRUSTED_TOOLS:
         return str(text or "")
     body = str(text or "").replace("</untrusted>", "<\\/untrusted>")
