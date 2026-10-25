@@ -18,6 +18,10 @@ import threading
 import time
 from collections import deque
 
+from flask import session
+
+import config
+
 MAX_KEYS = 4096
 
 
@@ -176,3 +180,100 @@ def agent_rate_check(request, signed_in: bool, key_suffix: str = ""):
     scope = f"user:{key_suffix}" if signed_in and key_suffix else f"ip:{client_ip(request)}"
     allowed, retry_after, remaining = agent_limiter.hit(scope, limit, window)
     return allowed, retry_after, limit, remaining, scope
+
+
+def same_secret(expected, given) -> bool:
+    """Сравнение кода администратора за постоянное время.
+
+    ``secrets.compare_digest`` не принимает строки с не-ASCII символами —
+    код из кириллицы или эмодзи ронял вход с TypeError. Сравниваем байты.
+    """
+    left = str(expected or "").encode("utf-8", "replace")
+    right = str(given or "").encode("utf-8", "replace")
+    return secrets.compare_digest(left, right)
+
+
+# ── кто администратор ────────────────────────────────────────────────────
+#: Поля сессии, в которых лежит личность вошедшего человека.
+IDENTITY_KEYS = ("nova_user_email", "user_email", "nova_user_nick", "login", "username")
+
+
+def normalize_identity(value) -> str:
+    """Логин/почта в одном виде: без пробелов, кавычек и регистра."""
+    return config.clean_env_value(value).casefold()
+
+
+def admin_logins() -> set[str]:
+    """Все логины администратора: ADMIN_USER и необязательный ADMIN_EMAIL."""
+    stored = getattr(config, "ADMIN_LOGINS", None)
+    if stored:
+        return {normalize_identity(item) for item in stored if item}
+    return {normalize_identity(item) for item in
+            (getattr(config, "ADMIN_USER", ""), getattr(config, "ADMIN_EMAIL", "")) if item}
+
+
+def is_admin_identity(identity) -> bool:
+    """Совпадает ли логин/почта с администратором (без учёта регистра)."""
+    normalized = normalize_identity(identity)
+    return bool(normalized) and normalized in admin_logins()
+
+
+def session_identities() -> list[str]:
+    """Кем вошёл человек — все известные поля сессии."""
+    found = []
+    for key in IDENTITY_KEYS:
+        try:
+            value = session.get(key)
+        except RuntimeError:          # вне контекста запроса
+            return found
+        if value:
+            found.append(str(value))
+    return found
+
+
+def is_admin() -> bool:
+    """Администратор ли текущая сессия.
+
+    Админом считается либо тот, кто ввёл код на странице входа, либо человек,
+    который вошёл своим обычным логином/Google-почтой, совпадающей с
+    ``ADMIN_USER``/``ADMIN_EMAIL``. Раньше второй случай не учитывался: человек
+    со своим e-mail в ADMIN_USER входил через Google как обычный пользователь
+    и не видел ни настроек, ни MCP.
+    """
+    try:
+        if session.get("admin_logged_in"):
+            return True
+    except RuntimeError:
+        return False
+    return any(is_admin_identity(identity) for identity in session_identities())
+
+
+def grant_admin(identity: str = "", via: str = "") -> bool:
+    """Выдать права администратора, если личность совпадает с настройками."""
+    if not is_admin_identity(identity):
+        return False
+    try:
+        session["admin_logged_in"] = True
+        session["admin_username"] = session.get("admin_username") or str(identity)
+        session["admin_via"] = via or "identity"
+        session["nova_is_admin"] = True
+    except RuntimeError:
+        return False
+    return True
+
+
+def admin_state() -> dict:
+    """Короткий ответ интерфейсу: админ ли я и что делать, если нет.
+
+    Логин администратора отдаём только вошедшему человеку: гостю он не нужен,
+    а лишняя подсказка «вот чей это сервер» снаружи не нужна вовсе.
+    """
+    admin = is_admin()
+    login = getattr(config, "ADMIN_USER", "admin")
+    signed = bool(session_identities()) or admin
+    return {
+        "admin": admin,
+        "admin_via": session.get("admin_via", "") if admin else "",
+        "admin_login": login if signed else "",
+        "admin_login_is_email": "@" in login,
+    }

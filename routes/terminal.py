@@ -148,7 +148,9 @@ def is_enabled():
 
 
 def is_admin():
-    return bool(session.get("admin_logged_in"))
+    """Администратор ли сессия (вход по коду или совпадение логина/почты)."""
+    import security
+    return security.is_admin()
 
 
 def signed_in():
@@ -158,7 +160,7 @@ def signed_in():
     синхронизируется через /api/session/login. Песочница — рабочее окружение,
     поэтому доступ есть у любого вошедшего, а не только у админа.
     """
-    return bool(session.get("admin_logged_in")
+    return bool(is_admin()
                 or session.get("nova_google_login")
                 or session.get("nova_signed_in")
                 or session.get("nova_user_nick")

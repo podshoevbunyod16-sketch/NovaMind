@@ -4,6 +4,7 @@ routes/settings.py — Настройки провайдеров и моделе
 from flask import Blueprint, request, jsonify, render_template, session
 import zipfile
 from ai_providers import fetch_available_models, provider_status, PROVIDER_LABELS, MODEL_ERRORS, media_models_catalog
+import config
 from config import PROVIDERS, save_selected_model, current_provider, current_model, GOOGLE_CLIENT_ID
 import mcp_registry
 import skills_registry
@@ -14,7 +15,7 @@ settings_bp = Blueprint("settings", __name__)
 #: Что остаётся доступным без входа администратора: сами страницы чата и
 #: переключатель языка интерфейса (это настройка пользователя, а не сервера).
 OPEN_ENDPOINTS = {
-    "settings.index", "settings.chat_page", "settings.admin_login_page",
+    "settings.index", "settings.chat_page",
     "settings.get_ui_language", "settings.set_ui_language",
 }
 
@@ -26,14 +27,25 @@ def _panel_admin_only():
     Раньше ``/settings`` открывался любому вошедшему: обычный пользователь
     видел ключи провайдеров, каталог моделей, MCP-серверы и импорт навыков.
     Теперь страница и её API закрыты, а интерфейс прячет вход (см. app.js).
+
+    Отказ объясняет, кем человек вошёл и под каким логином открывается панель:
+    «Неверный логин» без подсказки — главная причина вопроса «я же админ».
     """
-    from routes.terminal import is_admin
-    if is_admin() or request.endpoint in OPEN_ENDPOINTS:
+    import security
+    if security.is_admin() or request.endpoint in OPEN_ENDPOINTS:
         return None
     if request.path.startswith("/api/"):
         return jsonify({"error": "Настройки доступны только администратору",
-                        "admin_only": True}), 403
-    return render_template("settings_denied.html"), 403
+                        "admin_only": True,
+                        "admin_login": getattr(config, "ADMIN_USER", "admin"),
+                        "admin_login_is_email": "@" in getattr(config, "ADMIN_USER", "")}), 403
+    identities = security.session_identities()
+    return render_template(
+        "settings_denied.html",
+        # Логин администратора показываем только вошедшему: гостю он не нужен.
+        admin_login=getattr(config, "ADMIN_USER", "") if identities else "",
+        ident=identities[0] if identities else "",
+    ), 403
 
 
 def _admin_only():
@@ -271,6 +283,3 @@ def set_ui_language():
     return jsonify({"success": True, "language": config.ui_language})
 
 
-@settings_bp.route('/admin/login')
-def admin_login_page():
-    return render_template('admin.html')

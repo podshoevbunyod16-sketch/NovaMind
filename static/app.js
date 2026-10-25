@@ -165,6 +165,17 @@ if (!localStorage.getItem('nova_user_nick')) {
   }
   if (isAdmin && adminLink) adminLink.style.display = 'flex';
 
+  // Код не подошёл — говорим об этом один раз и по-человечески. Молчаливый
+  // «вход обычным пользователем» и был причиной вопроса «я же администратор».
+  const loginError = localStorage.getItem('nova_login_error');
+  if (loginError) {
+    localStorage.removeItem('nova_login_error');
+    setTimeout(() => {
+      showNotification(`${loginError} Панель настроек и MCP откроются после входа `
+        + 'под логином администратора (ADMIN_USER) с кодом ADMIN_CODE.', 'warn');
+    }, 700);
+  }
+
   const googleAvatar = localStorage.getItem('nova_user_avatar');
   const avatarEl = document.querySelector('.user-avatar');
   if (googleAvatar && avatarEl) {
@@ -1992,6 +2003,10 @@ function applySettingsAccess() {
     card.title = serverAdmin ? 'Настройки AI' : 'Профиль';
     card.classList.toggle('is-settings-entry', serverAdmin);
   }
+  // «Панель управления» — тот же администраторский вход.
+  const adminLink = document.getElementById('admin-link');
+  if (adminLink) adminLink.style.display = serverAdmin ? 'flex' : 'none';
+  document.body.classList.toggle('is-admin', serverAdmin);
 }
 
 async function loadSettingsAccess() {
@@ -2013,7 +2028,9 @@ async function loadSettingsAccess() {
 
 function openSettings() {
   if (!serverAdmin) {
-    showNotification('Настройки доступны только администратору', 'warn');
+    showNotification('Настройки и MCP — только для администратора. '
+      + 'Войдите на /admin/login под логином ADMIN_USER с кодом ADMIN_CODE.',
+      'warn');
     return;
   }
   window.location.href = '/settings';

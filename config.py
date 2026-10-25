@@ -2,6 +2,7 @@
 config.py — Конфигурация NovaMind: переменные окружения, провайдеры, команды, плагины.
 """
 import os
+import re
 import secrets
 import sys
 import json
@@ -12,17 +13,79 @@ LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(level=getattr(logging, LOG_LEVEL, logging.INFO),
                     format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
-PORT = int(os.getenv("PORT", "5000"))
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
 
 # ---------- Загрузка .env ----------
-_env_path = os.path.join(os.path.dirname(__file__), ".env")
+_ENV_KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def clean_env_value(value: str) -> str:
+    """Значение из .env без кавычек и хвостового комментария.
+
+    Раньше строка разбиралась «как есть», и `ADMIN_USER="имя@example.com"` или
+    `export ADMIN_CODE=…  # код` давали переменную с кавычками/комментарием
+    внутри. Вход в админку после этого не работал, хотя пароль верный.
+    """
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if text[0] in "\"'":
+        quote = text[0]
+        end = text.find(quote, 1)
+        return text[1:end] if end != -1 else text[1:]
+    for marker in (" #", "\t#"):
+        index = text.find(marker)
+        if index != -1:
+            text = text[:index]
+            break
+    return text.strip()
+
+
+def parse_env_line(line: str):
+    """Разобрать строку .env в ``(ключ, значение)``; ``None`` — не настройка.
+
+    Поддерживаются формы, которые люди реально пишут в .env:
+    ``KEY=value``, ``KEY = value``, ``export KEY=value``, ``KEY="value"``,
+    ``KEY=value  # комментарий``.
+    """
+    text = str(line or "").strip().lstrip("\ufeff")
+    if not text or text.startswith("#") or "=" not in text:
+        return None
+    key, _, value = text.partition("=")
+    key = key.strip()
+    if key.startswith("export "):
+        key = key[len("export "):].strip()
+    if not _ENV_KEY.fullmatch(key):
+        return None
+    return key, clean_env_value(value)
+
+
+def load_env_file(path: str) -> dict:
+    """Прочитать .env в ``os.environ`` (не перетирая уже заданные переменные)."""
+    applied = {}
+    try:
+        with open(path, "r", encoding="utf-8-sig") as handle:
+            for line in handle:
+                pair = parse_env_line(line)
+                if pair is None:
+                    continue
+                key, value = pair
+                if key in os.environ:
+                    continue
+                os.environ[key] = value
+                applied[key] = value
+    except OSError:
+        return applied
+    return applied
+
+
+_env_path = os.path.join(BASE_DIR, ".env")
 if os.path.exists(_env_path):
-    with open(_env_path, "r", encoding="utf-8") as _f:
-        for _line in _f:
-            _line = _line.strip()
-            if _line and not _line.startswith("#") and "=" in _line:
-                _k, _v = _line.split("=", 1)
-                os.environ.setdefault(_k.strip(), _v.strip())
+    load_env_file(_env_path)
+
+PORT = int(os.getenv("PORT", "5000") or 5000)
 
 # ---------- Google OAuth ----------
 GOOGLE_CLIENT_ID     = os.getenv("GOOGLE_CLIENT_ID", "")
@@ -32,16 +95,64 @@ GOOGLE_REDIRECT_URI  = os.getenv("GOOGLE_REDIRECT_URI",
                                  f"{SITE_URL}/auth/google/callback")
 
 # ---------- Безопасность ----------
+# Файл с ключом подписи cookie. Раньше ключ был случайным на каждый запуск:
+# после перезапуска сервера админ «терялся» — браузер считал его вошедшим
+# (localStorage), а сервер уже нет, и настройки с MCP отвечали 403.
+SESSION_SECRET_FILE = os.getenv("SESSION_SECRET_FILE",
+                                os.path.join(BASE_DIR, ".session_secret"))
+
+
+def load_session_secret(path: str | None = None, value: str | None = None) -> str:
+    """Ключ подписи сессий: из `SESSION_SECRET` или из файла (переживает рестарт).
+
+    Один ключ на все процессы: с несколькими воркерами gunicorn сессия,
+    выданная одним, должна приниматься остальными.
+    """
+    explicit = clean_env_value(value if value is not None
+                               else os.getenv("SESSION_SECRET", ""))
+    if explicit:
+        return explicit
+    path = path or SESSION_SECRET_FILE
+    try:
+        if os.path.isfile(path):
+            with open(path, "r", encoding="utf-8") as handle:
+                saved = handle.read().strip()
+            if saved:
+                return saved
+    except OSError:
+        pass
+    secret = secrets.token_hex(32)
+    try:
+        directory = os.path.dirname(path)
+        if directory:
+            os.makedirs(directory, exist_ok=True)
+        # Права 600: ключ читает только владелец сервера.
+        handle = os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600),
+                           "w", encoding="utf-8")
+        with handle:
+            handle.write(secret)
+    except OSError:
+        logger.warning("Не удалось сохранить %s: сессии сбросятся при перезапуске", path)
+    return secret
+
+
 # Пароль администратора. Предсказуемый дефолт опасен: без ADMIN_CODE
 # в окружении генерируем случайный код и печатаем его в лог при старте —
 # войти «по умолчанию» снаружи уже нельзя.
-ADMIN_CODE        = os.getenv("ADMIN_CODE") or secrets.token_urlsafe(9)
-ADMIN_CODE_IS_DEFAULT = not bool(os.getenv("ADMIN_CODE"))
-ADMIN_SESSION_KEY = os.getenv("SESSION_SECRET") or os.urandom(24).hex()
-# Логин и код администратора. ADMIN_USER можно переопределить в .env,
-# иначе вход идёт под именем admin с кодом ADMIN_CODE.
-ADMIN_USER        = os.getenv("ADMIN_USER", "admin").strip() or "admin"
+_admin_code_env = clean_env_value(os.getenv("ADMIN_CODE", ""))
+ADMIN_CODE        = _admin_code_env or secrets.token_urlsafe(9)
+ADMIN_CODE_IS_DEFAULT = not bool(_admin_code_env)
+ADMIN_SESSION_KEY = load_session_secret()
+
+# Логин администратора. Это может быть имя или e-mail (например, адрес
+# Google-аккаунта): человек входит тем же логином, каким пользуется в чате.
+ADMIN_USER        = (clean_env_value(os.getenv("ADMIN_USER", ""))
+                     or clean_env_value(os.getenv("ADMIN_LOGIN", "")) or "admin")
+# Необязательный второй логин — почта, если ADMIN_USER задан ником.
+ADMIN_EMAIL       = clean_env_value(os.getenv("ADMIN_EMAIL", ""))
 ADMIN_CREDENTIALS = {ADMIN_USER: ADMIN_CODE}
+#: Все логины администратора без регистра (вход и Google-почта сравниваются так).
+ADMIN_LOGINS      = frozenset(item.casefold() for item in (ADMIN_USER, ADMIN_EMAIL) if item)
 
 # ---------- Провайдеры AI ----------
 PROVIDERS = {

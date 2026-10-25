@@ -2,6 +2,7 @@
 routes/admin.py — Административные маршруты
 """
 from flask import Blueprint, request, jsonify, session, render_template, redirect
+import secrets
 import subprocess
 import json
 import os
@@ -9,9 +10,11 @@ import requests
 from urllib.parse import quote
 import config
 import groq_rotation
+import security
 from groq_rotation import GROQ_KEYS, GROQ_KEY_COOLDOWN, get_groq_key_status
-from config import (ADMIN_CREDENTIALS, PROVIDERS, GOOGLE_CLIENT_ID,
-                    GOOGLE_CLIENT_SECRET, GOOGLE_REDIRECT_URI)
+from config import (ADMIN_CREDENTIALS, ADMIN_CODE, ADMIN_EMAIL, ADMIN_USER,
+                    PROVIDERS, GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET,
+                    GOOGLE_REDIRECT_URI)
 
 # Папка с сохранённым кодом лежит в корне проекта (а не в routes/) — как и generated_*
 SAVED_CODES_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "saved_codes")
@@ -20,7 +23,10 @@ admin_bp = Blueprint("admin", __name__)
 
 @admin_bp.route('/admin/login')
 def admin_login_page():
-    return render_template('admin.html')
+    # Подсказываем логин администратора: если ADMIN_USER — это e-mail, люди
+    # по привычке пишут «admin» и получают «Неверный логин».
+    return render_template('admin.html', admin_user=ADMIN_USER,
+                           admin_user_is_email='@' in ADMIN_USER)
 
 # ========== GOOGLE OAUTH ==========
 
@@ -65,7 +71,11 @@ def auth_google_callback():
         session['nova_user_email'] = email
         session['nova_user_avatar'] = picture
         session['nova_google_login'] = True
-        session['nova_is_admin'] = False
+        # Владелец сервера входит своим обычным логином/почтой — сразу админ:
+        # раньше здесь жёстко писалось False, и он оставался «обычным» даже
+        # когда его e-mail указан в ADMIN_USER/ADMIN_EMAIL.
+        session['nova_is_admin'] = security.is_admin_identity(email)
+        security.grant_admin(email, via='google')
 
         return redirect(f'/chat?nick={quote(nick)}&email={quote(email)}')
     except Exception as e:
@@ -99,15 +109,33 @@ def admin_login():
         response.headers['Retry-After'] = str(retry_after)
         return response, 429
 
-    if username not in ADMIN_CREDENTIALS or ADMIN_CREDENTIALS[username] != code:
+    # Логин сравниваем без учёта регистра и пробелов: «Admin», «admin@…» и
+    # «Admin@…» — один и тот же человек, а не «Неверный логин».
+    matched = ''
+    for login_name in ADMIN_CREDENTIALS:
+        if security.normalize_identity(login_name) == security.normalize_identity(username):
+            matched = login_name
+            break
+
+    if not matched or not security.same_secret(ADMIN_CREDENTIALS[matched], code):
         security.login_limiter.fail(ip_key, user_key)
-        error = 'Неверный логин' if username not in ADMIN_CREDENTIALS else 'Неверный код'
-        return jsonify({'success': False, 'error': error})
+        if not matched:
+            # Самая частая причина: ADMIN_USER — это e-mail, а форма входа
+            # подписана «Логин» и в неё пишут «admin». Говорим об этом прямо,
+            # не раскрывая сам код.
+            hint = ADMIN_USER if "@" in ADMIN_USER else "тот, что в ADMIN_USER"
+            error = f'Неверный логин. Для входа используйте логин из ADMIN_USER ({hint}).'
+        else:
+            error = 'Неверный код (ADMIN_CODE в .env)'
+        return jsonify({'success': False, 'error': error,
+                        'admin_login_is_email': '@' in ADMIN_USER})
 
     security.login_limiter.succeed(ip_key, user_key)
     session['admin_logged_in'] = True
-    session['admin_username'] = username
-    return jsonify({'success': True, 'username': username})
+    session['admin_username'] = matched
+    session['admin_via'] = 'code'
+    session['nova_is_admin'] = True
+    return jsonify({'success': True, 'username': matched})
 
 @admin_bp.route('/api/session/login', methods=['POST'])
 def session_login():
@@ -123,19 +151,28 @@ def session_login():
         return jsonify({'success': False, 'error': 'Пустой ник'}), 400
     session['nova_user_nick'] = nick
     session['nova_signed_in'] = True
-    return jsonify({'success': True, 'nick': nick})
+    email = str(data.get('email') or '').strip()[:180]
+    if email:
+        session['nova_user_email'] = email
+    # Вошёл по нику, но ник/почта совпали с администратором — он админ.
+    granted = security.grant_admin(nick, via='nick')
+    if email and not granted:
+        granted = security.grant_admin(email, via='nick')
+    return jsonify({'success': True, 'nick': nick, 'admin': granted or security.is_admin()})
 
 
 @admin_bp.route('/api/session/check')
 def session_check():
     """Кто вошёл — интерфейсу нужно знать, открывать ли рабочую папку."""
-    return jsonify({
+    data = {
         'signed_in': bool(session.get('admin_logged_in') or session.get('nova_google_login')
                           or session.get('nova_signed_in') or session.get('nova_user_nick')
                           or session.get('username')),
         'nick': session.get('admin_username') or session.get('nova_user_nick') or '',
-        'admin': bool(session.get('admin_logged_in')),
-    })
+        'email': session.get('nova_user_email') or '',
+    }
+    data.update(security.admin_state())
+    return jsonify(data)
 
 
 @admin_bp.route('/api/session/logout', methods=['POST'])
@@ -152,11 +189,58 @@ def admin_logout():
 
 @admin_bp.route('/api/admin/check')
 def admin_check():
-    if session.get('admin_logged_in'):
-        return jsonify({'logged_in': True, 'username': session.get('admin_username', 'admin')})
-    return jsonify({'logged_in': False})
+    if security.is_admin():
+        return jsonify({'logged_in': True,
+                        'username': session.get('admin_username')
+                        or session.get('nova_user_email')
+                        or session.get('nova_user_nick') or 'admin'})
+    return jsonify({'logged_in': False, 'admin_login_is_email': '@' in ADMIN_USER})
 
 # ========== ЧАТ ==========# ========== АДМИН API ==========
+
+@admin_bp.route('/api/admin/access')
+def admin_access():
+    """Почему та или иная функция недоступна — короткий честный разбор.
+
+    Вопрос «я админ, но нет настроек и MCP» почти всегда про одно из четырёх:
+    вход выполнен не тем логином; панель выключена настройкой; MCP-серверы не
+    подключены; песочница/агент выключены в .env. Здесь это видно по пунктам.
+    """
+    import security
+    import mcp_registry
+    from routes import agent as agent_routes
+    from routes import terminal as terminal_routes
+
+    if not security.is_admin():
+        # Логин администратора подсказываем только вошедшему человеку.
+        signed = bool(security.session_identities())
+        return jsonify({"admin": False, "error": "Только администратор",
+                        "admin_login": ADMIN_USER if signed else ""}), 403
+    try:
+        mcp_servers = len(mcp_registry.connected_tools() or [])
+    except Exception:  # noqa: BLE001 — диагностика не должна падать
+        mcp_servers = 0
+    provider, model, _ = __import__("ai_providers").resolve_target()
+    try:
+        provider_ready = bool(config.has_credentials(provider)) or provider == "local_demo"
+    except Exception:  # noqa: BLE001
+        provider_ready = False
+    return jsonify({
+        "admin": True,
+        "signed_in_as": security.session_identities(),
+        "admin_login": ADMIN_USER,
+        "settings_panel": "доступна",
+        "mcp": {"servers_connected": mcp_servers,
+                "hint": "Подключите сервер в Настройках → MCP" if not mcp_servers else ""},
+        "sandbox": {"enabled": terminal_routes.is_enabled(),
+                    "hint": "" if terminal_routes.is_enabled()
+                            else "TERMINAL_ENABLED=1 в .env и перезапуск"},
+        "agent": {"enabled": bool(agent_routes.is_enabled()),
+                  "hint": "" if agent_routes.is_enabled()
+                          else "AGENT_ENABLED=1 в .env и перезапуск"},
+        "provider": {"id": provider, "model": model, "configured": provider_ready},
+    })
+
 
 @admin_bp.route('/api/admin/stats')
 def admin_stats():
