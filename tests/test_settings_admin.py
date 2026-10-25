@@ -70,6 +70,6 @@ def test_settings_links_are_hidden_for_non_admins():
 
     app_js = (root / "static" / "app.js").read_text(encoding="utf-8")
     assert "function applySettingsAccess" in app_js
-    assert "Настройки доступны только администратору" in app_js
+    assert "только для администратора" in app_js
     # Права берём у сервера, а не только из localStorage.
     assert "/api/session/check" in app_js

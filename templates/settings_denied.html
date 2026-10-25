@@ -9,19 +9,33 @@
   <style>
     body { min-height: 100vh; display: grid; place-items: center; padding: 24px; }
     .denied-card {
-      max-width: 460px; padding: 32px 28px; border-radius: 22px; text-align: center;
+      max-width: 470px; padding: 32px 28px; border-radius: 22px;
       background: rgba(20, 22, 38, .72); border: 1px solid var(--glass-border, rgba(255,255,255,.14));
       box-shadow: 0 24px 60px rgba(0, 0, 0, .45);
     }
-    .denied-ico { font-size: 40px; line-height: 1; }
-    .denied-card h1 { font-size: 20px; margin: 14px 0 8px; }
-    .denied-card p { margin: 0 0 20px; color: var(--txt-dim, #a5a8c0); font-size: 14px; line-height: 1.55; }
+    .denied-ico { font-size: 40px; line-height: 1; text-align: center; }
+    .denied-card h1 { font-size: 20px; margin: 14px 0 8px; text-align: center; }
+    .denied-card p { margin: 0 0 16px; color: var(--txt-dim, #a5a8c0); font-size: 14px; line-height: 1.55; }
+    .who { font-size: 12px; color: var(--txt-dim, #a5a8c0); margin: 0 0 14px; line-height: 1.5; }
+    .who b { color: var(--txt, #fff); font-weight: 600; }
+    .login { display: grid; gap: 8px; margin: 0 0 14px; }
+    .login label { font-size: 12px; color: var(--txt-dim, #a5a8c0); }
+    .login input {
+      width: 100%; padding: 11px 13px; border-radius: 12px; font-size: 14px; color: var(--txt, #fff);
+      background: rgba(0, 0, 0, .28); border: 1px solid var(--glass-border, rgba(255,255,255,.18));
+    }
+    .login input:focus { outline: none; border-color: #6c5ce7; }
+    .login button {
+      padding: 11px 16px; border-radius: 12px; border: none; cursor: pointer; font-size: 14px;
+      color: #fff; background: linear-gradient(135deg, #6c5ce7, #3f8cff);
+    }
+    .login button:disabled { opacity: .6; cursor: default; }
+    .login-error { min-height: 18px; font-size: 12.5px; color: #ff8f8f; }
     .denied-actions { display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; }
     .denied-actions a {
       padding: 10px 18px; border-radius: 12px; text-decoration: none; font-size: 14px;
       color: inherit; border: 1px solid var(--glass-border, rgba(255,255,255,.18));
     }
-    .denied-actions a.primary { background: linear-gradient(135deg, #6c5ce7, #3f8cff); border: none; color: #fff; }
   </style>
 </head>
 <body>
@@ -34,10 +48,59 @@
       Провайдеры, ключи, модели, MCP-серверы и навыки меняют работу всего сервера,
       поэтому панель открыта только администратору. Чат и ИИ-агент работают как обычно.
     </p>
+
+    {% if ident %}
+      <p class="who">Вы вошли как <b>{{ ident }}</b>.
+        {% if admin_login %}Администратор — <b>{{ admin_login }}</b>.{% endif %}
+        Войдите под этим логином, чтобы открыть панель.</p>
+    {% endif %}
+
+    <form class="login" id="adminLogin" autocomplete="off">
+      <label for="adminCode">Код администратора (ADMIN_CODE из .env)</label>
+      <input id="adminCode" type="password" name="code" placeholder="••••••••" required>
+      <button type="submit" id="adminLoginBtn">Войти как администратор</button>
+      <div class="login-error" id="adminLoginError" role="status"></div>
+    </form>
+
     <div class="denied-actions">
       <a class="primary" href="/chat">Вернуться в чат</a>
-      <a href="/admin/login">Вход для администратора</a>
+      <a href="/admin/login">Панель управления</a>
     </div>
   </main>
+  <script>
+    (function () {
+      var form = document.getElementById('adminLogin');
+      var input = document.getElementById('adminCode');
+      var button = document.getElementById('adminLoginBtn');
+      var error = document.getElementById('adminLoginError');
+      if (!form) return;
+      form.addEventListener('submit', function (event) {
+        event.preventDefault();
+        var code = (input.value || '').trim();
+        if (!code) { error.textContent = 'Введите код'; return; }
+        button.disabled = true;
+        error.textContent = '';
+        fetch('/api/admin/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ username: {{ (admin_login or 'admin')|tojson }}, code: code }),
+        }).then(function (response) {
+          return response.json().catch(function () { return {}; })
+            .then(function (data) { return { ok: response.ok, data: data }; });
+        }).then(function (result) {
+          if (!result.ok || !result.data.success) {
+            button.disabled = false;
+            error.textContent = result.data.error || 'Код не подошёл';
+            return;
+          }
+          try { localStorage.setItem('nova_is_admin', 'true'); } catch (e) {}
+          window.location.reload();
+        }).catch(function () {
+          button.disabled = false;
+          error.textContent = 'Нет связи с сервером';
+        });
+      });
+    })();
+  </script>
 </body>
 </html>

@@ -321,7 +321,13 @@ const dom = new JSDOM(html, {
       const json = (data) => ({ ok: true, status: 200, async json() { return data; }, async text() { return JSON.stringify(data); } });
       if (path.startsWith('/api/auto_search_stream')) return streamResponse(SEARCH_STREAM);
       if (path.startsWith('/send_stream')) { mock.sendStreamCalls += 1; return streamResponse(CHAT_STREAM); }
-      if (path.startsWith('/api/session/check')) return json({ signed_in: false, nick: '', admin: false });
+      if (path.startsWith('/api/session/check')) {
+        // Права администратора проверяются по ответу сервера, а не по localStorage.
+        return json({ signed_in: Boolean(mock.signedIn), nick: mock.signedIn ? 'Smoke' : '',
+                      admin: Boolean(mock.admin),
+                      admin_login: mock.admin ? 'owner@example.com' : '',
+                      admin_login_is_email: true });
+      }
       if (path.startsWith('/api/session/login')) {
         mock.sessionLogins.push(JSON.parse(options.body || '{}').nick);
         return json({ success: true });
@@ -679,6 +685,43 @@ check('отказ объясняет, что панель только для а
 const guestApi = await fetch(BASE + '/api/settings/providers');
 check('и API настроек закрыт обычному пользователю',
   guestApi.status === 403 && (await guestApi.json()).admin_only === true);
+
+// Страница отказа должна давать выход: поле для кода администратора,
+// которое сразу отправляет POST /api/admin/login и перезагружает страницу.
+const deniedHtml = await (await fetch(BASE + '/settings')).text();
+const deniedCalls = [];
+let deniedReload = false;
+const deniedConsole = new VirtualConsole();
+deniedConsole.on('jsdomError', (error) => {
+  // jsdom не умеет навигацию — считаем это подтверждением reload()
+  if (/navigation/i.test(error.message)) deniedReload = true;
+});
+const deniedDom = new JSDOM(deniedHtml, {
+  url: BASE + '/settings',
+  runScripts: 'dangerously',
+  virtualConsole: deniedConsole,
+  beforeParse(win) {
+    win.fetch = async (url, options = {}) => {
+      deniedCalls.push({ url: String(url), body: JSON.parse(options.body || '{}') });
+      return { ok: true, status: 200, async json() { return { success: true }; } };
+    };
+  },
+});
+const deniedDoc = deniedDom.window.document;
+check('на странице отказа есть поле для кода администратора',
+  Boolean(deniedDoc.getElementById('adminCode'))
+  && deniedDoc.getElementById('adminLoginBtn')?.textContent.includes('Войти'));
+deniedDoc.getElementById('adminCode').value = 'code';
+deniedDoc.getElementById('adminLogin').dispatchEvent(
+  new deniedDom.window.Event('submit', { bubbles: true, cancelable: true }));
+await new Promise((resolve) => setTimeout(resolve, 150));
+check('вход со страницы отказа отправляет логин ADMIN_USER и код',
+  deniedCalls.length === 1 && deniedCalls[0].url.includes('/api/admin/login')
+  && deniedCalls[0].body.code === 'code' && Boolean(deniedCalls[0].body.username),
+  JSON.stringify(deniedCalls));
+check('после входа страница перезагружается и права сохраняются',
+  deniedReload && deniedDom.window.localStorage.getItem('nova_is_admin') === 'true');
+deniedDom.window.close();
 
 const settingsResponse = adminCookie
   ? await fetch(BASE + '/settings', { headers: { Cookie: adminCookie } })
@@ -1215,6 +1258,24 @@ check('пункт «Настройки» не предлагается в ком
   window.closeCmdk();
   return !labels.some((text) => text.includes('Настройки ИИ'));
 })());
+check('клик по настройкам без прав объясняет, что нужен администратор', (() => {
+  const before = window.location.href;
+  window.openSettings();
+  const toast = [...document.querySelectorAll('#toastStack .lg-toast')]
+    .map((el) => el.textContent || '').join(' | ');
+  return window.location.href === before && /администратор/i.test(toast);
+})());
+mock.admin = true;
+await window.loadSettingsAccess();
+check('сервер подтвердил администратора — кнопка настроек появилась',
+  document.getElementById('btnSettings').hidden === false);
+check('ссылка на панель управления видна администратору',
+  document.getElementById('admin-link').style.display === 'flex');
+mock.admin = false;
+await window.loadSettingsAccess();
+check('без прав кнопка снова скрыта',
+  document.getElementById('btnSettings').hidden === true
+  && document.getElementById('admin-link').style.display === 'none');
 check('нет кнопки агента', !document.getElementById('btnAgent'));
 check('нет кнопки Linux-окружения', !document.getElementById('btnLinux'));
 check('нет кнопки смены темы', !document.getElementById('btnTheme'));

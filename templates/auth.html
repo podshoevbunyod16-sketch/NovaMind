@@ -387,7 +387,16 @@
             input.type = input.type === 'password' ? 'text' : 'password';
         }
 
-        async function handleLogin() {
+        /**
+         * Вход по нику и коду.
+         *
+         * Администратор входит своим логином (ADMIN_USER — это может быть
+         * e-mail) и кодом ADMIN_CODE. Раньше здесь всегда отправлялся логин
+         * «admin»: если в ADMIN_USER указана почта, вход в панель не работал
+         * даже с верным кодом, и человек молча попадал в чат «обычным».
+         */
+        async function handleLogin(options) {
+            const quiet = Boolean(options && options.quiet);
             const nick = document.getElementById('loginNick').value.trim();
             const code = document.getElementById('loginCode').value.trim();
             const errorEl = document.getElementById('loginError');
@@ -399,19 +408,35 @@
 
             localStorage.setItem('nova_user_nick', nick);
 
+            let admin = false;
+            let reason = '';
             try {
                 const resp = await fetch('/api/admin/login', {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({username: 'admin', code: code})
+                    body: JSON.stringify({username: nick, code: code})
                 });
                 const data = await resp.json();
-                localStorage.setItem('nova_is_admin', data.success ? 'true' : 'false');
-                window.location.href = '/chat';
+                admin = Boolean(data && data.success);
+                reason = (data && data.error) || '';
             } catch (e) {
-                localStorage.setItem('nova_is_admin', 'false');
-                window.location.href = '/chat';
+                reason = 'нет связи с сервером';
             }
+
+            localStorage.setItem('nova_is_admin', admin ? 'true' : 'false');
+            if (admin) {
+                localStorage.removeItem('nova_login_error');
+            } else if (reason && !quiet) {
+                // Не молчим: человек должен знать, что вошёл как обычный
+                // пользователь и что панель настроек ему не откроется.
+                // Быстрый вход «гостем» — намеренно без кода, там молчим.
+                localStorage.setItem('nova_login_error', reason);
+            }
+
+            // Серверная сессия нужна в любом случае: по ней открываются
+            // рабочая папка, агент и права администратора (если логин совпал).
+            syncServerSession(nick);
+            window.location.href = '/chat';
         }
 
         function handleRegister() {
@@ -446,7 +471,7 @@
         function quickLogin(type) {
             document.getElementById('loginNick').value = type + '_User';
             document.getElementById('loginCode').value = type.toLowerCase() + '_' + Date.now();
-            handleLogin();
+            handleLogin({quiet: true});
         }
     </script>
 </body>

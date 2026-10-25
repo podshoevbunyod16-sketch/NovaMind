@@ -215,6 +215,12 @@ def _looks_complete_answer(text):
     return True
 
 
+def _admin_now() -> bool:
+    """Администратор ли текущая сессия — одна проверка на весь сервер."""
+    import security
+    return security.is_admin()
+
+
 def is_enabled():
     """Агент включён по умолчанию.
 
@@ -703,7 +709,7 @@ def agent_status():
         "timeout": AGENT_TIMEOUT,
         "confirm_mode": policy.confirm_mode(),
         "user": signed_in(),
-        "admin": bool(session.get("admin_logged_in")),
+        "admin": _admin_now(),
         "hint": ("" if enabled
                  else "Включите AGENT_ENABLED=1 в .env и перезапустите сервер"),
         "workspace_hint": ("" if workspace else

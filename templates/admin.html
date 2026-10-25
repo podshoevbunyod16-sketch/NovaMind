@@ -300,6 +300,8 @@
     <div class="header">
         <h1>⚙️ Админ-панель</h1>
         <div class="header-actions">
+            <a href="/chat" class="btn">💬 Чат</a>
+            <a href="/settings" class="btn">⚙️ Настройки AI</a>
             <a href="/" class="btn">🏠 Главная</a>
             <button class="btn danger" onclick="logout()">🚪 Выйти</button>
         </div>
@@ -308,8 +310,14 @@
     <!-- Экран логина -->
     <div id="loginScreen" class="login-box" style="display:none;">
         <h2>🔐 Вход в админ-панель</h2>
-        <input type="text" id="username" placeholder="Логин">
-        <input type="password" id="password" placeholder="Код">
+        <p class="login-hint" style="font-size:0.82rem;opacity:.8;margin:0 0 10px;">
+            Логин администратора — <b>{{ admin_user }}</b>
+            ({{ 'e-mail из ADMIN_USER' if admin_user_is_email else 'ADMIN_USER' }}),
+            код — <b>ADMIN_CODE</b> из <code>.env</code>.
+        </p>
+        <input type="text" id="username" placeholder="Логин администратора"
+               value="{{ admin_user }}">
+        <input type="password" id="password" placeholder="Код ADMIN_CODE">
         <button class="btn accent" style="width:100%;" onclick="login()">Войти</button>
         <p id="loginError" style="color:var(--error-text);margin-top:10px;font-size:0.85rem;"></p>
     </div>
@@ -345,6 +353,19 @@ print('Привет из админ-панели!')" rows="8"></textarea>
                     <button class="btn" onclick="runSavedCode()">▶ Запустить сохранённый</button>
                 </div>
                 <div class="output-box" id="codeOutput">Здесь появится результат выполнения...</div>
+            </div>
+
+            <!-- Проверка доступа: почему что-то не работает -->
+            <div class="card" style="grid-column: 1 / -1;">
+                <h3>🩺 Доступ к функциям</h3>
+                <p style="opacity:.8;font-size:.85rem;margin:0 0 8px;">
+                    Если настройки, MCP или инструменты «не открываются» — нажмите кнопку
+                    и посмотрите, какой пункт выключен.
+                </p>
+                <button class="btn" onclick="checkAccess()">Проверить доступ</button>
+                <div class="output-box" id="accessOutput" style="margin-top:10px;">
+                    Здесь появится разбор по пунктам...
+                </div>
             </div>
 
             <!-- Сохранённые файлы -->
@@ -403,6 +424,7 @@ print('Привет из админ-панели!')" rows="8"></textarea>
                     errorEl.textContent = data.error;
                 } else {
                     errorEl.textContent = '';
+                    try { localStorage.setItem('nova_is_admin', 'true'); } catch (e) {}
                     checkAuth();
                 }
             } catch(e) {
@@ -413,7 +435,39 @@ print('Привет из админ-панели!')" rows="8"></textarea>
         // Выход
         async function logout() {
             await fetch('/api/admin/logout', {method: 'POST'});
+            try { localStorage.setItem('nova_is_admin', 'false'); } catch (e) {}
             checkAuth();
+        }
+
+        // Проверка доступа: админ, песочница, агент, MCP, провайдер
+        async function checkAccess() {
+            const box = document.getElementById('accessOutput');
+            box.textContent = 'Проверяю…';
+            try {
+                const resp = await fetch('/api/admin/access');
+                const data = await resp.json();
+                if (!resp.ok) {
+                    box.textContent = '❌ ' + (data.error || ('HTTP ' + resp.status))
+                        + (data.admin_login ? '\nЛогин администратора: ' + data.admin_login : '');
+                    return;
+                }
+                const lines = [
+                    '✅ Администратор: ' + (data.admin ? 'да' : 'нет'),
+                    '👤 Вход выполнен как: ' + ((data.signed_in_as || []).join(', ') || '—'),
+                    '⚙️ Панель настроек: ' + (data.settings_panel || '—'),
+                    '🔌 MCP-серверы: ' + data.mcp.servers_connected
+                        + (data.mcp.hint ? ' — ' + data.mcp.hint : ''),
+                    '🐧 Песочница (терминал, файлы): ' + (data.sandbox.enabled ? 'включена' : 'выключена')
+                        + (data.sandbox.hint ? ' — ' + data.sandbox.hint : ''),
+                    '🤖 ИИ-агент: ' + (data.agent.enabled ? 'включён' : 'выключен')
+                        + (data.agent.hint ? ' — ' + data.agent.hint : ''),
+                    '🧠 Модель: ' + data.provider.model + ' (' + data.provider.id + ')'
+                        + (data.provider.configured ? '' : ' — нет ключа провайдера'),
+                ];
+                box.textContent = lines.join('\n');
+            } catch (e) {
+                box.textContent = '❌ Нет связи с сервером';
+            }
         }
 
         // Загрузка дашборда

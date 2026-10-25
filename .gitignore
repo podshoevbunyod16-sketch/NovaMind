@@ -1,6 +1,8 @@
 __pycache__/
 *.pyc
 .env
+# Ключ подписи cookie: генерируется при первом запуске, в git не нужен
+.session_secret
 runtime_settings.json
 generated_media/
 workspace/

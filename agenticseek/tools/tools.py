@@ -95,6 +95,10 @@ class Tools:
         if self.tag == "undefined":
             raise RuntimeError("Tool tag is not defined")
         llm_text = str(llm_text or "")
+        # Иногда модель пишет вызов XML-ом (<web_search>…</web_search>): для
+        # безопасных инструментов приводим его к блоку, иначе шаг пропадёт.
+        if self.risk == "safe":
+            llm_text = normalize_tag_calls(llm_text, self.tag)
         opener = self._opener()
         end_tag = "```"
         if not opener.search(llm_text):

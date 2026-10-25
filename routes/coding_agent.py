@@ -41,7 +41,8 @@ def _event(payload):
 
 def _signed_in():
     """Project inspection is available to every signed-in user, not just admins."""
-    return bool(session.get("admin_logged_in") or session.get("nova_google_login")
+    import security
+    return bool(security.is_admin() or session.get("nova_google_login")
                 or session.get("nova_signed_in") or session.get("nova_user_nick")
                 or session.get("username"))
 
