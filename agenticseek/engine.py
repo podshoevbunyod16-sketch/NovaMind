@@ -472,20 +472,7 @@ class AgentEngine:
         watcher = self._start_stop_watcher(agent)
         try:
             prompt = self._goal_with_context()
-<<<<<<< HEAD
-            direct = ""
-            if getattr(self, "_search_observation", "") and not _needs_tools(ctx.goal):
-                direct = self._answer_from_observation(agent)
-                if not direct or _no_data(direct) or _is_tool_only(direct):
-                    direct = self._local_digest()
-            if direct:
-                answer, _summary = direct, ""
-            else:
-                answer, _summary = agent.process(prompt, None)
-            if not agent.tools and self._has_foreign_block(answer):
-                # Маршрутизатор ошибся: модель хочет действие, а исполнитель без
-                # инструментов. Передаём задачу тому, кто умеет, вместо того чтобы
-=======
+
             answer, _summary = agent.process(prompt, None)
             missing = self._missing_tools(agent, answer)
             # В разговоре блок ```bash — пример, а не действие: такой ход не
@@ -498,7 +485,6 @@ class AgentEngine:
                 # Маршрутизатор ошибся: модель хочет действие, которого у
                 # исполнителя нет (веб-агент пытается выполнить bash). Передаём
                 # задачу тому, у кого инструмент есть, вместо того чтобы
->>>>>>> d05c0b4157be846b2329c1282d941c1ee501d7e2
                 # показывать пользователю невыполненный блок.
                 self._emit({"type": "step", "icon": "🔁",
                             "text": f"Передаю задачу исполнителю: {fallback.label}"})
