@@ -91,7 +91,7 @@ SANDBOX_TAGS = {"terminal", "python", "file_find", "file_read", "file_write", "f
 _BLOCK = re.compile(r"```([a-zA-Z_][\w-]*)\n(.*?)```", re.S)
 #: Human names of media kinds for the answer text.
 KIND_RU = {"image": "изображение", "audio": "аудио", "video": "видео"}
-AGENT_TIMEOUT = max(10.0, float(os.getenv("AGENT_TIMEOUT", "180")))
+AGENT_TIMEOUT = max(10.0, float(os.getenv("AGENT_TIMEOUT", "9999")))
 SPEED = float(os.getenv("AGENTICSEEK_SPEED", "1.0"))     # <1 = faster, shorter turns
 
 

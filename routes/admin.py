@@ -165,14 +165,6 @@ def session_login():
         return jsonify({'success': False, 'error': 'Пустой ник'}), 400
     session['nova_user_nick'] = nick
     session['nova_signed_in'] = True
-<<<<<<< HEAD
-    # Админ по нику: только с самого устройства (loopback) и только из ADMIN_NICKS
-    _nicks = {n.strip().lower() for n in os.getenv('ADMIN_NICKS', '').split(',') if n.strip()}
-    if nick.lower() in _nicks and request.remote_addr in ('127.0.0.1', '::1'):
-        session['admin_logged_in'] = True
-        session['admin_username'] = nick
-    return jsonify({'success': True, 'nick': nick, 'admin': bool(session.get('admin_logged_in'))})
-=======
 
     allowed_nicks = _admin_nicks()
     if nick.lower() in allowed_nicks:
@@ -191,7 +183,6 @@ def session_login():
         'nick': nick,
         'admin': bool(session.get('admin_logged_in')),
     })
->>>>>>> origin/arena/85318584-novamind
 
 
 @admin_bp.route('/api/session/check')
