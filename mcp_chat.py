@@ -28,9 +28,11 @@ def _extract_action(text: str) -> dict[str, Any] | None:
 
 
 def _tool_prompt(tools: list[dict[str, Any]]) -> str:
-    names = ", ".join(f"{item['server_id']}:{item['name']}" for item in tools)
+    summary = mcp_registry.format_tools_summary(tools)
     return (
-        "\n\nMCP TOOLS ARE AVAILABLE. Available tools: " + names +
+        "\n\nMCP TOOLS ARE AVAILABLE. Choose the appropriate MCP server and tool automatically "
+        "from the user's request without asking the user for server_id or extra instructions.\n"
+        "Available MCP tools: " + summary +
         "\nIf the user's request needs one, respond with exactly one JSON object and nothing else: "
         '{"action":"mcp_call","server_id":"...","tool":"...","arguments":{}}' +
         "\nAfter the tool result, answer the user normally. Do not invent tool results. "
@@ -66,9 +68,13 @@ def complete_with_mcp(messages: list[dict[str, Any]], *, system: str, provider: 
         if not action or action.get("action") != "mcp_call":
             return reply, meta, events
         last_action = action
-        server_id = str(action.get("server_id") or "").strip()
-        tool = str(action.get("tool") or "").strip()
-        arguments = action.get("arguments") or {}
+        tool = str(action.get("tool") or action.get("name") or "").strip()
+        server_id = mcp_registry.resolve_server_id(
+            str(action.get("server_id") or action.get("server") or "").strip(),
+            tool,
+            tools,
+        )
+        arguments = action.get("arguments") or action.get("args") or {}
         if not server_id or not tool or not isinstance(arguments, dict):
             last_error = "Модель вернула неполный MCP-вызов."
             history.append({"role": "assistant", "content": reply[:4000]})

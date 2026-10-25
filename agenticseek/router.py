@@ -55,14 +55,20 @@ MCP_ROLE_PRIORITY = ("files", "code", "web")
 
 ROLE_KEYWORDS = {
     "web": ("http://", "https://", "интернет", "в сети", "поиск", "поищи", "найди",
-            "найти", "погугл", "новост", "что нового", "нового в", "погод", "курс",
-            "сколько стоит", "цена", "сайт", "статья", "википеди", "узнай"),
-    "files": ("файл", "папк", "каталог", "workspace", "рабочая папка", "прочитай",
-              "дерево", "список файлов", "запомни", "забудь", "вспомни", "память",
-              "задач", "напомни", "mcp", "навык", "скилл"),
+            "найти", "погугл", "новост", "что нового", "нового в", "погод", "температур",
+            "прогноз", "курс", "сколько стоит", "цена", "сайт", "статья", "википеди",
+            "узнай", "ссылк"),
+    "files": ("файл", "папк", "каталог", "директори", "структур", "содержим",
+              "workspace", "рабочая папка", "прочитай", "дерево", "список файлов",
+              "репозитори", "запомни", "забудь", "вспомни", "память", "заметк",
+              "сохрани", "запиши", "удали", "переименуй", "перемести", "скопируй",
+              "задач", "список дел", "напомни", "расписани", "каждый день", "будильник",
+              "таймер", "mcp", "навык", "скилл"),
     "code": ("код", "скрипт", "python", "javascript", "баг", "ошибк", "тест", "pytest",
              "функци", "класс", "рефактор", "парсинг", "напиши программ", "исправь",
              "запусти", "выполни", "команд", "терминал", "shell", "bash", "git",
+             "ветк", "коммит", "скача", "склонир", "clone", "систем", "процесс",
+             "диск", "озу", "порт", "сервер", "пинг", "ping", "curl", "лог",
              "установи", "поставь", "сборк"),
     "talk": ("привет", "здравствуй", "как дела", "спасибо", "кто ты", "что умеешь"),
 }
@@ -100,6 +106,19 @@ _MARKER_OVERRIDES = {
     "запомни": r"(?<![\wа-яё])запомн(?:и|ите|ить)(?![\wа-яё])",
     "вспомни": r"(?<![\wа-яё])вспомн(?:и|ите|ить)(?![\wа-яё])",
     "напомни": r"(?<![\wа-яё])напомн(?:и|ите|ить)(?![\wа-яё])",
+    "сохрани": r"(?<![\wа-яё])сохран(?:и|ите|ить)(?![\wа-яё])",
+    "запиши": r"(?<![\wа-яё])запиш(?:и|ите)|записать(?![\wа-яё])",
+    "удали": r"(?<![\wа-яё])удал(?:и|ите|ить)(?![\wа-яё])",
+    "переименуй": r"(?<![\wа-яё])переимен(?:уй|уйте|овать)(?![\wа-яё])",
+    "перемести": r"(?<![\wа-яё])перемест(?:и|ите|ить)(?![\wа-яё])",
+    "скопируй": r"(?<![\wа-яё])скопир(?:уй|уйте|овать)(?![\wа-яё])",
+    "скача": r"(?<![\wа-яё])скача(?:й|йте|ть)(?![\wа-яё])",
+    "склонир": r"(?<![\wа-яё])склонир(?:уй|уйте|овать)(?![\wа-яё])",
+    "ветк": r"(?<![\wа-яё])(?:ветк(?:а|и|е|у|ой|ою|ам|ами|ах)|веток)(?![\wа-яё])",
+    "заметк": r"(?<![\wа-яё])(?:заметк(?:а|и|е|у|ой|ою|ам|ами|ах)|заметок)(?![\wа-яё])",
+    "ссылк": r"(?<![\wа-яё])(?:ссылк(?:а|и|е|у|ой|ою|ам|ами|ах)|ссылок)(?![\wа-яё])",
+    "список дел": r"(?<![\wа-яё])спис(?:ок|ка|ку|ком|ке)\s+дел(?![\wа-яё])",
+    "каждый день": r"(?<![\wа-яё])кажд(?:ый|ого|ому|ым)\s+д(?:ень|ня|ню|нём)(?![\wа-яё])",
     "что умеешь": r"(?<![\wа-яё])что\s+(?:ты\s+)?умеешь(?![\wа-яё])",
 }
 
@@ -134,11 +153,25 @@ _ROLE_PATTERNS: dict[str, tuple[tuple[str, re.Pattern], ...]] = {
 #: ``web_search`` → ``web_open`` и падает при ``strict_mcp`` без браузера).
 _MCP_TARGET_RE = re.compile(
     r"(?<![\wа-яё])(?:mcp|github|гитхаб(?:а|у|ом|е)?)(?![\wа-яё])", re.I)
+_GITHUB_URL_IN_GOAL_RE = re.compile(r"https?://github\.com/\S+", re.I)
+_MCP_ACTION_RE = re.compile(
+    r"(?<![\wа-яё])(?:найд(?:и|ите|ём)|найти|поищ(?:и|ите|ем)|"
+    r"поиск(?:ай|ать|а|у|ом|е)?|ищ(?:и|ите|у)|искать|погугл(?:и|ить|ите)|"
+    r"узна(?:й|йте|ть)|покаж(?:и|ите)|посмотр(?:и|ите|еть)|провер(?:ь|ьте|ить)|"
+    r"подбер(?:и|ите)|выбер(?:и|ите)|откро(?:й|йте)|прочит(?:ай|айте|ать)|"
+    r"да(?:й|йте)|вывед(?:и|ите)|получи(?:те)?|созда(?:й|йте|ть)|"
+    r"структур\w*|дерев\w*|репозитори\w*|коммит\w*|ветк\w*|issue\w*|pull\s+request\w*|"
+    r"мои\s+|мой\s+|моих\s+|есть\s+ли|search|find|lookup|list|open|show|get)(?![\wа-яё])",
+    re.I,
+)
 _SEARCH_VERB_RE = re.compile(
     r"(?<![\wа-яё])(?:найд(?:и|ите|ём)|найти|поищ(?:и|ите|ем)|"
     r"поиск(?:ай|ать|а|у|ом|е)?|ищ(?:и|ите|у)|искать|погугл(?:и|ить|ите)|"
     r"узна(?:й|йте|ть)|покаж(?:и|ите)|посмотр(?:и|ите|еть)|провер(?:ь|ьте|ить)|"
     r"подбер(?:и|ите)|выбер(?:и|ите)|есть\s+ли|search|find|lookup)(?![\wа-яё])", re.I)
+_GENERIC_MCP_WORDS = frozenset({
+    "mcp", "server", "servers", "сервер", "серверы", "custom", "свой", "http", "https", "api",
+})
 
 #: «Создай сайт», «сделай интернет-магазин», «напиши бота» — это работа для
 #: кодера, хотя слова «сайт» и «интернет» одновременно являются маркерами
@@ -205,11 +238,32 @@ def is_build_request(text: str) -> bool:
 
 
 def is_mcp_search_request(text: str) -> bool:
-    """Есть ли в запросе ``mcp`` или ``github`` вместе с глаголом поиска."""
+    """Есть ли в запросе ``mcp`` или ``github`` вместе с глаголом поиска/действия или ссылкой GitHub."""
     low = str(text or "").strip().lower()
     if not low:
         return False
-    return bool(_MCP_TARGET_RE.search(low) and _SEARCH_VERB_RE.search(low))
+    if _GITHUB_URL_IN_GOAL_RE.search(low):
+        return True
+    if re.search(r"(?<![\wа-яё])mcp(?![\wа-яё])", low):
+        return True
+    return bool(_MCP_TARGET_RE.search(low) and (_SEARCH_VERB_RE.search(low) or _MCP_ACTION_RE.search(low)))
+
+
+def _connected_mcp_tokens(agents) -> set[str]:
+    """Имена подключённых MCP-серверов из ``mcp_call.tools_catalog``."""
+    tokens: set[str] = set()
+    for agent in agents or ():
+        tools = getattr(agent, "tools", None) or {}
+        mcp_tool = tools.get("mcp_call")
+        catalog = getattr(mcp_tool, "tools_catalog", None) if mcp_tool is not None else None
+        for entry in catalog or ():
+            if not isinstance(entry, dict):
+                continue
+            for raw in (entry.get("server_id"), entry.get("server_name")):
+                for word in re.findall(r"[\wа-яё]{3,}", str(raw or "").lower()):
+                    if word not in _GENERIC_MCP_WORDS and not word.isdigit():
+                        tokens.add(word)
+    return tokens
 
 
 def _agent_has_mcp(agent) -> bool:
@@ -292,9 +346,19 @@ class AgentRouter:
             "Answer with one word: HIGH or LOW.")
         return "HIGH" if "high" in answer.lower() else "LOW"
 
+    def _matches_connected_mcp(self, text: str) -> bool:
+        """Упоминает ли пользователь один из реально подключённых MCP-серверов."""
+        low = str(text or "").strip().lower()
+        if not low:
+            return False
+        for token in _connected_mcp_tokens(self.agents):
+            if re.search(rf"(?<![\wа-яё]){re.escape(token)}(?![\wа-яё])", low):
+                return True
+        return False
+
     def choose_role(self, text: str) -> str:
         """Pick ``web``/``files``/``code``/``talk`` for the request."""
-        if is_mcp_search_request(text):
+        if is_mcp_search_request(text) or self._matches_connected_mcp(text):
             agent = self.mcp_agent()
             return agent.role if agent is not None else "files"
         if self.mode == "llm" and self.classify is not None:
@@ -311,7 +375,7 @@ class AgentRouter:
 
     def heuristic_role(self, text: str) -> str:
         low = str(text or "").lower()
-        if is_mcp_search_request(low):
+        if is_mcp_search_request(low) or self._matches_connected_mcp(low):
             agent = self.mcp_agent()
             return agent.role if agent is not None else "files"
         if is_build_request(low):
@@ -346,10 +410,10 @@ class AgentRouter:
                 self.last_reason = "complex → planner"
                 return planner
 
-        if is_mcp_search_request(text):
+        if is_mcp_search_request(text) or self._matches_connected_mcp(text):
             mcp = self.mcp_agent()
             if mcp is not None:
-                self.last_reason = f"mcp search → {mcp.role}"
+                self.last_reason = f"mcp/repo → {mcp.role}"
                 return mcp
 
         role = self.choose_role(text)

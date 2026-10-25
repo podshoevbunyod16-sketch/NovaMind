@@ -44,6 +44,11 @@ while True:
     "напиши игру с красивой анимацией",
     "Создай интернет-магазин на Flask",
     "Привет, как дела?",
+    "https://github.com/podshoevbunyod16-sketch/NovaMind дай мне его структура в виде дерево",
+    "https://novamind.onrender.com проверь сайт",
+    "задеплой сервер на render",
+    "открой sketch.py и разбери функции",
+    "покажи дерево файлов репозитория",
 ])
 def test_code_requests_are_not_media(text):
     assert agent_routes.requested_media_kind(text) is None

@@ -324,8 +324,95 @@ def connected_tools() -> list[dict[str, Any]]:
     return [entry for entry in result if entry["name"]]
 
 
+def resolve_server_id(server_id: str, tool_name: str = "",
+                      tools: list[dict[str, Any]] | None = None) -> str:
+    """Находит реальный ``server_id`` по ID, имени сервера, URL или уникальному имени инструмента.
+
+    Когда пользователь подключает сервер через панель Настроек, его ``id`` может
+    быть случайным (``xK9_mP2q``), а имя — «GitHub MCP». Если модель вызовет
+    ``"server_id": "github"`` или опустит ``server_id`` при единственном сервере
+    с этим инструментом, вызов автоматически попадёт в нужное подключение.
+    """
+    raw = str(server_id or "").strip()
+    wanted = raw.lower()
+    tname = str(tool_name or "").strip()
+    catalog_list = [t for t in (tools or []) if isinstance(t, dict)]
+
+    if catalog_list:
+        by_server: dict[str, dict[str, Any]] = {}
+        for entry in catalog_list:
+            sid = str(entry.get("server_id") or entry.get("server") or "").strip()
+            if not sid:
+                continue
+            info = by_server.setdefault(sid, {
+                "name": str(entry.get("server_name") or sid).strip(),
+                "tools": set(),
+            })
+            en = str(entry.get("name") or entry.get("tool") or "").strip()
+            if en:
+                info["tools"].add(en)
+
+        if raw and raw in by_server:
+            return raw
+
+        if len(wanted) >= 2:
+            for sid, info in by_server.items():
+                sname = info["name"].lower()
+                if wanted == sid.lower() or wanted == sname:
+                    return sid
+            for sid, info in by_server.items():
+                sname = info["name"].lower()
+                if wanted in sname or sname in wanted or wanted in sid.lower():
+                    if not tname or not info["tools"] or tname in info["tools"]:
+                        return sid
+
+        if tname:
+            owners = [sid for sid, info in by_server.items() if tname in info["tools"]]
+            if len(owners) == 1:
+                return owners[0]
+
+    data = _read()
+    if raw and raw in data:
+        return raw
+    if len(wanted) >= 2 and data:
+        for sid, item in data.items():
+            if not item.get("connected"):
+                continue
+            sname = str(item.get("name") or "").lower()
+            surl = str(item.get("url") or "").lower()
+            if wanted == sid.lower() or wanted == sname or wanted in sname or wanted in surl:
+                return sid
+    return raw
+
+
+def format_tools_summary(tools: list[dict[str, Any]], max_tools: int = 40) -> str:
+    """Компактное описание подключённых MCP-серверов и их инструментов для системного промпта."""
+    valid = [t for t in (tools or []) if isinstance(t, dict) and (t.get("name") or t.get("tool"))]
+    if not valid:
+        return "пусто"
+    entries: list[str] = []
+    for item in valid[:max_tools]:
+        sid = str(item.get("server_id") or item.get("server") or "?").strip()
+        sname = str(item.get("server_name") or "").strip()
+        tname = str(item.get("name") or item.get("tool") or "?").strip()
+        schema = item.get("inputSchema") if isinstance(item.get("inputSchema"), dict) else {}
+        props = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
+        param_names = list(props.keys())[:6]
+        desc = re.sub(r"\s+", " ", str(item.get("description") or "")).strip()[:90]
+        head = f"{sid}:{tname}"
+        if sname and sname.lower() != sid.lower():
+            head += f" [{sname}]"
+        if param_names:
+            head += f"({', '.join(param_names)})"
+        if desc:
+            head += f" — {desc}"
+        entries.append(head)
+    return "; ".join(entries)
+
+
 def call_tool(server_id: str, tool_name: str, arguments: dict[str, Any] | None = None) -> dict[str, Any]:
     """Вызывает MCP tools/call с паузой/повтором при 403/429 и логированием ошибок."""
+    server_id = resolve_server_id(server_id, tool_name)
     max_retries = max(0, min(int(os.getenv("MCP_MAX_RETRIES", str(MAX_RETRIES))), 5))
     for attempt in range(max_retries + 1):
         response = request(server_id, "tools/call", {

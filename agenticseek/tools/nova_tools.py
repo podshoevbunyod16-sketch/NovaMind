@@ -27,6 +27,7 @@ import logging
 import re
 from typing import Any
 
+import mcp_registry
 from agenticseek.core.agent import dumps
 from agenticseek.tools.tools import Tools
 
@@ -108,20 +109,19 @@ class McpBridgeTool(BridgeTool):
         tools = [t for t in (getattr(ctx, "mcp_tools", None) or []) if isinstance(t, dict)]
         # Одна запись без имени не должна валить весь ход агента: раньше это
         # было KeyError: 'name' и пользователь видел «Внутренняя ошибка агента».
-        listing = "; ".join(
-            f"{t.get('server_id') or t.get('server') or '?'}:"
-            f"{t.get('name') or t.get('tool') or '?'}" for t in tools[:40])
+        listing = mcp_registry.format_tools_summary(tools, max_tools=40)
         super().__init__(
             "mcp_call",
-            'Вызвать инструмент MCP-сервера: {"server_id":"…","tool":"…","arguments":{}}. '
-            "Доступные (server_id:tool): " + (listing or "пусто") +
-            ". Выбери подходящий сам, у пользователя server_id не спрашивай. "
+            'Вызвать инструмент подключённого MCP-сервера: {"server_id":"…","tool":"…","arguments":{}}. '
+            "Доступные серверы и инструменты (server_id:tool): " + listing +
+            ". Выбирай подходящий сервер и инструмент САМ по смыслу запроса пользователя — "
+            "без просьбы уточнить server_id или написать «используй MCP». "
             "Для запросов «найди программы/репозитории/проекты/ботов» на GitHub используй "
             'search_repositories (НЕ search_code) с коротким запросом (2–4 слова) и "minimal_output": true. '
             "Перед первым поиском на GitHub MCP вызови get_me один раз; "
             f"не делай больше {MAX_MCP_SEARCH_CALLS} поисковых вызовов за запуск. "
-            "get_file_contents только когда путь уже известен. "
-            "Найдя 2–3 результата, сразу дай итоговый ответ.",
+            'Для чтения файла или корня известного репозитория передавай owner, repo и path ("" для корня). '
+            "Найдя нужные данные (2–3 результата при поиске), сразу дай итоговый ответ.",
             self._call, risk="write", state=state, emit=emit)
         self.ctx = ctx
         self.tools_catalog = tools
@@ -179,8 +179,9 @@ class McpBridgeTool(BridgeTool):
     def _call(self, payload: str) -> str:
         self.last_error_code = None
         action = parse_json(payload)
-        server_id = str(action.get("server_id") or action.get("server") or "").strip()
         tool = str(action.get("tool") or action.get("name") or "").strip()
+        raw_server_id = str(action.get("server_id") or action.get("server") or "").strip()
+        server_id = mcp_registry.resolve_server_id(raw_server_id, tool, self.tools_catalog)
         arguments = action.get("arguments") or action.get("args") or {}
         if isinstance(arguments, str):
             try:
@@ -195,6 +196,19 @@ class McpBridgeTool(BridgeTool):
         if not getattr(self.ctx, "is_admin", False) and \
                 any(h in tool.lower() for h in _MCP_WRITE_HINTS):
             return "[failure] Инструмент меняет данные: доступен только администратору. Поиск и чтение разрешены."
+
+        # Нормализация owner/repo и path для get_file_contents на GitHub MCP.
+        if tool == "get_file_contents":
+            repo_arg = str(arguments.get("repo") or "").strip()
+            gh_match = re.match(
+                r"^(?:https?://github\.com/)?([^/\s]+)/([^/\s?#]+?)(?:\.git)?/?$",
+                repo_arg,
+                re.I,
+            )
+            if gh_match and not arguments.get("owner"):
+                arguments["owner"] = gh_match.group(1)
+                arguments["repo"] = gh_match.group(2)
+            arguments.setdefault("path", "")
 
         # Для запросов «найди программы/репозитории/ботов» заменяем search_code на search_repositories.
         goal = str(getattr(self.ctx, "goal", "") or "")

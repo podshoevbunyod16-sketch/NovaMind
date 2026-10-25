@@ -233,6 +233,34 @@ class Agent:
             lines.append(f"- ```{canonical}``` — {tool.description}{suffix}")
         return lines
 
+    def _autonomy_lines(self, tags: list[str]) -> list[str]:
+        """Подсказки автономного выбора ТОЛЬКО по реально доступным в этом запуске тегам."""
+        present = set(tags)
+        hints = [
+            "- Сам определяй по смыслу запроса пользователя, какое действие из списка выше нужно, без ожидания подсказок вида «в терминале» или «открой ссылку».",
+        ]
+        if "web_open" in present:
+            hints.append(
+                "- Ссылка на GitHub (https://github.com/owner/repo) или вопрос про структуру/дерево/файлы публичного репозитория → открой ссылку через `web_open` (возвращает дерево файлов и README)."
+            )
+        if "mcp_call" in present:
+            hints.append(
+                "- Запросы к подключённым внешним сервисам → вызывай `mcp_call`, самостоятельно выбирая подходящий `server_id` и `tool`."
+            )
+        if "web_search" in present:
+            hints.append("- Поиск актуальной информации в интернете → `web_search`.")
+        ws_tags = [t for t in ("file_find", "file_read", "file_write", "file_edit", "terminal", "python") if t in present]
+        if ws_tags:
+            hints.append("- Локальные файлы песочницы, код и система → " + ", ".join(f"`{t}`" for t in ws_tags) + ".")
+        extra_tags = [
+            t for t in ("remember", "recall", "forget", "task", "task_done", "schedule", "skill_create", "image", "audio", "video")
+            if t in present
+        ]
+        if extra_tags:
+            hints.append("- Память, задачи, расписание, навыки и медиа → " + ", ".join(f"`{t}`" for t in extra_tags) + ".")
+        hints.append("- Вызывай только теги из списка выше. Когда данные получены или действие выполнено — дай итоговый ответ БЕЗ блоков инструментов.")
+        return hints
+
     def system_prompt(self) -> str:
         """Vendored prompt + the tools that really exist in this run."""
         tags = self.available_tools()
@@ -249,7 +277,8 @@ class Agent:
             parts.append(
                 "\n=== ДОСТУПНЫЕ ИНСТРУМЕНТЫ ЭТОГО ЗАПУСКА ===\n"
                 + "\n".join(self._tool_lines())
-                + "\nВызывай только эти теги. Если нужного действия нет — объясни это словами."
+                + "\n\nАВТОНОМНЫЙ ВЫБОР ИНСТРУМЕНТОВ:\n"
+                + "\n".join(self._autonomy_lines(tags))
             )
         else:
             parts.append("\nИнструменты в этом запуске недоступны: отвечай текстом.")

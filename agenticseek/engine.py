@@ -57,7 +57,7 @@ from agenticseek.core.prompt_paths import prompt_path
 from agenticseek.core.utility import set_output_sink
 from agenticseek.offline import OfflineTurn
 from agenticseek.providers.nova_provider import NovaProvider
-from agenticseek.router import AgentRouter
+from agenticseek.router import AgentRouter, SHORT_MESSAGE_CHARS
 from agenticseek.state import RunState
 from agenticseek.tools import sandbox, shell_text
 from agenticseek.tools.bash_interpreter import BashTool
@@ -375,12 +375,13 @@ class AgentEngine:
                 self._emit({"type": "step", "icon": "⚠️",
                             "text": "MCP не подключён: строгий режим снят, работаю обычными "
                                     "инструментами. Подключи сервер в Настройках → MCP"})
+        is_short_chat = len(str(ctx.goal or "").strip()) <= SHORT_MESSAGE_CHARS
         for agent in agents:
-            if agent.role == "talk":
+            if agent.role == "talk" and is_short_chat:
                 continue
             for tag, tool in shared.items():
                 canonical = getattr(tool, "tag", tag) or tag
-                if agent.role == "web" and canonical in EXECUTION_TOOL_TAGS:
+                if agent.role in ("web", "talk") and canonical in EXECUTION_TOOL_TAGS:
                     continue
                 agent.register_tool(tag, tool)
         planner.add_shared_tools({tag: tool for tag, tool in shared.items()})
