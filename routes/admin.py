@@ -4,6 +4,7 @@ routes/admin.py — Административные маршруты
 from flask import Blueprint, request, jsonify, session, render_template, redirect
 import subprocess
 import json
+import logging
 import os
 import requests
 from urllib.parse import quote
@@ -12,6 +13,41 @@ import groq_rotation
 from groq_rotation import GROQ_KEYS, GROQ_KEY_COOLDOWN, get_groq_key_status
 from config import (ADMIN_CREDENTIALS, PROVIDERS, GOOGLE_CLIENT_ID,
                     GOOGLE_CLIENT_SECRET, GOOGLE_REDIRECT_URI)
+
+log = logging.getLogger(__name__)
+
+_LOOPBACK_ADDRS = {"127.0.0.1", "::1"}
+_PROXY_HEADERS = (
+    "X-Forwarded-For",
+    "X-Real-IP",
+    "CF-Connecting-IP",
+    "Forwarded",
+    "True-Client-IP",
+)
+
+
+def _admin_nicks() -> set[str]:
+    """Ники из ``ADMIN_NICKS`` в .env (через запятую, без учёта регистра)."""
+    raw = os.getenv("ADMIN_NICKS", "")
+    return {
+        item.strip().strip("\"'").lower()
+        for item in raw.split(",")
+        if item.strip().strip("\"'")
+    }
+
+
+def _is_local_loopback(req) -> bool:
+    """Проверяет, что запрос пришёл напрямую с 127.0.0.1 или ::1 без прокси/туннеля."""
+    remote = (req.remote_addr or "").strip()
+    if remote not in _LOOPBACK_ADDRS:
+        return False
+    # ВНИМАНИЕ: туннели (ngrok, cloudflared) и reverse-proxy подключаются к Flask
+    # с 127.0.0.1, но добавляют заголовки пересылки. При наличии таких заголовков
+    # локальный вход админа по нику запрещаем.
+    for header in _PROXY_HEADERS:
+        if (req.headers.get(header) or "").strip():
+            return False
+    return True
 
 # Папка с сохранённым кодом лежит в корне проекта (а не в routes/) — как и generated_*
 SAVED_CODES_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "saved_codes")
@@ -116,6 +152,12 @@ def session_login():
     Google кладёт флаги в сессию сам (см. выше), а быстрый вход по нику живёт
     только в localStorage — без этого шага сервер не знает, что человек вошёл,
     и не пускает его в рабочую папку и агентный режим.
+
+    Если ник входит в ``ADMIN_NICKS`` из ``.env`` и запрос пришёл строго локально
+    (``127.0.0.1`` или ``::1``, без заголовков прокси/туннеля), выставляется
+    ``admin_logged_in = True``.
+    ВНИМАНИЕ: не используйте ``ADMIN_NICKS``, если сервер опубликован наружу
+    через туннель (ngrok, cloudflared, ssh -R) или прокси, скрывающий внешний IP.
     """
     data = request.get_json(silent=True) or {}
     nick = (data.get('nick') or data.get('username') or '').strip()[:64]
@@ -123,7 +165,24 @@ def session_login():
         return jsonify({'success': False, 'error': 'Пустой ник'}), 400
     session['nova_user_nick'] = nick
     session['nova_signed_in'] = True
-    return jsonify({'success': True, 'nick': nick})
+
+    allowed_nicks = _admin_nicks()
+    if nick.lower() in allowed_nicks:
+        if _is_local_loopback(request):
+            session['admin_logged_in'] = True
+            session['admin_username'] = nick
+            log.info("Локальный вход администратора по нику '%s' с %s", nick, request.remote_addr)
+        else:
+            log.warning(
+                "Отклонён вход в админку по нику '%s': нелокальный запрос или обнаружен прокси/туннель (remote_addr=%s)",
+                nick, request.remote_addr,
+            )
+
+    return jsonify({
+        'success': True,
+        'nick': nick,
+        'admin': bool(session.get('admin_logged_in')),
+    })
 
 
 @admin_bp.route('/api/session/check')
@@ -156,7 +215,7 @@ def admin_check():
         return jsonify({'logged_in': True, 'username': session.get('admin_username', 'admin')})
     return jsonify({'logged_in': False})
 
-# ========== ЧАТ ==========# ========== АДМИН API ==========
+# ========== АДМИН API ==========
 
 @admin_bp.route('/api/admin/stats')
 def admin_stats():

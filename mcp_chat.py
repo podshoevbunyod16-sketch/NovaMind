@@ -84,7 +84,22 @@ def complete_with_mcp(messages: list[dict[str, Any]], *, system: str, provider: 
         except Exception as exc:
             observation = f"MCP error: {exc}"
             last_error = str(exc)
-            events.append({"type": "tool", "name": "mcp_call", "command": f"{server_id}:{tool}", "code": 1})
+            err_code = (getattr(exc, "status_code", None)
+                        or getattr(getattr(exc, "response", None), "status_code", None)
+                        or 1)
+            events.append({
+                "type": "tool",
+                "name": "mcp_call",
+                "kind": "mcp",
+                "icon": "🔌",
+                "label": "Ошибка MCP",
+                "detail": f"{server_id} · {tool}",
+                "command": f"{server_id}:{tool}",
+                "code": err_code,
+                "status": "error",
+                "output": str(exc)[:1200],
+                "error": str(exc)[:1200],
+            })
         history.append({"role": "assistant", "content": reply[:4000]})
         history.append({"role": "user", "content": "MCP TOOL RESULT:\n" + observation[:12000] +
                        "\nNow answer the original user request. If more MCP data is needed, emit another mcp_call JSON; otherwise answer normally."})

@@ -1318,6 +1318,30 @@ check('если модель пошла работать — начатая фр
   && lastAi().querySelectorAll('.agent-term-row').length === 1,
   lastAi().querySelector('.answer').textContent);
 
+const mcpErrTurn = window.createAssistantTurn();
+mcpErrTurn.beginIdle('Думаю…');
+mcpErrTurn.tool({
+  type: 'tool',
+  name: 'mcp_call',
+  kind: 'mcp',
+  icon: '🔌',
+  label: 'Ошибка MCP',
+  detail: 'github · search_repositories',
+  code: 403,
+  status: 'error',
+  output: '[failure] MCP github:search_repositories: MCP HTTP 403: API rate limit exceeded',
+  error: 'MCP github:search_repositories: MCP HTTP 403: API rate limit exceeded',
+});
+const mcpErrRow = mcpErrTurn.element.querySelector('.agent-term-row.kind-mcp.is-error');
+check('в блоке «Ошибка MCP» раскрыт и виден настоящий текст ошибки сервера, а не «1 Ошибка»',
+  !!mcpErrRow
+  && mcpErrRow.querySelector('.agent-term-code')?.textContent === '403'
+  && mcpErrRow.querySelector('.agent-term-outwrap')?.open === true
+  && mcpErrRow.querySelector('.agent-term-outwrap > summary')?.textContent.includes('API rate limit exceeded')
+  && mcpErrRow.querySelector('.agent-term-out')?.textContent.includes('API rate limit exceeded'),
+  mcpErrRow?.textContent);
+mcpErrTurn.remove();
+
 console.log('\n11б) Разрешение раскрывается внутри шагов агента');
 const confirmTurn = window.createAssistantTurn();
 confirmTurn.beginIdle('Думаю…');

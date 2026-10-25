@@ -6,7 +6,9 @@ only connection metadata and masked status, never API keys or OAuth tokens.
 from __future__ import annotations
 
 import json
+import logging
 import os
+import re
 import secrets
 import stat
 import time
@@ -16,9 +18,68 @@ from urllib.parse import urlparse
 
 import requests
 
+log = logging.getLogger("novamind.mcp")
+
 ROOT = Path(__file__).resolve().parent
 STORE = Path(os.getenv("MCP_CONNECTIONS_FILE", ROOT / "mcp_connections.json"))
 TIMEOUT = float(os.getenv("MCP_TIMEOUT", "12"))
+RETRY_STATUS_CODES = {403, 429}
+MAX_RETRIES = max(0, min(int(os.getenv("MCP_MAX_RETRIES", "2")), 5))
+RETRY_BASE_DELAY = max(0.0, float(os.getenv("MCP_RETRY_DELAY", "2.0")))
+
+
+class McpError(RuntimeError):
+    """Ошибка MCP-вызова с сохранённым HTTP/статус-кодом и текстом сервера."""
+
+    def __init__(self, message: str, status_code: int | None = None, logged: bool = False):
+        super().__init__(message)
+        self.status_code = status_code
+        self._mcp_logged = logged
+
+
+def _extract_error_text(value: Any) -> str:
+    """Извлекает читаемый текст ошибки из MCP content / JSON-RPC error / тела HTTP."""
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        text = value.strip()
+        if text.startswith("{"):
+            try:
+                return _extract_error_text(json.loads(text)) or text
+            except ValueError:
+                return text
+        return text
+    if isinstance(value, list):
+        parts = [_extract_error_text(item) for item in value]
+        return "; ".join(part for part in parts if part)
+    if isinstance(value, dict):
+        for key in ("text", "message", "detail", "error_description"):
+            if value.get(key):
+                inner = _extract_error_text(value[key])
+                if inner:
+                    return inner
+        if value.get("error"):
+            return _extract_error_text(value["error"])
+        return json.dumps(value, ensure_ascii=False)
+    return str(value).strip()
+
+
+_HTTP_CODE_RE = re.compile(r"\b(400|401|403|404|408|409|413|422|429|500|502|503|504)\b")
+
+
+def _detect_http_status(text: str) -> int | None:
+    match = _HTTP_CODE_RE.search(str(text or ""))
+    return int(match.group(1)) if match else None
+
+
+def _retry_delay(attempt: int, retry_after: str | None = None) -> float:
+    base = float(os.getenv("MCP_RETRY_DELAY", str(RETRY_BASE_DELAY)))
+    if retry_after:
+        try:
+            return min(max(float(retry_after), 0.1), 10.0)
+        except ValueError:
+            pass
+    return min(base * (2 ** attempt), 10.0)
 
 CATALOG = [
     {"id": "custom", "name": "Свой MCP-сервер", "description": "Любой Streamable HTTP MCP endpoint", "auth": ["api_key", "bearer", "basic", "oauth", "none"]},
@@ -126,13 +187,36 @@ def request(server_id: str, method: str, params: dict[str, Any] | None = None, _
     if urlparse(item["url"]).hostname in {"localhost", "127.0.0.1", "::1"} or item["url"].startswith(("https://", "http://")):
         pass
     payload = {"jsonrpc": "2.0", "id": int(time.time() * 1000) % 1000000000, "method": method, "params": params or {}}
-    response = requests.post(item["url"], headers=_headers(item), json=payload, timeout=TIMEOUT)
-    session_id = response.headers.get("mcp-session-id")
-    if session_id:
-        data[server_id]["session_id"] = session_id
-        _write(data)
+    max_retries = max(0, min(int(os.getenv("MCP_MAX_RETRIES", str(MAX_RETRIES))), 5))
+    response = None
+    for attempt in range(max_retries + 1):
+        try:
+            response = requests.post(item["url"], headers=_headers(item), json=payload, timeout=TIMEOUT)
+        except requests.RequestException as exc:
+            status = getattr(getattr(exc, "response", None), "status_code", None)
+            log.error("MCP ошибка сети [%s %s] status=%s: %s",
+                      server_id, method, status or "network_error", exc)
+            raise
+        session_id = response.headers.get("mcp-session-id")
+        if session_id:
+            data[server_id]["session_id"] = session_id
+            item = data[server_id]
+            _write(data)
+        if response.status_code in RETRY_STATUS_CODES and attempt < max_retries:
+            delay = _retry_delay(attempt, response.headers.get("Retry-After"))
+            raw_hint = _extract_error_text(response.text)[:240]
+            log.warning("MCP HTTP %s [%s %s] status=%s: пауза %.1f с и повтор (%d/%d)%s",
+                        response.status_code, server_id, method, response.status_code,
+                        delay, attempt + 1, max_retries,
+                        f" — {raw_hint}" if raw_hint else "")
+            if delay > 0:
+                time.sleep(delay)
+            continue
+        break
+
+    assert response is not None
     if response.status_code >= 400:
-        detail = (response.text or "").strip().replace("\n", " ")[:600]
+        detail = _extract_error_text(response.text).replace("\n", " ")[:600]
         session_lost = any(marker in detail.lower() for marker in (
             "missing mcp-session-id",
             "session not found",
@@ -147,17 +231,28 @@ def request(server_id: str, method: str, params: dict[str, Any] | None = None, _
             _write(data)
             initialized = _initialize_session(server_id)
             if isinstance(initialized, dict) and initialized.get("error"):
-                raise requests.HTTPError(
-                    f"MCP reinitialize failed: {initialized.get('error')}", response=response)
+                err_msg = _extract_error_text(initialized.get("error"))
+                log.error("MCP reinitialize failed [%s %s] status=%s: %s",
+                          server_id, method, response.status_code, err_msg)
+                err = requests.HTTPError(
+                    f"MCP reinitialize failed (HTTP {response.status_code}): {err_msg}",
+                    response=response)
+                err.status_code = response.status_code
+                raise err
             try:
                 request(server_id, "notifications/initialized", {}, _retry_session=False)
             except Exception:
                 pass
             return request(server_id, method, params, _retry_session=False)
-        raise requests.HTTPError(
+        log.error("MCP HTTP ошибка [%s %s] status=%s: %s",
+                  server_id, method, response.status_code, detail or "сервер не сообщил причину")
+        err = requests.HTTPError(
             f"MCP HTTP {response.status_code}: {detail or 'сервер не сообщил причину'}",
             response=response,
         )
+        err.status_code = response.status_code
+        err._mcp_logged = True
+        raise err
     content_type = response.headers.get("content-type", "")
     if response.status_code in {202, 204} or not response.text.strip():
         return {}
@@ -169,6 +264,7 @@ def request(server_id: str, method: str, params: dict[str, Any] | None = None, _
                     return json.loads(line[5:].strip())
                 except ValueError:
                     continue
+        log.error("MCP пустой SSE-ответ [%s %s] status=%s", server_id, method, response.status_code)
         raise ValueError("MCP-сервер вернул пустой SSE-ответ")
     return response.json()
 
@@ -221,20 +317,55 @@ def connected_tools() -> list[dict[str, Any]]:
                     "inputSchema": tool.get("inputSchema") or {"type": "object"},
                 })
         except Exception as exc:
+            status = getattr(exc, "status_code", None) or getattr(getattr(exc, "response", None), "status_code", None)
+            log.warning("MCP не удалось получить список инструментов [%s] status=%s: %s",
+                        server_id, status or "error", exc)
             item["last_error"] = f"{exc.__class__.__name__}: {exc}"
     return [entry for entry in result if entry["name"]]
 
 
 def call_tool(server_id: str, tool_name: str, arguments: dict[str, Any] | None = None) -> dict[str, Any]:
-    """Вызывает MCP tools/call и возвращает структурированный результат."""
-    response = request(server_id, "tools/call", {
-        "name": tool_name,
-        "arguments": arguments or {},
-    })
-    body = _result_body(response)
-    if isinstance(body, dict) and body.get("isError"):
-        raise RuntimeError(str(body.get("content") or "MCP tool returned an error"))
-    return body if isinstance(body, dict) else {"content": body}
+    """Вызывает MCP tools/call с паузой/повтором при 403/429 и логированием ошибок."""
+    max_retries = max(0, min(int(os.getenv("MCP_MAX_RETRIES", str(MAX_RETRIES))), 5))
+    for attempt in range(max_retries + 1):
+        response = request(server_id, "tools/call", {
+            "name": tool_name,
+            "arguments": arguments or {},
+        })
+        if isinstance(response, dict) and response.get("error"):
+            rpc_err = response["error"]
+            rpc_code = rpc_err.get("code") if isinstance(rpc_err, dict) else None
+            err_text = _extract_error_text(rpc_err) or "MCP JSON-RPC error"
+            http_code = _detect_http_status(err_text)
+            if http_code in RETRY_STATUS_CODES and attempt < max_retries:
+                delay = _retry_delay(attempt)
+                log.warning("MCP JSON-RPC ошибка [%s:%s] status=%s: пауза %.1f с и повтор (%d/%d): %s",
+                            server_id, tool_name, http_code, delay, attempt + 1, max_retries, err_text[:240])
+                if delay > 0:
+                    time.sleep(delay)
+                continue
+            status_val = http_code or rpc_code or "rpc_error"
+            log.error("MCP JSON-RPC ошибка [%s:%s] status=%s: %s",
+                      server_id, tool_name, status_val, err_text[:500])
+            raise McpError(err_text, status_code=http_code, logged=True)
+
+        body = _result_body(response)
+        if isinstance(body, dict) and body.get("isError"):
+            err_text = _extract_error_text(body.get("content")) or "MCP-сервер вернул ошибку без описания"
+            http_code = _detect_http_status(err_text)
+            if http_code in RETRY_STATUS_CODES and attempt < max_retries:
+                delay = _retry_delay(attempt)
+                log.warning("MCP инструмент [%s:%s] вернул код %s (status=%s): пауза %.1f с и повтор (%d/%d): %s",
+                            server_id, tool_name, http_code, http_code, delay, attempt + 1, max_retries, err_text[:240])
+                if delay > 0:
+                    time.sleep(delay)
+                continue
+            log.error("MCP ошибка инструмента [%s:%s] status=%s: %s",
+                      server_id, tool_name, http_code or "tool_error", err_text[:500])
+            msg = f"MCP HTTP {http_code}: {err_text}" if http_code and f"{http_code}" not in err_text else err_text
+            raise McpError(msg, status_code=http_code, logged=True)
+        return body if isinstance(body, dict) else {"content": body}
+    return {}
 
 
 def test_connection(server_id: str) -> dict[str, Any]:
@@ -260,6 +391,9 @@ def test_connection(server_id: str) -> dict[str, Any]:
             pass
         return {"connected": data[server_id]["connected"], "server": result.get("result", result)}
     except Exception as exc:
+        status = getattr(exc, "status_code", None) or getattr(getattr(exc, "response", None), "status_code", None)
+        log.error("MCP ошибка проверки подключения [%s] status=%s: %s",
+                  server_id, status or "error", exc)
         data[server_id]["connected"] = False
         data[server_id]["last_error"] = f"{exc.__class__.__name__}: {exc}"
         data[server_id]["updated_at"] = int(time.time())

@@ -8,14 +8,9 @@ import json
 import time
 import logging
 
-LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
-logging.basicConfig(level=getattr(logging, LOG_LEVEL, logging.INFO),
-                    format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-logger = logging.getLogger(__name__)
-PORT = int(os.getenv("PORT", "5000"))
-
-# ---------- Загрузка .env ----------
-_env_path = os.path.join(os.path.dirname(__file__), ".env")
+# ---------- Загрузка .env (до инициализации логгера и порта) ----------
+_ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
+_env_path = os.path.join(_ROOT_DIR, ".env")
 if os.path.exists(_env_path):
     with open(_env_path, "r", encoding="utf-8") as _f:
         for _line in _f:
@@ -23,6 +18,56 @@ if os.path.exists(_env_path):
             if _line and not _line.startswith("#") and "=" in _line:
                 _k, _v = _line.split("=", 1)
                 os.environ.setdefault(_k.strip(), _v.strip())
+
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
+NOVA_LOG_FILE = os.getenv("NOVA_LOG_FILE", os.path.join(_ROOT_DIR, "nova.log"))
+
+
+def _stream_points_to_file(stream, filepath: str) -> bool:
+    """Проверяет, перенаправлен ли уже stderr/stdout в тот же файл (например, ``>> nova.log``)."""
+    try:
+        if not os.path.exists(filepath) or not hasattr(stream, "fileno"):
+            return False
+        st_stream = os.fstat(stream.fileno())
+        st_file = os.stat(filepath)
+        return (st_stream.st_dev, st_stream.st_ino) == (st_file.st_dev, st_file.st_ino)
+    except (OSError, ValueError):
+        return False
+
+
+def configure_logging(log_file: str | None = None, *, force_file: bool = False) -> None:
+    """Настраивает логирование с дозаписью (``mode='a'``), не затирая старый ``nova.log``."""
+    level = getattr(logging, os.getenv("LOG_LEVEL", LOG_LEVEL).upper(), logging.INFO)
+    logging.basicConfig(level=level, format=LOG_FORMAT)
+    root = logging.getLogger()
+    root.setLevel(level)
+
+    in_pytest = "pytest" in sys.modules or bool(os.getenv("PYTEST_CURRENT_TEST"))
+    if in_pytest and not force_file and not os.getenv("NOVA_LOG_FILE"):
+        return
+
+    target = os.path.abspath(log_file or os.getenv("NOVA_LOG_FILE", NOVA_LOG_FILE))
+    for existing in root.handlers:
+        if isinstance(existing, logging.FileHandler) and os.path.abspath(getattr(existing, "baseFilename", "")) == target:
+            return
+    if _stream_points_to_file(sys.stderr, target):
+        return
+    try:
+        parent = os.path.dirname(target)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        fh = logging.FileHandler(target, mode="a", encoding="utf-8")
+        fh.setLevel(level)
+        fh.setFormatter(logging.Formatter(LOG_FORMAT))
+        root.addHandler(fh)
+    except OSError:
+        pass
+
+
+configure_logging()
+logger = logging.getLogger(__name__)
+PORT = int(os.getenv("PORT", "5000"))
 
 # ---------- Google OAuth ----------
 GOOGLE_CLIENT_ID     = os.getenv("GOOGLE_CLIENT_ID", "")

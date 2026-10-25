@@ -254,8 +254,8 @@ cp chat_history.backup.json chat_history.json
 Если хочешь запустить приложение в фоновом процессе:
 
 ```bash
-# Используй nohup
-nohup python app.py > app.log 2>&1 &
+# Используй nohup с дозаписью (>>), чтобы старые логи не затирались при перезапуске
+FLASK_DEBUG=false nohup python app.py >> nova.log 2>&1 &
 
 # Или используй screen
 pkg install screen
@@ -293,7 +293,7 @@ TEMPERATURE = 0.5  # вместо 0.7
 
 1. **Проверь интернет** — `ping google.com`
 2. **Проверь Python** — `python --version`
-3. **Проверь логи** — `cat app.log`
+3. **Проверь логи** — `tail -n 100 nova.log`
 4. **Переустанови** — `rm -rf venv && pip install -r requirements.txt`
 5. **Спроси на GitHub** — открой Issue с описанием проблемы
 
