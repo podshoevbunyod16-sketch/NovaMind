@@ -42,7 +42,7 @@ import time
 from agenticseek import policy
 from agenticseek.core.errors import AgenticSeekError, AgentStopped, StepLimitReached
 from agenticseek.core.logger import Logger
-from agenticseek.core.markup import normalize_answer, sanitize_answer
+from agenticseek.core.markup import normalize_answer, normalize_tool_json, sanitize_answer
 from agenticseek.timeline import (MIN_THOUGHT_SECONDS, plan_text, thought_event,
                                   tool_event)
 from agenticseek.core.memory import Memory
@@ -508,7 +508,7 @@ class Agent:
             # Модель может ответить тегами <bash>…</bash> вместо блока ```bash:
             # приводим к протоколу, иначе команда не выполнится, а теги попадут
             # в ответ пользователю.
-            answer = normalize_answer(answer)
+            answer = normalize_tool_json(normalize_answer(answer))
             self.memory.push("assistant", answer)
             self.last_answer = answer
             feedback, executed = self.execute_blocks(answer)
