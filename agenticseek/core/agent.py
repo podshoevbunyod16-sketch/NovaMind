@@ -334,6 +334,13 @@ class Agent:
         if tool is None:
             return False, (f"[failure] Инструмент «{tag}» недоступен. "
                            f"Доступно: {', '.join(self.available_tools()) or 'ничего'}.")
+        # Resolve command aliases before confirmation: MCP writes must be checked
+        # as MCP writes, never disguised as an innocuous terminal command.
+        if tag in ("terminal", "bash") and not save_path:
+            from agenticseek.tools.terminal_commands import dispatch
+            routed = dispatch(self, payload)
+            if routed is not None:
+                return routed
         signature = self._signature(tag, payload, save_path)
         repeats = self._signatures.get(signature, 0) + 1
         self._signatures[signature] = repeats
@@ -539,7 +546,8 @@ class Agent:
     def label(self) -> str:
         return {"planner_agent": "Планировщик", "code_agent": "Программист",
                 "file_agent": "Файловый агент", "browser_agent": "Веб-агент",
-                "casual_agent": "Собеседник"}.get(self.type, "Агент")
+                "casual_agent": "Собеседник",
+                "orchestrator_agent": "Оркестратор"}.get(self.type, "Агент")
 
     def limit_answer(self) -> str:
         """Honest message when the agent ran out of turns."""
