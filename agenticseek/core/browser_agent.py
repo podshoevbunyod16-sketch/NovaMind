@@ -49,15 +49,18 @@ class BrowserAgent(Agent):
 
     # ── main loop ─────────────────────────────────────────────────────────
     def process(self, goal: str, speech_module=None):
-        if self.browser is None and "web_search" not in self.tools:
+        if self.browser is None and "web_search" not in self.tools and "mcp_call" not in self.tools:
             self.emit({"type": "step", "icon": "⚠️", "text": "Браузер недоступен"})
             return NO_BROWSER_TEXT, ""
 
+        mcp_hint = (" Если подключён MCP-сервер (```mcp_call```), подходящий по смыслу задачи, "
+                    "вызывай его напрямую." if "mcp_call" in self.tools else "")
         self.memory.push("user", (
             f"Цель: {goal}\n\n"
-            "Порядок работы: если нужен свежий факт — сделай поиск ```web_search```, "
-            "затем открой самую релевантную ссылку ```web_open``` (или напиши URL строкой). "
-            "Кратко выписывай найденные факты. Когда данных достаточно — ответь без блоков."))
+            "Порядок работы: если в запросе уже есть ссылка (например GitHub или статья) — "
+            "сразу открой её через ```web_open```; если нужен свежий факт — сделай поиск "
+            "```web_search```, затем открой релевантную ссылку ```web_open```."
+            f"{mcp_hint} Кратко выписывай факты. Когда данных достаточно — ответь без блоков."))
 
         for step in range(1, self.max_turns + 1):
             self.check_limits()

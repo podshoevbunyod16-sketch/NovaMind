@@ -30,7 +30,7 @@ from agenticseek.core.agent import clip
 from agenticseek.tools.tools import Tools
 
 MAX_LINKS = 20
-MAX_PAGE_CHARS = 6000
+MAX_PAGE_CHARS = 8000
 
 
 def is_public_url(url: str) -> bool:
@@ -106,7 +106,10 @@ class WebSearchTool(Tools):
 class WebOpenTool(Tools):
     tag = "web_open"
     name = "WebOpen"
-    description = "Прочитать страницу по URL (текст без скриптов)."
+    description = (
+        "Открыть страницу или репозиторий по URL (для ссылок GitHub возвращает "
+        "метаданные, полное дерево файлов/папок и README; для сайтов — текст страницы)."
+    )
     risk = "safe"
 
     def __init__(self, reader: Optional[Callable[..., tuple]] = None, state=None,

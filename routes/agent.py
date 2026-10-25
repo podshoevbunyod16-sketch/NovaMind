@@ -98,16 +98,34 @@ def is_complex_request(text: str) -> bool:
 _CREATE_VERB = re.compile(r"(сгенер|созда|сдела|generate|create|make)", re.I)
 _SHOW_VERB = re.compile(r"(покажи|show|display)", re.I)
 #: «Нарисуй», «озвучь», «спой» — медиа и без существительного. Функции вида
-#: `draw_square(` и `drawSq` не считаем: это код, а не просьба нарисовать.
-_DRAW_VERB = re.compile(r"(?<![\w])(?:нарису\w*|draw|sketch|render)(?![\w(])", re.I)
-_VOICE_VERB = re.compile(r"(?<![\w])(?:озвуч\w*|прочитай\s+вслух|скажи\s+голосом|спой|"
-                         r"speak|synthesize|voice\s+over)", re.I)
+#: `draw_square(` и `drawSq`, а также части URL/имён (`user-sketch/repo`,
+#: `sketch.py`, `на render`) не считаем: это код, ссылки или сервисы.
+_DRAW_VERB = re.compile(
+    r"(?<![\wа-яё./-])(?:нарису\w*|draw|sketch|(?<!на\s)(?<!on\s)render)(?![\wа-яё(./-])",
+    re.I,
+)
+_VOICE_VERB = re.compile(r"(?<![\wа-яё./-])(?:озвуч\w*|прочитай\s+вслух|скажи\s+голосом|спой|"
+                         r"speak|synthesize|voice\s+over)(?![\wа-яё(./-])", re.I)
 #: Запуск кода — это исполнение, а не генерация.
 _RUN_CODE = re.compile(r"(запусти|запустить|выполни|выполнить|run|execute|debug|исправь|"
                        r"что\s+выводит|проверь\s+код)", re.I)
 _CODE_HINT = re.compile(r"(^|\s)(python|javascript|typescript|java|c\+\+|bash|shell|html|css|"
                         r"```|import\s|def\s|class\s|print\(|console\.log|\bкод\b|скрипт)",
                        re.I)
+#: Запросы про репозитории, структуру проекта, файлы, терминал, MCP или поиск
+#: всегда обрабатывает агент с инструментами, а не прямой вызов генератора медиа.
+_NON_MEDIA_TASK_RE = re.compile(
+    r"(?<![\wа-яё])(?:структур\w*|в\s+виде\s+дерев\w*|"
+    r"дерев\w*\s+(?:файл|папок|каталог|директор|проект|репозитор)|"
+    r"репозитори\w*|github|гитхаб\w*|mcp|терминал\w*|команд\w*|"
+    r"файл\w*|папк\w*|каталог\w*|директори\w*|ветк\w*|коммит\w*|"
+    r"проанализир\w*|разбер\w*|найд(?:и|ите)|поищ(?:и|ите)|"
+    r"скача\w*|склонир\w*|депло\w*|deploy)(?![\wа-яё])",
+    re.I,
+)
+_URL_IN_TEXT = re.compile(r"(?:https?://|www\.)\S+", re.I)
+_INLINE_CODE = re.compile(r"`[^`\n]+`")
+_PATH_OR_SLUG = re.compile(r"(?:^|(?<=\s))[\w.-]+/[\w./-]+")
 _IMAGE_NOUN = re.compile(r"(изображени|картинк|фото|иллюстрац|постер|арт\b|image|picture|photo|"
                          r"illustration|poster)", re.I)
 _VIDEO_NOUN = re.compile(r"(видео|ролик|клип|video|clip|анимаци|animation|gif)", re.I)
@@ -253,14 +271,22 @@ def requested_media_kind(text: str):
     Возвращает ``"image"``, ``"video"``, ``"audio"`` или ``None`` (обычный ход).
     """
     raw = str(text or "")
-    # Код — данные, а не просьба нарисовать: `draw_square`, `render()`, `show()`
-    # внутри него не должны превращать запрос в генерацию.
+    # Код, ссылки и пути (`user-sketch/repo`, `https://…`, `` `render()` ``) —
+    # это данные задачи, а не просьба нарисовать картинку.
     prose = _FENCED.sub(" ", raw)
+    prose = _INLINE_CODE.sub(" ", prose)
+    if _URL_IN_TEXT.search(prose):
+        return None
+    prose = _URL_IN_TEXT.sub(" ", prose)
+    prose = _PATH_OR_SLUG.sub(" ", prose)
     if _CODE_HINT.search(prose):
         prose = " ".join(line for line in prose.splitlines()
                          if not re.search(r"[=;{}()\[\]]|^\s{2,}\S", line))
     if not prose.strip():
-        prose = raw
+        return None
+
+    if _NON_MEDIA_TASK_RE.search(prose):
+        return None
 
     if _RUN_CODE.search(prose) and not _IMAGE_NOUN.search(prose) \
             and not _VIDEO_NOUN.search(prose) and not _AUDIO_NOUN.search(prose):
@@ -985,23 +1011,157 @@ def _local_model(messages):
     return local_llm.complete(messages)
 
 
-def _read_page(url, max_chars=6000):
-    """Чтение страницы для веб-агента (тот же зачитыватель, что у поиска)."""
-    gh = re.match(r"https?://github\.com/([^/\s]+)/([^/\s?#]+)/?$", str(url or ""))
+_GITHUB_URL_RE = re.compile(
+    r"^https?://github\.com/([^/\s?#]+)/([^/\s?#]+?)(?:\.git)?"
+    r"(?:/(tree|blob)/([^/\s?#]+)(?:/([^\s?#]*))?)?/?(?:\?.*)?(?:#.*)?$",
+    re.I,
+)
+
+
+def _format_github_tree(entries: list[dict], subpath: str = "", max_entries: int = 180) -> str:
+    """Формирует компактное ASCII-дерево файлов и папок из ответа GitHub git/trees API."""
+    prefix = (subpath.strip("/") + "/") if subpath.strip("/") else ""
+    items: list[tuple[str, str]] = []
+    for entry in entries or []:
+        if not isinstance(entry, dict):
+            continue
+        raw_path = str(entry.get("path") or "").strip("/")
+        kind = str(entry.get("type") or "blob")
+        if not raw_path:
+            continue
+        if prefix:
+            if not raw_path.startswith(prefix):
+                continue
+            raw_path = raw_path[len(prefix):]
+            if not raw_path:
+                continue
+        items.append((raw_path, kind))
+    if not items:
+        return ""
+
+    # Если файлов очень много — сначала приоритет верхним уровням (глубина <= 2).
+    omitted = 0
+    if len(items) > max_entries:
+        shallow = [it for it in items if it[0].count("/") <= 1]
+        deep = [it for it in items if it[0].count("/") > 1]
+        selected = shallow[:max_entries]
+        if len(selected) < max_entries:
+            selected.extend(deep[: max_entries - len(selected)])
+        omitted = len(items) - len(selected)
+        items = selected
+
+    tree: dict[str, dict] = {}
+    dirs: set[str] = set()
+    for rel_path, kind in items:
+        parts = [p for p in rel_path.split("/") if p]
+        node = tree
+        cur = ""
+        for idx, part in enumerate(parts):
+            cur = f"{cur}/{part}" if cur else part
+            is_last = idx == len(parts) - 1
+            if not is_last or kind == "tree":
+                dirs.add(cur)
+            node = node.setdefault(part, {})
+
+    lines: list[str] = []
+
+    def _walk(node: dict[str, dict], parent_path: str, indent: str) -> None:
+        def _sort_key(name: str):
+            full = f"{parent_path}/{name}" if parent_path else name
+            return (0 if full in dirs else 1, name.lower())
+
+        keys = sorted(node.keys(), key=_sort_key)
+        for idx, name in enumerate(keys):
+            is_last = idx == len(keys) - 1
+            full = f"{parent_path}/{name}" if parent_path else name
+            is_dir = full in dirs or bool(node[name])
+            connector = "└── " if is_last else "├── "
+            lines.append(f"{indent}{connector}{name}{'/' if is_dir else ''}")
+            if node[name]:
+                next_indent = indent + ("    " if is_last else "│   ")
+                _walk(node[name], full, next_indent)
+
+    _walk(tree, "", "")
+    if omitted > 0:
+        lines.append(f"└── … (ещё {omitted} элементов опущено для компактности)")
+    return "\n".join(lines)
+
+
+def _read_page(url, max_chars=8000):
+    """Чтение страницы для веб-агента (с поддержкой дерева файлов и файлов GitHub)."""
+    gh = _GITHUB_URL_RE.match(str(url or "").strip())
     if gh:
         try:
             import httpx
-            owner, repo = gh.group(1), gh.group(2)
+            owner, repo, view_kind, ref, subpath = (
+                gh.group(1),
+                gh.group(2),
+                (gh.group(3) or "").lower(),
+                gh.group(4) or "",
+                (gh.group(5) or "").strip("/"),
+            )
             head = {"User-Agent": "NovaMind", "Accept": "application/vnd.github+json"}
-            meta = httpx.get(f"https://api.github.com/repos/{owner}/{repo}",
-                             headers=head, timeout=15).json()
-            readme = httpx.get(f"https://api.github.com/repos/{owner}/{repo}/readme",
-                               headers={**head, "Accept": "application/vnd.github.raw+json"},
-                               timeout=15, follow_redirects=True)
-            title = (f"GitHub {owner}/{repo} · звёзд: {meta.get('stargazers_count', '?')} · "
-                     f"язык: {meta.get('language') or '—'} · {meta.get('description') or ''}")
+            gh_token = (os.getenv("GITHUB_TOKEN") or "").strip()
+            if gh_token:
+                head["Authorization"] = f"Bearer {gh_token}"
+
+            if view_kind == "blob" and ref and subpath:
+                raw_resp = httpx.get(
+                    f"https://api.github.com/repos/{owner}/{repo}/contents/{subpath}",
+                    params={"ref": ref},
+                    headers={**head, "Accept": "application/vnd.github.raw+json"},
+                    timeout=15,
+                    follow_redirects=True,
+                )
+                if raw_resp.status_code == 200:
+                    header = f"GitHub файл {owner}/{repo} ({ref}) · {subpath}\n\n"
+                    return (header + raw_resp.text)[:max_chars], ""
+
+            meta_resp = httpx.get(
+                f"https://api.github.com/repos/{owner}/{repo}",
+                headers=head,
+                timeout=15,
+            )
+            meta = meta_resp.json() if meta_resp.status_code == 200 else {}
+            branch = ref or str(meta.get("default_branch") or "main")
+            title = (
+                f"GitHub {owner}/{repo} (ветка: {branch}) · "
+                f"звёзд: {meta.get('stargazers_count', '?')} · "
+                f"язык: {meta.get('language') or '—'} · "
+                f"{meta.get('description') or ''}"
+            ).strip()
+
+            sections = [title]
+            tree_resp = httpx.get(
+                f"https://api.github.com/repos/{owner}/{repo}/git/trees/{branch}",
+                params={"recursive": "1"},
+                headers=head,
+                timeout=15,
+            )
+            if tree_resp.status_code == 200:
+                tree_json = tree_resp.json()
+                rendered_tree = _format_github_tree(tree_json.get("tree") or [], subpath=subpath)
+                if rendered_tree:
+                    root_label = f"{repo}/{subpath}" if subpath else f"{repo}/"
+                    sections.append(f"Структура репозитория (дерево файлов):\n{root_label}\n{rendered_tree}")
+
+            readme_url = (
+                f"https://api.github.com/repos/{owner}/{repo}/readme/{subpath}"
+                if subpath else f"https://api.github.com/repos/{owner}/{repo}/readme"
+            )
+            readme_params = {"ref": branch} if ref else None
+            readme = httpx.get(
+                readme_url,
+                params=readme_params,
+                headers={**head, "Accept": "application/vnd.github.raw+json"},
+                timeout=15,
+                follow_redirects=True,
+            )
             if readme.status_code == 200 and readme.text.strip():
-                return (title + "\n\n" + readme.text)[:max_chars], ""
+                sections.append("README:\n" + readme.text.strip()[:3000])
+
+            if len(sections) > 1 or meta:
+                return "\n\n".join(sections)[:max_chars], ""
         except Exception:
             pass
     from routes.search import fetch_page_text
