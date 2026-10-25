@@ -95,13 +95,7 @@ class Tools:
         if self.tag == "undefined":
             raise RuntimeError("Tool tag is not defined")
         llm_text = str(llm_text or "")
-<<<<<<< HEAD
-        if self.risk == "safe":
-            llm_text = normalize_tag_calls(llm_text, self.tag)
-        start_tag = f"```{self.tag}"
-=======
         opener = self._opener()
->>>>>>> origin/arena/5fd31ee0-novamind
         end_tag = "```"
         if not opener.search(llm_text):
             return []
