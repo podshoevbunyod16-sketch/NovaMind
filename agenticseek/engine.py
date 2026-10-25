@@ -275,6 +275,15 @@ class AgentEngine:
         if ctx.profile == "coding":
             self._build_coding_agents(name)
             return
+        # Explicit roles and strict MCP preserve their narrower capabilities.
+        mode = os.getenv("AGENTICSEEK_EXECUTION_MODE", "unified").strip().lower()
+        conversation_only = bool(re.fullmatch(
+            r"\s*(?:привет|здравствуй(?:те)?|спасибо|как дела|hi|hello|thanks)[!?.\s]*",
+            ctx.goal, re.I))
+        if (mode == "unified" and not ctx.force_role and not ctx.strict_mcp
+                and not conversation_only):
+            self._build_orchestrator(name)
+            return
         browser = self._build_browser()
 
         planner = PlannerAgent(name, prompt_path("planner_agent"), self.provider,
@@ -302,7 +311,11 @@ class AgentEngine:
             planner.agents.pop("coder", None)
             planner.agents.pop("file", None)
 
-        extras = "\n\n".join(part for part in (ctx.memory_prompt, ctx.skills_prompt) if part)
+        from agenticseek.tools.terminal_commands import HELP as terminal_help
+        extras = "\n\n".join(part for part in (
+            ctx.memory_prompt, ctx.skills_prompt,
+            terminal_help if ctx.workspace and not ctx.strict_mcp else "",
+        ) if part)
         if extras:
             for agent in agents:
                 agent.extra_context = extras
@@ -318,6 +331,28 @@ class AgentEngine:
         self._budget = budget
         self.router = AgentRouter(agents, classify=self._classify,
                                   mode=os.getenv("AGENTICSEEK_ROUTER", "heuristic"))
+
+    def _build_orchestrator(self, name: str) -> None:
+        """One model owns the goal and selects request-scoped tools itself."""
+        from agenticseek.core.orchestrator_agent import OrchestratorAgent
+        from agenticseek.tools.terminal_commands import HELP as terminal_help
+
+        ctx = self.ctx
+        agent = OrchestratorAgent(
+            name, prompt_path("orchestrator_agent"), self.provider,
+            self._build_tools(), max_turns=ctx.max_steps,
+        )
+        agent.extra_context = "\n\n".join(
+            part for part in (ctx.memory_prompt, ctx.skills_prompt) if part)
+        # Operational instructions are separate from untrusted remembered facts.
+        if ctx.workspace:
+            agent.prompt += "\n\n" + terminal_help
+        agent.attach(events=self._emit, cancel=ctx.cancel,
+                     deadline=ctx.deadline or (time.monotonic() + ctx.timeout),
+                     step_budget=self._budget, confirm=self._confirm_hook(),
+                     record=self._record_hook(), state=self.state)
+        self.agents = {agent.type: agent}
+        self.router = AgentRouter([agent])
 
     def _build_coding_agents(self, name: str) -> None:
         """Coding profile: one read-first agent over the repository."""
