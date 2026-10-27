@@ -52,19 +52,20 @@ def is_secret(text: str) -> bool:
 
 
 def user_key(session, signed_in) -> str:
-    """Ключ памяти пользователя. Пустая строка — гостю память не положена."""
+    """Return a stable, non-colliding key for this authenticated identity."""
     if not memory_enabled() or not signed_in:
         return ""
-    for field in ("nova_user_email", "user_email", "email",
-                  "nova_user_nick", "username"):
-        value = str(session.get(field) or "").strip()
-        if value:
-            return value.lower()[:180]
+    email = str(session.get("nova_user_email") or session.get("user_email") or session.get("email") or "").strip().lower()
+    if email and session.get("nova_google_login"):
+        return ("email:" + email)[:180]
     if session.get("admin_logged_in"):
-        return "admin"
-    # Сессия есть, но имени нет (например, вход по cookie) — ключ по самой сессии.
+        return ("admin:" + str(session.get("admin_username") or "admin").strip().lower())[:180]
+    nick = str(session.get("nova_user_nick") or session.get("username") or "").strip().lower()
+    if nick:
+        import identity
+        return ("nick:" + nick + ":" + identity.browser_id(session))[:180]
     key = str(session.get("agent_memory_key") or "").strip()
-    return f"session:{key}"[:180] if key else ""
+    return ("session:" + key)[:180] if key else ""
 
 
 def remember(key, text, kind=DEFAULT_KIND, tags="", importance=1):

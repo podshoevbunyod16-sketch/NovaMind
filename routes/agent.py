@@ -1181,3 +1181,22 @@ def agent_usage():
     # старых клиентов и скриптов, которые уже обращаются к этому полю.
     return jsonify({"ok": True, "chat_id": chat_id, "chat": totals, "totals": totals,
                     "groq": usage_stats.groq_limits()})
+
+# >>> NOVA-USER-ISOLATION
+@agent_bp.before_request
+def _nova_agent_owner_guard():
+    from database import chat_allowed as _chat_allowed
+    path = request.path
+    data = (request.get_json(silent=True) or {}) if request.method in ("POST", "PUT", "PATCH") else {}
+    chat_id = data.get("chat_id") or request.args.get("chat_id")
+    if chat_id and not _chat_allowed(chat_id):
+        return jsonify({"error": "Чат не найден"}), 404
+    if path == "/api/agent/runs" and not chat_id:
+        return jsonify({"ok": True, "runs": []})
+    if path.startswith("/api/agent/runs/"):
+        run_id = path.rsplit("/", 1)[-1]
+        rec = database.get_agent_run(run_id)
+        if not rec or not _chat_allowed(rec.get("chat_id") or ""):
+            return jsonify({"ok": False, "error": "Запуск не найден"}), 404
+    return None
+# <<< NOVA-USER-ISOLATION
