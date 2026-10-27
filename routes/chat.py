@@ -451,3 +451,20 @@ def api_clear_current_chat():
     session['chat_id'] = create_chat()
     contents = []
     return jsonify({'success': True, 'new_chat_id': session['chat_id']})
+
+# >>> NOVA-USER-ISOLATION
+@chat_bp.before_request
+def _nova_chat_owner_guard():
+    import re as _re
+    from database import chat_allowed as _chat_allowed
+    match = _re.match(r"^/api/chats/([^/]+)(?:/(?:traces|switch))?$", request.path)
+    if match and match.group(1) not in ("current", "clear"):
+        if not _chat_allowed(match.group(1)):
+            return jsonify({"error": "Чат не найден"}), 404
+    if request.method == "POST" and request.path == "/send":
+        data = request.get_json(silent=True) or {}
+        chat_id = data.get("chat_id")
+        if chat_id and not _chat_allowed(chat_id):
+            return jsonify({"error": "Чат не найден"}), 404
+    return None
+# <<< NOVA-USER-ISOLATION
