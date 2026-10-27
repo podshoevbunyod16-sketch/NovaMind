@@ -880,3 +880,72 @@ def finish_agent_run(record_id, status, answer="", error="", steps=0):
     """Закрывает запуск: статус, ответ, время окончания."""
     return update_agent_run(record_id, status=status, answer=answer, error=error,
                             steps=int(steps or 0), finished_at=time.time())
+
+# >>> NOVA-USER-ISOLATION
+import identity as _nova_identity
+from flask import has_request_context as _nova_has_request_context
+
+
+def _nova_migrate_chat_owner():
+    with get_db() as conn:
+        cols = [row[1] for row in conn.execute("PRAGMA table_info(chats)")]
+        if "owner" not in cols:
+            conn.execute("ALTER TABLE chats ADD COLUMN owner TEXT NOT NULL DEFAULT ''")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_chats_owner_updated ON chats(owner, updated_at DESC)")
+
+
+_nova_migrate_chat_owner()
+
+
+def create_chat(title="Новый чат", owner=None):
+    chat_id = str(uuid.uuid4())
+    now = time.time()
+    if owner is None:
+        owner = _nova_identity.chat_owner() if _nova_has_request_context() else ""
+    with _db_lock:
+        with get_db() as conn:
+            conn.execute("INSERT INTO chats (id, title, created_at, updated_at, owner) VALUES (?, ?, ?, ?, ?)",
+                         (chat_id, title, now, now, str(owner or "")[:200]))
+    return chat_id
+
+
+def chat_allowed(chat_id):
+    if not _nova_has_request_context():
+        return True
+    with get_db() as conn:
+        row = conn.execute("SELECT owner FROM chats WHERE id=?", (str(chat_id or ""),)).fetchone()
+    if row is None:
+        return False
+    owner = str(row["owner"] or "")
+    if owner and owner == _nova_identity.chat_owner():
+        return True
+    return not owner and bool(session.get("admin_logged_in"))
+
+
+def list_chats(limit=50, owner=None):
+    if owner is None and _nova_has_request_context():
+        owner = _nova_identity.chat_owner()
+    sql = ("SELECT c.id, c.title, c.created_at, c.updated_at, COUNT(m.id) AS msg_count "
+           "FROM chats c LEFT JOIN messages m ON c.id=m.chat_id")
+    args = []
+    if owner is not None:
+        if _nova_has_request_context() and session.get("admin_logged_in"):
+            sql += " WHERE (c.owner=? OR c.owner='')"
+        else:
+            sql += " WHERE c.owner=?"
+        args.append(owner)
+    sql += " GROUP BY c.id ORDER BY c.updated_at DESC LIMIT ?"
+    args.append(max(1, min(int(limit), 200)))
+    with get_db() as conn:
+        rows = conn.execute(sql, args).fetchall()
+    return [dict(row) for row in rows]
+
+
+def get_or_create_session_chat():
+    chat_id = session.get("chat_id")
+    if chat_id and chat_allowed(chat_id):
+        return chat_id
+    chat_id = create_chat()
+    session["chat_id"] = chat_id
+    return chat_id
+# <<< NOVA-USER-ISOLATION
