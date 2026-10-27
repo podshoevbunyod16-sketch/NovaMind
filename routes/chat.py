@@ -193,7 +193,7 @@ def send():
             return jsonify({'error': error}), 502
         marker = media_result_marker(result, model)
         add_message(chat_id, "assistant", marker)
-        trim_messages(chat_id, max_messages=100)
+        trim_messages(chat_id, max_messages=10)
         contents = get_chat_history(chat_id, limit=20)
         return jsonify({
             'reply': media_summary_text(result),

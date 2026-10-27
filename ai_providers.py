@@ -343,7 +343,7 @@ def groq_request_with_rotation(url, payload, headers, timeout=90, max_retries=3)
 # вручную и ломался на Gemini (в URL провайдера плейсхолдер {model}).
 # ══════════════════════════════════════════════════════════════════
 
-REASONING_MODELS_HINT = ("gpt-oss", "deepseek-r1", "qwen-3", "glm-4.5", "o1", "o3")
+REASONING_MODELS_HINT = ("gpt-oss", "deepseek-r1", "qwen-3", "glm-4.5", "o1", "o3", "nemotron")
 
 # ── Нативный tool calling ────────────────────────────────────────────
 # Провайдеры, которые принимают OpenAI-совместимый массив `tools` и
@@ -432,11 +432,15 @@ def openai_tools_payload(tools):
 def _clean_reasoning_tail(value):
     """Удаляет распространённые служебные маркеры, сохраняя обычный текст."""
     text = str(value or "")
+    # Удаляем парные теги вида <thought>...</thought>, [THINK]...[/THINK] и т.п.
+    text = re.sub(r"(?is)<\s*(?:thought|think|reasoning|analysis|internal)\b[^>]*>.*?<\s*/\s*(?:thought|think|reasoning|analysis|internal)\s*>", "", text)
+    # Удаляем одиночные открывающие/закрывающие теги
+    text = re.sub(r"(?is)</?\s*(?:thought|think|reasoning|analysis|internal)\b[^>]*>", "", text)
+    # Удаляем маркеры вида [THINK] или [/THINK]
     text = re.sub(r"(?is)\[/?(?:THINK|REASONING|ANALYSIS|INTERNAL)\]", "", text)
-    text = re.sub(r"(?is)</?(?:thought|think|analysis|reasoning|internal)\b[^>]*>", "", text)
+    # Удаляем маркеры <|think|>, <|analysis|> и т.п.
     text = re.sub(r"(?is)<\|(?:think|analysis|reasoning)[^|]*\|>", "", text)
     return text.strip()
-
 
 def provider_headers(provider: str) -> dict:
     """Заголовки для провайдера (ключ подставляется на сервере, не в браузере)."""

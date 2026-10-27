@@ -223,7 +223,7 @@ function toggleReasoning() {
   localStorage.setItem('nova_reasoning', reasoningOn ? '1' : '0');
   document.getElementById('btn-reasoning')?.classList.toggle('active', reasoningOn);
   showNotification(reasoningOn
-    ? '🧠 Режим рассуждения включён — покажу ход мыслей модели'
+    ? 'Режим рассуждения включён — покажу ход мыслей модели'
     : 'Рассуждение выключено', reasoningOn ? 'ok' : 'info');
 }
 
