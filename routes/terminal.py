@@ -125,10 +125,15 @@ NOVA_HELP = """Встроенная команда nova (работает чер
   nova search <запрос> --save   поиск и сохранить выдачу в notes/research/
   nova read <url>               прочитать страницу и показать текст
   nova read <url> --save        прочитать и сохранить в notes/research/
+  nova web search <запрос>      то же, что nova search (синоним агента)
+  nova web open <url>           то же, что nova read (синоним агента)
+  nova tools                    список Linux-команд песочницы
+  nova mcp tools                каталог подключённых MCP-инструментов
   nova help                     эта справка
 
 Поиск идёт теми же бэкендами, что и поиск в чате (searxng, ddg, wiki, ...),
-поэтому свежие данные доступны и терминалу, и агенту.
+поэтому свежие данные доступны и терминалу, и агенту. Внутри блоков `terminal`
+агента дополнительно работают nova call <инструмент> '<payload>' и nova mcp call.
 """
 
 HELP_TEXT = """Доступные команды внутри workspace:
@@ -177,18 +182,19 @@ def signed_in():
 
 
 def can_use_workspace():
-    """Кто может выполнять команды песощницы.
+    """Кто может выполнять команды песочницы.
 
-    По умолчанию — любой вошедший. TERMINAL_STRICT_ADMIN=1 возвращает
-    старое поведение: только администратор.
+    По умолчанию — любой вошедший (Google, другой OAuth или быстрый вход по
+    нику): команды всё равно идут через allow-list и личную папку. Для жёстких
+    развёртываний есть ``TERMINAL_STRICT_ADMIN=1`` (только администратор) и
+    ``TERMINAL_REQUIRE_GOOGLE=1`` (только проверенный Google-вход).
     """
     if is_admin():
         return True
     if os.getenv("TERMINAL_STRICT_ADMIN", "0") == "1":
         return False
-    # Вход «по нику» не проверяется паролем: исполнять команды на сервере ему нельзя.
-    # TERMINAL_ALLOW_NICK=1 возвращает прежнее поведение.
-    if os.getenv("TERMINAL_ALLOW_NICK", "0") != "1" and not session.get("nova_google_login"):
+    if (os.getenv("TERMINAL_REQUIRE_GOOGLE", "0") == "1"
+            and not session.get("nova_google_login")):
         return False
     return signed_in()
 
@@ -474,15 +480,53 @@ def nova_read(url, max_chars=4000):
     return (text or ""), int((time.time() - started) * 1000)
 
 
+def _nova_tools_text() -> str:
+    """Каталог Linux-команд песочницы для `nova tools`."""
+    lines = [
+        f"Доступные Linux-команды песочницы ({len(ALLOWED_COMMANDS)}):",
+        "  " + " ".join(sorted(ALLOWED_COMMANDS)),
+        "",
+        "Пайпы и перенаправления: `ls -la | grep txt`, `echo x > note.txt`.",
+        "Встроенные: nova search/read/help/tools, nova web search/open, nova mcp tools.",
+        "В блоках `terminal` агента: nova call <инструмент> '<payload>', nova mcp call '<JSON>'.",
+    ]
+    return "\n".join(lines)
+
+
 def _run_nova(parts, timeout):
-    """Встроенные команды nova: поиск и чтение страниц без запуска shell."""
-    verb = parts[1] if len(parts) > 1 else ""
-    args = [chunk for chunk in parts[2:] if not chunk.startswith("--")]
-    save = "--save" in parts
+    """Встроенные команды nova: поиск, чтение страниц, каталог инструментов.
+
+    Команды агента (`nova web search`, `nova web open`, `nova mcp tools`,
+    `nova tools`) тоже работают из обычного терминала — пользователь видит
+    тот же интерфейс, что и ИИ в своих шагах.
+    """
+    argv = [str(part) for part in parts]
+    verb = argv[1] if len(argv) > 1 else ""
+    sub = argv[2] if len(argv) > 2 else ""
+
+    if verb == "web" and sub in ("search", "open", "read"):
+        verb = "read" if sub in ("open", "read") else "search"
+        argv = ["nova", verb] + argv[3:]
+    elif verb == "mcp" and sub == "tools":
+        try:
+            import mcp_registry
+            catalog = mcp_registry.format_tools_summary(
+                mcp_registry.connected_tools(), max_tools=40)
+        except Exception as error:  # noqa: BLE001 — каталог необязателен
+            catalog = f"каталог недоступен: {type(error).__name__}"
+        return _result(0, "MCP-инструменты:\n" + str(catalog))
+    elif verb == "call":
+        return _result(2, "", "nova call работает в шагах агента (блок `terminal`): "
+                              "там он делегирует вызов инструменту с проверкой прав.")
+
+    args = [chunk for chunk in argv[2:] if not chunk.startswith("--")]
+    save = "--save" in argv
     query = " ".join(args).strip()
 
     if verb == "help" or not verb:
         return _result(0, NOVA_HELP)
+    if verb == "tools":
+        return _result(0, _nova_tools_text())
     if not query:
         return _result(2, "", "nova: укажите запрос. Например: nova search python asyncio")
 

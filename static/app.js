@@ -15,7 +15,9 @@ let recognition    = null;
 let isTyping       = false;
 let webSearchOn    = localStorage.getItem('nova_web_search') === '1';
 let reasoningOn    = localStorage.getItem('nova_reasoning') === '1';
-let autoSearchOn   = false;
+// webSearchOn — это и есть кнопка «Автопоиск» (#btn-web-search). Один флаг на
+// всё: включён → агент может работать инструментами (в т.ч. терминалом Linux),
+// выключен → вообще без инструментов, запрос уходит прямо в ИИ-модель.
 let currentMode    = 'chat';
 let msgCount       = 0;
 let selectedModelName = 'Nova Ultra';
@@ -211,12 +213,16 @@ function setWebSearch(state, silent = false) {
   btn?.setAttribute('aria-pressed', state ? 'true' : 'false');
   if (!silent) {
     showNotification(state
-      ? '🔍 Автопоиск включён — ИИ ищет в интернете через Linux и отвечает с источниками'
-      : 'Автопоиск выключен', state ? 'ok' : 'info');
+      ? '🔍 Автопоиск включён — агент работает инструментами: поиск, Linux-команды, файлы'
+      : 'Автопоиск выключен — без инструментов, запрос уходит прямо в ИИ-модель',
+      state ? 'ok' : 'info');
   }
 }
 
 function toggleWebSearch() { setWebSearch(!webSearchOn); }
+
+// Прежнее имя функции остаётся для командной панели и старых закладок.
+function toggleAutoSearch() { toggleWebSearch(); }
 
 function toggleReasoning() {
   reasoningOn = !reasoningOn;
@@ -227,10 +233,8 @@ function toggleReasoning() {
     : 'Рассуждение выключено', reasoningOn ? 'ok' : 'info');
 }
 
-function toggleAutoSearch() {
-  autoSearchOn = !autoSearchOn;
-  document.getElementById('btn-auto-search')?.classList.toggle('active', autoSearchOn);
-  showNotification(autoSearchOn ? '🔍 Авто-поиск включён' : 'Авто-поиск выключен', 'info');
+function autoSearchEnabled() {
+  return !!webSearchOn;
 }
 
 // ========== ПРИКРЕПИТЬ ==========
@@ -580,6 +584,7 @@ function createAssistantTurn(options = {}) {
   let elapsedEl = null;
   let stepsEl = null;
   let liveThought = null;          // строка «Думает…», пока идёт рассуждение
+  let liveThink = null;            // «думаю над шагом» — живая строка think
   let reasoningText = '';
   let answerText = '';
   let sourcesData = [];
@@ -847,6 +852,145 @@ function createAssistantTurn(options = {}) {
     },
 
     /**
+     * Динамическое получение инструментов: «Вспоминаю инструменты…»,
+     * «Вспоминаю MCP-серверы…». Живая строка с точками приходит до сборки
+     * инструментов, событие с done=true превращает её в «Вспомнил …».
+     */
+    recall(event = {}) {
+      const phase = String(event.phase || 'tools');
+      const text = String(event.text || 'Вспоминаю инструменты');
+      const detail = String(event.detail || '').trim();
+      ensureStage(null, 'Понимаю запрос');
+      if (!stepsEl) return;
+      // «Инструменты наготове» — сигнал закрыть все оставшиеся живые строки.
+      if (phase === 'ready' && event.done) {
+        Array.from(stepsEl.querySelectorAll('.stage-step.is-live[data-recall]'))
+          .forEach((row) => {
+            row.classList.remove('is-live');
+            row.classList.add('is-done');
+            const dots = row.querySelector('.typing-dots');
+            if (dots) dots.remove();
+          });
+        scrollToBottom();
+        return;
+      }
+      const liveRows = () => Array.from(stepsEl.children).filter(
+        (el) => el.dataset && el.dataset.recall === phase);
+      let row = liveRows().find((el) => el.classList.contains('is-live'));
+      const caption = detail ? `${text} · ${detail}` : text;
+      if (!row) {
+        row = document.createElement('div');
+        row.dataset.recall = phase;
+        row.className = `stage-step${event.done ? ' is-done' : ' is-live'}`;
+        row.innerHTML = `<span class="ico">${escapeHtml(event.icon || '🧰')}</span>`
+          + `<span class="txt"></span>`
+          + (event.done ? '' : '<span class="typing-dots"><span></span><span></span><span></span></span>');
+        stepsEl.appendChild(row);
+        while (stepsEl.children.length > 9) stepsEl.firstChild.remove();
+      }
+      const iconEl = row.querySelector('.ico');
+      const txtEl = row.querySelector('.txt');
+      if (iconEl && event.icon) iconEl.textContent = event.icon;
+      if (txtEl) {
+        txtEl.textContent = caption;
+        txtEl.title = caption;
+      }
+      if (event.done) {
+        row.classList.remove('is-live');
+        row.classList.add('is-done');
+        const dots = row.querySelector('.typing-dots');
+        if (dots) dots.remove();
+        if (traceData.length < 60) {
+          traceData.push({ kind: 'step', icon: event.icon || '🧰', text: caption.slice(0, 400) });
+        }
+      }
+      scrollToBottom();
+    },
+
+    /**
+     * Размышление вокруг каждого шага: «думаю, что делать после шага» —
+     * перед инструментом и «осмысляю результат» — сразу после него.
+     */
+    think(event = {}) {
+      const term = api.ensureTerm();
+      const log = term.querySelector('.agent-term-log');
+      const label = String(event.label || (event.done ? 'Думал' : 'Думает…'));
+      const text = String(event.text || '').trim();
+      const detail = String(event.detail || '').trim();
+      if (event.done) {
+        if (liveThink) {
+          api.finishThink(label, text);
+        } else {
+          const row = document.createElement('div');
+          row.className = 'agent-thought';
+          row.innerHTML = `<span class="agent-thought-ico" aria-hidden="true">🧠</span>`
+            + `<span class="agent-thought-label">${escapeHtml(label)}</span>`;
+          if (text) {
+            const box = document.createElement('details');
+            box.className = 'agent-thought-text';
+            box.innerHTML = '<summary>Что думал</summary><div></div>';
+            box.querySelector('div').textContent = text.slice(0, 1200);
+            row.appendChild(box);
+          }
+          log.appendChild(row);
+          api.refreshTermMeta(term);
+          if (traceData.length < 60) {
+            traceData.push({ kind: 'thought', label, text: text.slice(0, 400) });
+          }
+        }
+        scrollToBottom();
+        return;
+      }
+      // Новый шаг закрывает предыдущее размышление, даже если «после»
+      // не пришло (например, шаг упал).
+      if (liveThink) api.finishThink('Думал', '');
+      const row = document.createElement('div');
+      row.className = 'agent-thought is-live';
+      row.innerHTML = `<span class="agent-thought-ico" aria-hidden="true">🧠</span>`
+        + `<span class="agent-thought-label">${escapeHtml(label)}</span>`
+        + '<span class="think-dots typing-dots"><span></span><span></span><span></span></span>';
+      if (text) {
+        const box = document.createElement('details');
+        box.className = 'agent-thought-text';
+        box.innerHTML = `<summary>${escapeHtml(detail || 'Что думаю')}</summary><div></div>`;
+        box.querySelector('div').textContent = text.slice(0, 1200);
+        row.appendChild(box);
+      }
+      log.appendChild(row);
+      liveThink = row;
+      api.refreshTermMeta(term);
+      scrollToBottom();
+    },
+
+    /** Закрыть живое размышление: убрать точки и дописать итоговый текст. */
+    finishThink(label = 'Думал', text = '') {
+      const row = liveThink;
+      liveThink = null;
+      if (!row) return;
+      row.classList.remove('is-live');
+      const dots = row.querySelector('.think-dots');
+      if (dots) dots.remove();
+      const labelEl = row.querySelector('.agent-thought-label');
+      if (labelEl) labelEl.textContent = label;
+      if (text) {
+        let body = row.querySelector('.agent-thought-text div');
+        if (!body) {
+          const box = document.createElement('details');
+          box.className = 'agent-thought-text';
+          box.innerHTML = '<summary>Что думал</summary><div></div>';
+          row.appendChild(box);
+          body = box.querySelector('div');
+        }
+        body.textContent = text.slice(0, 1200);
+      }
+      const term = bubble.querySelector('.agent-term');
+      if (term) api.refreshTermMeta(term);
+      if (traceData.length < 60) {
+        traceData.push({ kind: 'thought', label, text: String(text).slice(0, 400) });
+      }
+    },
+
+    /**
      * «Думал N c» — шаг размышления с длительностью.
      *
      * Приходит после ответа модели, перед её первым действием: так видно, что
@@ -854,6 +998,7 @@ function createAssistantTurn(options = {}) {
      * если он есть, прячется в «Что думал» и не мешает читать ответ.
      */
     thought(event = {}) {
+      if (liveThink) api.finishThink('Думал', '');
       const seconds = Number(event.seconds || 0);
       const label = event.label || (seconds >= 1 ? `Думал ${Math.round(seconds)} c` : 'Думал');
       const text = String(event.text || '').trim();
@@ -887,6 +1032,8 @@ function createAssistantTurn(options = {}) {
 
     /** Свернуть блок команд: дальше ИИ пишет ответ, а не работает руками. */
     finishTerm() {
+      // Ответ пошёл: незакрытая строка «Думает…» не должна крутиться вечно.
+      if (liveThink) api.finishThink('Думал', '');
       const box = bubble.querySelector('.agent-term');
       if (!box) return;
       // Незакрытый вопрос важнее: оставляем шаги раскрытыми, пока ждём ответа.
@@ -968,6 +1115,16 @@ function createAssistantTurn(options = {}) {
     /** Схлопнуть сцену (первый токен ответа уже пошёл). */
     collapseStage() {
       if (stage.classList.contains('collapsed')) return;
+      // На случай обрыва потока: «вспоминаю …» не остаётся с вечными точками.
+      if (stepsEl) {
+        Array.from(stepsEl.querySelectorAll('.stage-step.is-live[data-recall]'))
+          .forEach((row) => {
+            row.classList.remove('is-live');
+            row.classList.add('is-done');
+            const dots = row.querySelector('.typing-dots');
+            if (dots) dots.remove();
+          });
+      }
       stage.classList.add('collapsed');
       stopTimer();
       setTimeout(() => { if (stage.classList.contains('collapsed')) stage.classList.add('lg-hidden'); }, 560);
@@ -1432,7 +1589,7 @@ async function streamMessage(message, turn) {
   const response = await fetch('/send_stream', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ message, reasoning: reasoningOn }),
+    body: JSON.stringify({ message, reasoning: reasoningOn, tools: autoSearchEnabled() }),
     signal: controller.signal,
   });
 
@@ -1472,7 +1629,7 @@ async function sendOnce(message, turn) {
   const response = await fetch('/send', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ message, reasoning: reasoningOn }),
+    body: JSON.stringify({ message, reasoning: reasoningOn, tools: autoSearchEnabled() }),
     signal: controller.signal,
   });
   const data = await response.json().catch(() => ({}));
@@ -1515,6 +1672,15 @@ async function runSearchTurn(message, turn) {
         break;
       case 'step':
         turn.step(event.icon, event.text);
+        break;
+      case 'recall':
+        if (turn.recall) turn.recall(event);
+        break;
+      case 'think':
+        if (turn.think) turn.think(event);
+        break;
+      case 'thought':
+        if (turn.thought) turn.thought(event);
         break;
       case 'sources':
         turn.setSources(event.sources || []);
@@ -1612,14 +1778,15 @@ async function sendMessage(text) {
     // Модель генерации медиа тоже выбирает он — кнопок выбора нет.
     if (window.Linux && typeof window.Linux.runTurn === 'function') {
       const handled = await window.Linux.runTurn(finalMsg, {
-        search: webSearchOn || autoSearchOn,
+        search: autoSearchEnabled(),
+        tools: autoSearchEnabled(),
         reasoning: reasoningOn,
       });
       if (handled) return;
     }
 
     // ── Запасной путь без окружения: поиск в интернете ──
-    if (webSearchOn || autoSearchOn) {
+    if (autoSearchEnabled()) {
       const turn = createAssistantTurn();
       turn.beginSearch('Поищу в интернете');
       try {

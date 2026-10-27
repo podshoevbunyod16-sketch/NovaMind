@@ -97,8 +97,15 @@ def test_broken_json_in_steps_does_not_crash(db):
 
 # ══════════════ API ══════════════
 
+def _client_owner(client):
+    """Владелец чата для текущей сессии (identity: anon:<id> для гостя)."""
+    import identity
+    with client.session_transaction() as sess:
+        return identity.chat_owner(sess)
+
+
 def test_traces_endpoint_returns_steps(client):
-    chat_id = database.create_chat("API трасса")
+    chat_id = database.create_chat("API трасса", owner=_client_owner(client))
     database.save_trace(chat_id, "run-api", [{"kind": "tool", "command": "pwd", "code": 0}])
     payload = client.get(f"/api/chats/{chat_id}/traces").get_json()
     assert payload["chat_id"] == chat_id
@@ -106,7 +113,7 @@ def test_traces_endpoint_returns_steps(client):
 
 
 def test_chat_endpoint_includes_traces(client):
-    chat_id = database.create_chat("Чат с трассой")
+    chat_id = database.create_chat("Чат с трассой", owner=_client_owner(client))
     database.add_message(chat_id, "user", "привет")
     database.save_trace(chat_id, "run-2", [{"kind": "step", "text": "думаю"}])
     payload = client.get(f"/api/chats/{chat_id}").get_json()

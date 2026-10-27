@@ -13,6 +13,16 @@ from agenticseek.router import AgentRouter, is_build_request, is_mcp_search_requ
 from tests.agent_helpers import answer_of, events_of, model_text, ndjson, script
 
 
+@pytest.fixture(autouse=True)
+def specialists_mode(monkeypatch):
+    """Тесты планировщика и передачи хода написаны под архитектуру специалистов.
+
+    В проде по умолчанию ``unified`` (один оркестратор), его проверяет
+    ``test_orchestrator.py``. Здесь нужны planner и роли web/code/files/talk.
+    """
+    monkeypatch.setenv("AGENTICSEEK_EXECUTION_MODE", "specialists")
+
+
 class _Agent:
     def __init__(self, role, tools, label=None):
         self.role = role

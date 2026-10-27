@@ -45,6 +45,15 @@ def _chat_ownership_guard():
     return None
 
 
+def _chat_tools_allowed(data) -> bool:
+    """Кнопка «Автопоиск» выключает инструменты и в запасном обычном чате."""
+    try:
+        from routes.agent import request_tools_allowed
+        return request_tools_allowed(data)
+    except Exception:  # noqa: BLE001 — старый чат не должен падать без агента
+        return True
+
+
 def is_agent_enabled():
     """Включён ли агентный режим (по умолчанию — да)."""
     try:
@@ -181,7 +190,9 @@ def send():
     add_message(chat_id, "user", message)
 
     # ===== Генерация медиа выбранной моделью вместо текстового ответа =====
-    model, confirm, error = media_generation_context(data)
+    tools_allowed = _chat_tools_allowed(data)
+    model, confirm, error = ((media_generation_context(data) if tools_allowed
+                             else (None, None, None)))
     if error:
         return jsonify({'error': error}), 400
     if model is not None:
@@ -205,11 +216,14 @@ def send():
     # Если MCP подключён, обычный чат тоже получает его tools и может
     # выполнить mcp_call перед финальным ответом.
     provider, model_name, provider_cfg = resolve_target()
-    reply, meta, _mcp_events = complete_with_mcp(
-        history + [{"role": "user", "content": message}],
-        system=config.system_prompt, provider=provider, model=model_name,
-        temperature=0.7, max_tokens=provider_cfg.get("max_tokens", 8192), timeout=120,
-    )
+    if tools_allowed:
+        reply, meta, _mcp_events = complete_with_mcp(
+            history + [{"role": "user", "content": message}],
+            system=config.system_prompt, provider=provider, model=model_name,
+            temperature=0.7, max_tokens=provider_cfg.get("max_tokens", 8192), timeout=120,
+        )
+    else:
+        reply, meta = None, {}
     if reply is not None:
         add_message(chat_id, "assistant", reply)
         trim_messages(chat_id, max_messages=100)
@@ -275,7 +289,9 @@ def send_stream():
     add_message(_chat_id_stream, "user", message)
 
     # ===== Генерация медиа: поток реальных статусов запроса =====
-    media_model, confirm, media_error = media_generation_context(data)
+    tools_allowed = _chat_tools_allowed(data)
+    media_model, confirm, media_error = ((media_generation_context(data) if tools_allowed
+                                         else (None, None, None)))
     if media_error:
         if contents and contents[-1]["role"] == "user":
             contents.pop()
@@ -298,11 +314,14 @@ def send_stream():
         full_reply = ""
         reasoning_text = ""
         try:
-            mcp_reply, mcp_meta, mcp_events = complete_with_mcp(
-                history_for_prompt + [{"role": "user", "content": message}],
-                system=config.system_prompt, provider=provider, model=model,
-                temperature=0.7, max_tokens=provider_cfg.get("max_tokens", 8192), timeout=120,
-            )
+            if tools_allowed:
+                mcp_reply, mcp_meta, mcp_events = complete_with_mcp(
+                    history_for_prompt + [{"role": "user", "content": message}],
+                    system=config.system_prompt, provider=provider, model=model,
+                    temperature=0.7, max_tokens=provider_cfg.get("max_tokens", 8192), timeout=120,
+                )
+            else:
+                mcp_reply, mcp_meta, mcp_events = None, {}, []
             if mcp_reply is not None:
                 for event in mcp_events:
                     yield emit(event)

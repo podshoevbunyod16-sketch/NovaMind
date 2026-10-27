@@ -126,6 +126,10 @@ def sandbox(tmp_path, monkeypatch):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     monkeypatch.setattr(term_routes, "WORKSPACE", os.path.realpath(str(workspace)))
+    # Песочница в продукте много-пользовательская (_ws добавляет users/<hash>),
+    # но тесты смотрят в одну временную папку. Фиксируем её явно, иначе
+    # google_client читает/пишет не ту же папку, что проверяет тест.
+    monkeypatch.setattr(term_routes, "_ws", lambda: os.path.realpath(str(workspace)))
     monkeypatch.setattr(agent_routes, "run_terminal", term_routes.run_agent)
     monkeypatch.setenv("TERMINAL_ENABLED", "1")
     monkeypatch.setenv("AGENT_ENABLED", "1")

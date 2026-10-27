@@ -97,6 +97,43 @@ def thought_event(seconds: float, text: str = "") -> dict:
             "icon": "🧠", "text": _clip(text, 1200)}
 
 
+def recall_event(phase: str, text: str, *, icon: str = "🧰", detail: str = "",
+                 items=None, done: bool = False) -> dict:
+    """Живая строка «вспоминаю инструменты» / «вспоминаю MCP-серверы».
+
+    Движок сначала показывает такую строку (``done=False`` — анимация точек),
+    потом действительно собирает инструменты под запрос и присылает
+    ``done=True`` для той же ``phase``: строка превращается в «вспомнил».
+    Так «получение инструментов» видно пользователю, а не происходит молча.
+
+    ``phase`` — ключ строки: ``tools``, ``mcp``, ``ready``, ``plain``.
+    """
+    event = {"type": "recall", "phase": str(phase or "tools"), "icon": icon,
+             "text": _clip(text, 240), "detail": _clip(detail, 400),
+             "done": bool(done)}
+    found = [str(item) for item in (items or []) if str(item).strip()]
+    if found:
+        event["items"] = found[:24]
+    return event
+
+
+def think_event(phase: str, detail: str = "", *, done: bool = False) -> dict:
+    """Размышление вокруг одного шага: перед ним и сразу после выполнения.
+
+    Отличается от :func:`thought_event`: там — «модель думала N секунд» по
+    таймеру, здесь — короткое живое «думает, что делать дальше», которое агент
+    показывает перед каждым инструментом и повторяет после его результата.
+    """
+    short = _clip(str(detail or "").strip().replace("\n", " "), 120) or "шаг"
+    if done:
+        return {"type": "think", "phase": "after", "done": True, "icon": "🧠",
+                "label": "Думал", "detail": short,
+                "text": f"Осмыслил результат «{short}» и выбираю следующий шаг."}
+    return {"type": "think", "phase": "before", "done": False, "icon": "🧠",
+            "label": "Думает…", "detail": short,
+            "text": f"Думаю, что сделать после шага «{short}»."}
+
+
 def plan_text(answer: str) -> str:
     """Что модель сказала перед вызовом инструмента — словами, без блоков."""
     body = re.sub(r"```.*?```", " ", str(answer or ""), flags=re.S)

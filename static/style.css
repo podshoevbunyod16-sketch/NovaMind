@@ -588,6 +588,12 @@ html[data-glass-theme="light"] .msg-bubble pre { background: rgba(15,23,42,.9); 
 .stage-step .ico { font-size: 13px; flex-shrink: 0; width: 18px; text-align: center; }
 .stage-step .txt { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .stage-step.is-last { color: var(--text-1); border-color: color-mix(in srgb, var(--accent) 32%, transparent); background: var(--accent-soft); }
+/* «Вспоминаю инструменты / MCP-серверы»: живая строка с дышащими точками. */
+.stage-step.is-live { border-color: color-mix(in srgb, var(--accent) 45%, transparent); }
+.stage-step.is-live .txt, .stage-step.is-done .txt { color: #c9b8ff; }
+.stage-step.is-done .ico { filter: saturate(1.2); }
+.stage-step .typing-dots { margin-left: auto; padding: 0; gap: 3px; flex-shrink: 0; }
+.stage-step .typing-dots span { width: 4px; height: 4px; }
 
 /* Три «думающие» точки внутри пустого пузыря */
 .stage-idle { display: flex; align-items: center; gap: 10px; padding: 2px 0; }
@@ -1129,6 +1135,9 @@ button, input, select, textarea, .stage, .sources-head, .msg-actions {
 .agent-thought:last-child { border-bottom: none; }
 .agent-thought.is-live .agent-thought-label { color: #c9b8ff; }
 .agent-thought-label { flex-shrink: 0; }
+/* Размышление вокруг шага: «Думает…» с точками, затем «Думал». */
+.agent-thought .think-dots.typing-dots { align-self: center; padding: 0; margin-left: 2px; gap: 3px; }
+.agent-thought .think-dots.typing-dots span { width: 4px; height: 4px; }
 .agent-thought-text { width: 100%; margin: 2px 0 2px 18px; font-size: 11px; }
 .agent-thought-text > summary {
   cursor: pointer; list-style: none; color: var(--txt-dim);

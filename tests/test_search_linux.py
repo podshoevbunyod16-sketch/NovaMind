@@ -104,6 +104,33 @@ def test_nova_read_requires_full_url(admin_client, sandbox, web):
     assert result["code"] == 2 and "полный адрес" in result["stderr"]
 
 
+def test_nova_tools_lists_linux_commands(admin_client, sandbox):
+    result = _run(admin_client, "nova tools").get_json()
+    assert result["code"] == 0
+    assert "grep" in result["stdout"] and "python3" in result["stdout"]
+    assert "nova web search" in result["stdout"]
+
+
+def test_nova_web_search_alias(admin_client, sandbox, web):
+    result = _run(admin_client, "nova web search 'python asyncio'").get_json()
+    assert result["code"] == 0 and "docs.python.org" in result["stdout"]
+
+
+def test_nova_web_open_alias(admin_client, sandbox, web):
+    result = _run(admin_client, "nova web open https://example.com/doc").get_json()
+    assert result["code"] == 0 and "Текст страницы" in result["stdout"]
+
+
+def test_nova_mcp_tools_catalog(admin_client, sandbox):
+    result = _run(admin_client, "nova mcp tools").get_json()
+    assert result["code"] == 0 and "MCP-инструменты" in result["stdout"]
+
+
+def test_nova_call_is_explained_in_plain_terminal(admin_client, sandbox):
+    result = _run(admin_client, "nova call file_read README.md").get_json()
+    assert result["code"] == 2 and "шагах агента" in result["stderr"]
+
+
 def test_nova_unknown_verb_and_help(admin_client, sandbox, web):
     unknown = _run(admin_client, "nova delete everything").get_json()
     assert unknown["code"] == 2 and "неизвестная команда" in unknown["stderr"]

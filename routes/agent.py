@@ -26,6 +26,7 @@ import re
 import secrets
 import threading
 import time
+from types import SimpleNamespace
 
 from ai_providers import chat_completion, chat_stream, resolve_target  # noqa: F401
 import database
@@ -335,6 +336,36 @@ def tools_enabled():
     return os.getenv("TERMINAL_ENABLED", "0") == "1" and can_use_workspace()
 
 
+def _bool_flag(value, default=True) -> bool:
+    """Мягкий разбор булева флага из JSON/форм (true/1/«on» → True)."""
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    if isinstance(value, (int, float)):
+        return bool(value)
+    text = str(value).strip().lower()
+    if text in ("1", "true", "yes", "on", "да", "вкл"):
+        return True
+    if text in ("0", "false", "no", "off", "нет", "выкл", ""):
+        return False
+    return default
+
+
+def request_tools_allowed(data) -> bool:
+    """Кнопка «Автопоиск» — главный выключатель ВСЕХ инструментов агента.
+
+    Фронтенд шлёт ``tools`` (и дублирует старым ``search``). Если клиент явно
+    выключил авто-поиск, движок не регистрирует ни поиск, ни терминал, ни MCP,
+    ни медиа: роутер просто отправляет запрос в ИИ-модель. Клиенты без флага
+    (Telegram, планировщик, старый API) работают как раньше — с инструментами.
+    """
+    for key in ("tools", "auto_search", "search"):
+        if key in (data or {}):
+            return _bool_flag(data[key], default=True)
+    return True
+
+
 def strip_think(text):
     """Убирает «рассуждения» из ответа (nemotron, deepseek и др. кладут их прямо в текст)."""
     text = _THINK_BLOCK.sub("", text or "")
@@ -541,6 +572,14 @@ def _trace_entries(chunk):
     if not isinstance(event, dict):
         return []
     kind = event.get("type")
+    # «Вспоминаю инструменты / MCP-серверы» и размышление вокруг каждого шага —
+    # в трассе сохраняем только завершённые строки, без промежуточной анимации.
+    if kind == "recall" and event.get("done") and event.get("phase") != "ready":
+        return [{"kind": "step", "icon": event.get("icon") or "🧰",
+                 "text": clip(str(event.get("text") or ""), 300)}]
+    if kind == "think" and event.get("done"):
+        return [{"kind": "thought", "label": clip(str(event.get("label") or "Думал"), 120),
+                 "text": clip(str(event.get("text") or ""), 400)}]
     if kind == "step":
         return [{"kind": "step", "icon": event.get("icon") or "•",
                  "text": clip(str(event.get("text") or ""), 300)}]
@@ -902,8 +941,9 @@ def agent_stream():
         return response, 429
 
     provider, model, _cfg = resolve_target()
-    use_tools = tools_enabled()
-    strict_mcp = strict_mcp_request(goal)
+    tools_allowed = request_tools_allowed(data)
+    use_tools = tools_enabled() and tools_allowed
+    strict_mcp = strict_mcp_request(goal) if tools_allowed else False
     history_key = session.get("agent_memory_key")
     if not history_key:
         history_key = secrets.token_hex(12)
@@ -916,10 +956,12 @@ def agent_stream():
     _identity.bind_owner(_identity.chat_owner())   # поток агента узнает своего владельца
     _set_agent_workspace(workspace_dir())
     # Инструменты движка исполняют команды только через эту песочницу.
-    sandbox.set_runner(_sandbox_runner)
+    # При выключенном автопоиске песочница вообще не подключается к запуску.
+    if tools_allowed:
+        sandbox.set_runner(_sandbox_runner)
 
     run_id, cancel = register_run()
-    media_kind = requested_media_kind(goal)
+    media_kind = requested_media_kind(goal) if tools_allowed else ""
     owner = _owner_name()
     from routes.terminal import is_admin as _is_admin
     admin_flag = bool(_is_admin())
@@ -933,9 +975,15 @@ def agent_stream():
     @stream_with_context
     def generate():
         started = time.time()
-        tools_ctx = NovaToolsContext(goal, chat_id or "", emit=lambda event: None,
-                                     signed=signed, owner=owner, memory_key=memory_key)
-        tools_ctx.is_admin = admin_flag
+        if tools_allowed:
+            tools_ctx = NovaToolsContext(goal, chat_id or "", emit=lambda event: None,
+                                         signed=signed, owner=owner, memory_key=memory_key)
+            tools_ctx.is_admin = admin_flag
+        else:
+            # Ни перечисления MCP, ни проверки медиа-бэкендов: в прямом режиме
+            # capability-контекст не нужен и не должен ничего трогать.
+            tools_ctx = SimpleNamespace(task_id="", emit=lambda event: None,
+                                        generate_media=None, is_admin=False)
         memory_block = ""
         if memory_key:
             try:
@@ -944,18 +992,24 @@ def agent_stream():
             except Exception:  # noqa: BLE001 — память не должна ломать ход
                 log.debug("memory block failed", exc_info=True)
         skill_block = ""
-        try:
-            import skills_registry
-            skill_block = skills_registry.prompt_context() or ""
-        except Exception:  # noqa: BLE001
-            log.debug("skills block failed", exc_info=True)
+        if tools_allowed:
+            try:
+                import skills_registry
+                skill_block = skills_registry.prompt_context() or ""
+            except Exception:  # noqa: BLE001
+                log.debug("skills block failed", exc_info=True)
 
         engine = AgentEngine(EngineContext(
             goal=goal, complete=chat_completion, emit=lambda event: None,
             provider=provider, model=model, cancel=cancel,
             history=prior, workspace=use_tools,
-            search=nova_search, read_page=_read_page, runner=_sandbox_runner,
-            tools_ctx=tools_ctx, memory_prompt=memory_block, skills_prompt=skill_block,
+            search=(nova_search if tools_allowed else None),
+            read_page=(_read_page if tools_allowed else None),
+            runner=(_sandbox_runner if tools_allowed else None),
+            tools_ctx=(tools_ctx if tools_allowed else None),
+            memory_prompt=memory_block,
+            skills_prompt=(skill_block if tools_allowed else ""),
+            tools_allowed=tools_allowed,
             strict_mcp=strict_mcp,
             finalize=lambda text: final_answer_text(text, goal),
             salvage_answer=lambda text: salvage_quoted_answer(text, goal),
@@ -965,7 +1019,7 @@ def agent_stream():
             media_generate=(tools_ctx.generate_media if media_kind else None),
             local_model=_local_model,
             offline=(provider == "local_demo"),
-            force_search=bool(data.get("search")) and not strict_mcp,
+            force_search=(bool(data.get("search")) and tools_allowed and not strict_mcp),
             save_research=(terminal_routes._save_research if use_tools else None),
             max_steps=MAX_STEPS,
         ))

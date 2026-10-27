@@ -98,8 +98,11 @@
     if (state.ready) await state.ready.catch(() => null);
     if (!isAvailable()) return false;
 
-    const coding = isCodingRequest(message);
-    const search = !!options.search && !coding;
+    // options.tools — кнопка «Автопоиск». false => вообще без инструментов:
+    // ни кодинг-агента, ни поиска, ни терминала — только прямой запрос к модели.
+    const tools = options.tools !== false;
+    const coding = tools && isCodingRequest(message);
+    const search = !!options.search && tools && !coding;
     const turn = createAssistantTurn();
     if (coding) turn.beginIdle('Исследую исходный код…');
     // Не показываем «Поищу в интернете» заранее: флаг поиска только
@@ -116,7 +119,7 @@
       const response = await fetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message, search, reasoning: !!options.reasoning }),
+        body: JSON.stringify({ message, search, tools, reasoning: !!options.reasoning }),
         signal: controller.signal,
       });
       state.runId = response.headers?.get?.('X-Agent-Run-Id') || '';
@@ -141,6 +144,10 @@
           case 'plan': turn.plan(event); break;
           case 'step': turn.step(event.icon, event.text); break;
           case 'tool': turn.tool(event); break;
+          // Динамическое получение инструментов после понимания запроса.
+          case 'recall': if (turn.recall) turn.recall(event); break;
+          // Думаем перед каждым шагом и ещё раз — после его выполнения.
+          case 'think': if (turn.think) turn.think(event); break;
           // «Думал 4 c» — такой же шаг таймлайна, как команда или файл.
           case 'thought': if (turn.thought) turn.thought(event); break;
           case 'confirm': if (turn.confirm) turn.confirm(event); break;

@@ -15,6 +15,16 @@ from agenticseek.core.planner_agent import MAX_PLAN_TASKS, PLAN_ATTEMPTS
 from tests.agent_helpers import answer_of, events_of, model_text, ndjson, script
 
 
+@pytest.fixture(autouse=True)
+def specialists_mode(monkeypatch):
+    """Тесты планировщика и передачи хода написаны под архитектуру специалистов.
+
+    В проде по умолчанию ``unified`` (один оркестратор), его проверяет
+    ``test_orchestrator.py``. Здесь нужны planner и роли web/code/files/talk.
+    """
+    monkeypatch.setenv("AGENTICSEEK_EXECUTION_MODE", "specialists")
+
+
 @pytest.fixture
 def fake_search(monkeypatch):
     results = [{"title": "asyncio", "url": "https://docs.python.org/asyncio",

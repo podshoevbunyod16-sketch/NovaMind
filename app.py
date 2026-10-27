@@ -56,6 +56,19 @@ def _start_scheduler():
 
 _start_scheduler()
 
+# ---------- Идентичность браузера ----------
+@app.before_request
+def _ensure_browser_identity():
+    """Закрепляем browser id на первом же запросе.
+
+    Раньше ``nova_sid`` создавался лениво внутри конкретного запроса: соседние
+    запросы одной и той же freshly-opened вкладки могли получить разные id, а
+    значит разные личные рабочие папки (файл записан в одну, читается из другой).
+    """
+    import identity
+    identity.browser_id()
+
+
 # ---------- Статика ----------
 @app.route('/static/<path:filename>')
 def static_files(filename):

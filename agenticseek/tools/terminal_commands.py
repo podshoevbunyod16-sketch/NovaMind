@@ -61,6 +61,25 @@ def parse_command(payload: str):
     raise ValueError('Некорректная nova-команда. Используйте nova tools; один вызов на блок.')
 
 
+def _catalog_step(agent, payload: str, feedback: str):
+    """Показываем `nova tools` / `nova mcp tools` как шаг терминала в таймлайне."""
+    from agenticseek.timeline import tool_event
+
+    emit = getattr(agent, 'emit', None)
+    if callable(emit):
+        try:
+            emit(tool_event('terminal', str(payload).strip(), ok=True,
+                            command=str(payload).strip(), output=feedback, code=0))
+        except Exception:  # noqa: BLE001 — отрисовка не должна ломать команду
+            pass
+    state = getattr(agent, 'state', None)
+    if state is not None and hasattr(state, 'add_tool'):
+        try:
+            state.add_tool('terminal', True)
+        except Exception:  # noqa: BLE001
+            pass
+
+
 def dispatch(agent, payload: str):
     """Return normal run_tool result, or None to continue with the sandbox."""
     try:
@@ -74,13 +93,17 @@ def dispatch(agent, payload: str):
     if target == '__tools__':
         agent.take_step()
         catalog = {getattr(t, 'tag', name): t.description for name, t in tools.items()}
-        return True, '[success] ' + json.dumps(catalog, ensure_ascii=False)
+        feedback = '[success] ' + json.dumps(catalog, ensure_ascii=False)
+        _catalog_step(agent, payload, feedback)
+        return True, feedback
     if target == '__mcp_tools__':
         agent.take_step()
         tool = tools.get('mcp_call')
         if tool is None:
             return False, '[failure] MCP не подключён для этого исполнителя.'
-        return True, '[success] ' + tool.description
+        feedback = '[success] ' + tool.description
+        _catalog_step(agent, payload, feedback)
+        return True, feedback
     if target not in tools:
         return False, f'[failure] Инструмент {target} недоступен для этого исполнителя.'
     return agent.run_tool(target, body)

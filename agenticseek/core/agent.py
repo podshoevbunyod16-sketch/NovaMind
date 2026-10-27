@@ -43,8 +43,8 @@ from agenticseek import policy
 from agenticseek.core.errors import AgenticSeekError, AgentStopped, StepLimitReached
 from agenticseek.core.logger import Logger
 from agenticseek.core.markup import normalize_answer, normalize_tool_json, sanitize_answer
-from agenticseek.timeline import (MIN_THOUGHT_SECONDS, plan_text, thought_event,
-                                  tool_event)
+from agenticseek.timeline import (MIN_THOUGHT_SECONDS, plan_text, think_event,
+                                  thought_event, tool_event)
 from agenticseek.core.memory import Memory
 from agenticseek.core.utility import pretty_print
 from agenticseek.core.workspace import get_work_dir, resolve_workspace_path
@@ -117,6 +117,9 @@ class Agent:
         self.stop = False
         self._signatures: dict[str, int] = {}
         self.steps_used = 0
+        # «nova tools» перевызывает run_tool изнутри: размышление показываем
+        # только для внешнего шага, иначе строка «Думает…» двоилась бы.
+        self._think_depth = 0
 
     # ── prompt loading ────────────────────────────────────────────────────
     @staticmethod
@@ -313,7 +316,12 @@ class Agent:
         except Exception as error:  # noqa: BLE001 — provider layer is external
             raise AgenticSeekError(
                 f"{type(error).__name__}: {error}", "Модель недоступна.") from error
-        answer = strip_think(answer)
+        # Протокол вызывается и тегами <bash>, и JSON-конвертом
+        # {"tool":…, "tool_input":…}. Нормализация живёт здесь, чтобы её
+        # получали ВСЕ исполнители (в том числе веб-агент и собеседник, у
+        # которых свой цикл вместо Agent._loop). Повторная нормализация в
+        # _loop безопасна: оба преобразования идемпотентны.
+        answer = normalize_tool_json(normalize_answer(strip_think(answer)))
         # Сколько модель думала до этого шага. Показываем только если дальше
         # будет действие: у простого ответа «Думал 2 c» — лишний шум.
         self._thought = (time.monotonic() - started, plan_text(answer))
@@ -358,7 +366,29 @@ class Agent:
         return False, feedback
 
     def run_tool(self, tag: str, payload: str, save_path: str | None = None):
-        """Execute one block. Returns ``(ok, feedback)``; never raises for tool errors."""
+        """Один шаг: подумать перед ним, выполнить, обдумать результат.
+
+        Возвращает ``(ok, feedback)``; не возбуждает ошибок инструмента.
+        События ``think`` видны только у внешнего вызова (``dispatch`` из
+        ``nova tools`` вызывает этот же метод повторно) и только в настоящем
+        запуске с ``RunState`` — юнит-тесты отдельного агента не меняются.
+        """
+        outer = self._think_depth == 0 and self.state is not None
+        detail = str(save_path or payload or tag).strip().splitlines()[0][:120]
+        if outer:
+            self.emit(think_event("before", detail))
+        self._think_depth += 1
+        try:
+            return self._run_tool(tag, payload, save_path)
+        finally:
+            self._think_depth -= 1
+            if outer:
+                # Даже при отказе/ошибке шаг осмыслен: следующий маршрут
+                # выбирается по его результату, а не «вслепую».
+                self.emit(think_event("after", detail, done=True))
+
+    def _run_tool(self, tag: str, payload: str, save_path: str | None = None):
+        """Внутренняя часть :meth:`run_tool` без событий размышления."""
         tool = self.all_tools().get(tag)
         if tool is None:
             return False, (f"[failure] Инструмент «{tag}» недоступен. "

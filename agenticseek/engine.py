@@ -33,6 +33,7 @@ It is deliberately free of Flask imports: the route passes callables in
 from __future__ import annotations
 
 import contextvars
+import json
 import logging
 import os
 import re
@@ -60,6 +61,7 @@ from agenticseek.offline import OfflineTurn
 from agenticseek.providers.nova_provider import NovaProvider
 from agenticseek.router import AgentRouter, SHORT_MESSAGE_CHARS
 from agenticseek.state import RunState
+from agenticseek.timeline import recall_event, think_event
 from agenticseek.tools import sandbox, shell_text
 from agenticseek.tools.bash_interpreter import BashTool
 from agenticseek.tools.file_finder import (FileEditTool, FileFinderTool, FileReadTool,
@@ -86,6 +88,56 @@ EXECUTION_TAGS = {"terminal", "bash", "python", "json"}
 #: running a stranger's command. Coding/file work goes to the agents built for it.
 EXECUTION_TOOL_TAGS = {"terminal", "bash", "python", "file_find", "file_finder",
                        "file_read", "file_write", "file_edit"}
+#: В демо-режиме (нет ключа провайдера) просьба «выполни команду» всё равно
+#: должна показать настоящие шаги терминала, а не беспомощный ответ.
+_OFFLINE_TERMINAL_HINT = re.compile(
+    r"(?i)(?:выполни|запусти|терминал|рабоч(?:ая|ую|ей)\s+папк|linux|shell|bash|"
+    r"команд|pwd|uname|whoami|git\s+status|\bls\b|\bdf\b|\bfree\b)")
+_OFFLINE_TERMINAL_COMMANDS = (
+    ("pwd", "pwd"), ("uname", "uname -s"), ("whoami", "whoami"),
+    ("git status", "git status"), ("ls", "ls -la"), ("df", "df -h ."),
+    ("free", "free -m"),
+)
+#: Просьба явно про MCP/подключённые сервисы — тогда «вспоминаем» и серверы.
+#: Иначе показываем только общую строку «Вспоминаю инструменты», чтобы не
+#: засорять таймлайн на обычном вопросе («сколько будет 6*7»).
+_RECALL_MCP_HINT = re.compile(
+    r"(?i)(?:\bmcp\b|github|гитхаб|notion|slack|jira|репозитор\w*|"
+    r"пулл[- ]?реквест|issue|подключ\w*\s+сервер|сервер\w*\s+mcp|"
+    r"инструмент\w*\s+mcp|вызови\s+инструмент|через\s+сервер)")
+
+
+class _ThinkScope:
+    """Пара событий ``think`` вокруг одного шага движка.
+
+    Движок выполняет часть шагов сам (поиск по кнопке, офлайн-терминал,
+    генерация медиа), минуя :meth:`Agent.run_tool`. Такой шаг тоже должен быть
+    «обдуман» до и после — пользователь видит одинаковый ритм работы.
+    """
+
+    def __init__(self, emit, detail: str):
+        self.emit = emit
+        self.detail = detail
+
+    def __enter__(self):
+        self.emit(think_event("before", self.detail))
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        # Даже упавший шаг осмыслен: агент решает, что делать дальше, по факту
+        # неудачи, а не продолжает вслепую.
+        self.emit(think_event("after", self.detail, done=True))
+        return False
+
+
+def _offline_terminal_commands(goal: str) -> list[str]:
+    """Безопасный набор Linux-команд для офлайн-демо (только allow-list)."""
+    low = str(goal or "").lower()
+    found = [command for marker, command in _OFFLINE_TERMINAL_COMMANDS if marker in low]
+    if not found:
+        found = ["pwd", "uname -s", "ls -la"]
+    return found[:4]
+
 #: Инструменты, которым нужна рабочая папка (в гостевом запуске их нет).
 SANDBOX_TAGS = {"terminal", "python", "file_find", "file_read", "file_write", "file_edit"}
 #: ```tag\npayload``` blocks of an answer.
@@ -121,6 +173,9 @@ class EngineContext:
         strict_mcp: only the MCP tool is available in this run.
         finalize: ``(text) -> str`` answer sanitiser (reasoning-leak filters).
         media_available: shortcut for the state flag.
+        tools_allowed: when False (auto-search button off) the engine registers
+            no tools at all and the router sends the request straight to the AI
+            model in one call.
     """
 
     goal: str
@@ -153,6 +208,7 @@ class EngineContext:
     offline: bool = False         # provider has no language model (local_demo)
     force_search: bool = False    # the «Поиск» button: search for real, before answering
     save_research: Optional[Callable[..., str]] = None
+    tools_allowed: bool = True    # «Автопоиск» выключен → вообще без инструментов
     max_steps: int = MAX_STEPS
     timeout: float = AGENT_TIMEOUT
 
@@ -175,6 +231,10 @@ class AgentEngine:
         self._budget = _Budget(ctx.max_steps)
         self._started = time.monotonic()
         self._search_observation = ""
+        # Реальные теги инструментов, собранные _build_tools() на шаге
+        # «вспоминаю инструменты». Пусто, пока инструменты не получены.
+        self.recalled_tools: list[str] = []
+        self._mcp_recalled = False
 
     # ── public API ────────────────────────────────────────────────────────
     def stream(self):
@@ -224,14 +284,19 @@ class AgentEngine:
             thread.join(timeout=5)
 
     def _execute(self) -> None:
-        """The turn itself: build, run, finish. Emits through ``ctx.emit``."""
+        """The turn itself: understand, recall tools, run, finish.
+
+        Порядок важен: сначала шаг понимания запроса, затем «вспоминание» и
+        только после него — реальная сборка инструментов (:meth:`_build_agents`
+        зовёт :meth:`_build_tools`). Так инструменты появляются у агента не
+        заранее, а динамически, когда он решил, что они нужны.
+        """
         self.record_id = self._start_run()
-        if not (self.ctx.force_search and self.ctx.search is not None):
-            # «Поиск» начинается с собственной сцены поиска, а не с «Думаю».
-            self._emit({"type": "stage", "scene": "agent", "title": "Думаю",
-                        "text": "Выбираю исполнителя AgenticSeek…"})
+        self._understanding_stage()
         try:
-            self._build_agents()
+            self._recall_start()          # анимация «вспоминаю …»
+            self._build_agents()          # ← здесь инструменты реально грузятся
+            self._recall_ready()          # «вспомнил», со списком подключённого
             self._run_agent()
         except AgentStopped as stop:
             self.state.status = "stopped"
@@ -272,10 +337,131 @@ class AgentEngine:
             self._emit({"type": "token", "token": chunk})
         self._finish_run()
 
+    # ── шаг 1: понять запрос, шаг 2: вспомнить и получить инструменты ─────
+    def _understanding_stage(self) -> None:
+        """Первый шаг хода: понять запрос (сцена поиска — для кнопки «Поиск»)."""
+        ctx = self.ctx
+        searching = bool(ctx.force_search and ctx.search is not None
+                         and ctx.tools_allowed)
+        goal = clip(str(ctx.goal or "").strip(), 110)
+        self._emit({
+            "type": "stage",
+            "scene": "search" if searching else "agent",
+            "title": "Поиск в интернете" if searching else "Понимаю запрос",
+            "text": (f"Разбираю задачу «{goal}» и решаю, что понадобится"
+                     if goal else "Разбираю задачу и решаю, что понадобится"),
+        })
+
+    def _capability_groups(self) -> list[tuple[str, str]]:
+        """Какие группы инструментов вообще могут быть в этом запросе.
+
+        Это только анонс для анимации: реальные объекты инструментов создаются
+        позже в :meth:`_build_tools`, по тем же признакам контекста.
+        """
+        ctx = self.ctx
+        groups: list[tuple[str, str]] = []
+        if ctx.search is not None:
+            groups.append(("web_search", "поиск в интернете"))
+        if ctx.read_page is not None:
+            groups.append(("web_open", "чтение страниц"))
+        if ctx.workspace:
+            groups.append(("terminal", "Linux-команды и терминал"))
+            groups.append(("python", "запуск Python"))
+            groups.append(("file_read / file_write / file_edit", "файлы песочницы"))
+        if ctx.tools_ctx is not None:
+            groups.append(("память, задачи, навыки", "возможности NovaMind"))
+            if any(getattr(ctx.tools_ctx, f"media_{kind}_available", False)
+                   for kind in ("image", "audio", "video")):
+                groups.append(("медиа", "картинки, аудио, видео"))
+            if getattr(ctx.tools_ctx, "mcp_tools", None):
+                groups.append(("mcp_call", "MCP-инструменты"))
+        return groups
+
+    def _mcp_needed(self) -> bool:
+        """Нужно ли отдельно «вспоминать MCP-серверы» в этом ходе."""
+        ctx = self.ctx
+        return bool(ctx.strict_mcp
+                    or _RECALL_MCP_HINT.search(str(ctx.goal or ""))
+                    or getattr(ctx.tools_ctx, "mcp_tools", None))
+
+    def _recall_start(self) -> None:
+        """Живые строки «Вспоминаю инструменты…» / «Вспоминаю MCP-серверы…».
+
+        События приходят ДО :meth:`_build_agents`, поэтому анимация идёт именно
+        во время получения инструментов, а не после него. Когда автопоиск
+        выключен, инструментов нет вообще — показываем честную строку об этом.
+        """
+        ctx = self.ctx
+        if not ctx.tools_allowed:
+            self._emit(recall_event(
+                "plain", "Инструменты не нужны", icon="💬",
+                detail="Автопоиск выключен: ни одного инструмента, запрос уходит в ИИ-модель",
+                done=True))
+            self._emit({"type": "step", "icon": "💬",
+                        "text": "Понял запрос: отвечаю напрямую, без инструментов"})
+            return
+        groups = self._capability_groups()
+        self._emit(recall_event(
+            "tools", "Вспоминаю инструменты", icon="🧰",
+            detail=", ".join(description for _name, description in groups)
+                   or "базовые инструменты ответа",
+            items=[name for name, _description in groups]))
+        self._mcp_recalled = self._mcp_needed()
+        if self._mcp_recalled:
+            connected = list(getattr(ctx.tools_ctx, "mcp_tools", None) or [])
+            servers = []
+            for item in connected:
+                if isinstance(item, dict):
+                    name = str(item.get("server_id") or item.get("server")
+                               or item.get("name") or "").strip()
+                    if name and name not in servers:
+                        servers.append(name)
+            self._emit(recall_event(
+                "mcp", "Вспоминаю MCP-серверы", icon="🔌",
+                detail=(f"Подключено MCP-инструментов: {len(connected)}. "
+                        "Проверяю, какие серверы доступны"
+                        if connected else "Проверяю подключённые MCP-серверы"),
+                items=servers or ["список серверов"]))
+
+    def _recall_ready(self) -> None:
+        """Инструменты получены: закрываем анимацию реальным списком тегов."""
+        ctx = self.ctx
+        if not ctx.tools_allowed:
+            return
+        names = sorted(set(self.recalled_tools)) or [
+            name for name, _description in self._capability_groups()]
+        self._emit(recall_event(
+            "tools", "Вспомнил инструменты", icon="✅",
+            detail=f"Подключено для этого запроса: {len(names)}",
+            items=names, done=True))
+        if self._mcp_recalled:
+            self._emit(recall_event(
+                "mcp", "Вспомнил MCP-серверы", icon="✅",
+                detail="Список MCP-инструментов обновлён" if
+                       getattr(ctx.tools_ctx, "mcp_tools", None) else
+                       "Серверы проверены; при необходимости подключите их в Настройках",
+                done=True))
+        self._emit(recall_event(
+            "ready", "Инструменты наготове", icon="✅",
+            detail=f"Получено инструментов: {len(names)}", items=names, done=True))
+        self._emit({"type": "step", "icon": "🧰",
+                    "text": "Получил инструменты под задачу: "
+                            + (", ".join(names[:8]) or "нет")})
+
+    def _thinking(self, detail: str) -> _ThinkScope:
+        """Обернуть шаг движка парой «думаю → обдумываю результат»."""
+        return _ThinkScope(self._emit, detail)
+
     # ── assembly ──────────────────────────────────────────────────────────
     def _build_agents(self) -> None:
         ctx = self.ctx
         name = "NovaMind"
+        if not ctx.tools_allowed:
+            # Кнопка автопоиска выключена: ни одного инструмента, один прямой
+            # запрос к модели. Роутер всё равно выбирает исполнителя — но у него
+            # есть только безоружный собеседник.
+            self._build_direct_agent(name)
+            return
         if ctx.profile == "coding":
             self._build_coding_agents(name)
             return
@@ -336,6 +522,82 @@ class AgentEngine:
         self.router = AgentRouter(agents, classify=self._classify,
                                   mode=os.getenv("AGENTICSEEK_ROUTER", "heuristic"))
 
+    def _build_direct_agent(self, name: str) -> None:
+        """Auto-search off: register a single tool-free conversation agent.
+
+        Nothing from the request can reach the terminal, web, MCP, media, files
+        or memory tools because none are constructed. :class:`AgentRouter` with
+        one agent returns it without any classification call, so the request
+        goes straight to the AI model exactly once.
+        """
+        ctx = self.ctx
+        agent = CasualAgent(name, prompt_path("casual_agent"), self.provider)
+        agent.tools = {}
+        agent.alias_tools = {}
+        agent.extra_context = (
+            "Инструменты отключены пользователем (кнопка автопоиска выключена). "
+            "Не вызывай инструменты, не пиши блоки ```tag```, теги <tool_code> "
+            "и JSON-действия. Отвечай на языке пользователя только готовым текстом.")
+        if ctx.memory_prompt:
+            agent.extra_context += "\n\n" + ctx.memory_prompt
+        agent.attach(events=self._emit, cancel=ctx.cancel,
+                     deadline=ctx.deadline or (time.monotonic() + ctx.timeout),
+                     step_budget=self._budget, confirm=None,
+                     record=self._record_hook(), state=self.state)
+        self.agents = {agent.type: agent}
+        self.router = AgentRouter([agent])
+        self._emit({"type": "step", "icon": "📨",
+                    "text": "Автопоиск выключен: инструменты не используются, "
+                            "запрос уходит прямо в ИИ-модель"})
+
+    def _run_direct(self) -> None:
+        """One model call with chat history, zero tools and zero side effects."""
+        ctx = self.ctx
+        self._emit({"type": "stage", "scene": "agent", "title": "Ответ модели",
+                    "text": "Отправляю запрос напрямую в ИИ-модель"})
+        agent = self.router.select_agent(ctx.goal) if self.router else None
+        if agent is None:
+            raise AgenticSeekError("No agent available",
+                                   "Нет доступного исполнителя для запроса.")
+        self.chosen = agent
+        # История — настоящими сообщениями, а не склейкой в одну строку.
+        history = [item for item in (ctx.history or [])
+                   if isinstance(item, dict) and item.get("role") in ("user", "assistant")
+                   and str(item.get("content") or "").strip()][-6:]
+        for item in history:
+            agent.memory.push(item["role"], clip(str(item["content"]), 1200))
+        watcher = self._start_stop_watcher(agent)
+        try:
+            answer, _summary = agent.process(ctx.goal, None)
+        finally:
+            self._stop_watcher(watcher)
+        # Модель могла написать блок инструмента — он не выполнен. Блоки с
+        # неизвестными тегами вырезаются; обычные примеры кода (```python,
+        # ```bash) остаются текстом ответа и NEVER исполняются.
+        raw_answer = str(answer or "")
+        answer = strip_unknown_blocks(raw_answer, set()).strip()
+        if not answer and _is_tool_call_answer(raw_answer):
+            # Весь ответ — попытка вызвать инструмент. Инструментов нет, поэтому
+            # просим модель ответить словами (ещё один запрос, без инструментов).
+            self._emit({"type": "step", "icon": "ℹ️",
+                        "text": "Модель вызвала инструмент — он отключён, прошу текстовый ответ"})
+            messages = [
+                {"role": "system", "content": CLEAN_ANSWER_SYSTEM},
+                {"role": "user", "content": str(ctx.goal or "")},
+            ]
+            try:
+                answer = strip_unknown_blocks(str(self.provider.respond(messages)), set()).strip()
+            except AgentStopped:
+                raise
+            except Exception:  # noqa: BLE001 — ответ всё равно будет через recovery
+                answer = ""
+            if _is_tool_call_answer(answer):
+                answer = ""
+        self.answer = answer
+        self.state.steps = 0
+        if ctx.cancel is not None and ctx.cancel.is_set():
+            self.state.status = "stopped"
+
     def _build_orchestrator(self, name: str) -> None:
         """One model owns the goal and selects request-scoped tools itself."""
         from agenticseek.core.orchestrator_agent import OrchestratorAgent
@@ -362,6 +624,7 @@ class AgentEngine:
         """Coding profile: one read-first agent over the repository."""
         agent = ProjectAgent(name, prompt_path("project_agent"), self.provider)
         self.agents = {agent.type: agent}
+        self.recalled_tools = sorted(getattr(agent, "tools", {}) or {})
         deadline = self.ctx.deadline or (time.monotonic() + self.ctx.timeout)
         agent.attach(events=self._emit, cancel=self.ctx.cancel, deadline=deadline,
                      step_budget=self._budget, confirm=self._confirm_hook(),
@@ -370,47 +633,41 @@ class AgentEngine:
             agent.extra_context = self.ctx.memory_prompt
         self.router = AgentRouter([agent])
 
-import re
+    def _build_tools(self) -> dict:
+        """Tools the current run may use.
 
-def _build_tools(self) -> dict:
-    ctx = self.ctx
-    goal = (ctx.goal or "").lower()
-    tools: dict = {}
+        A capability is registered only when the route supplied its callback,
+        so the model never sees a tool it cannot actually run. When auto-search
+        is switched off (``ctx.tools_allowed`` is False) this returns an empty
+        dict: the router has only a tool-free conversation agent and the
+        request goes straight to the AI model.
+        """
+        ctx = self.ctx
+        if not ctx.tools_allowed:
+            self.recalled_tools = []
+            return {}
+        tools: dict = {}
+        if ctx.search is not None:
+            tools["web_search"] = WebSearchTool(ctx.search, state=self.state)
+        if ctx.read_page is not None:
+            tools["web_open"] = WebOpenTool(ctx.read_page, state=self.state)
+        if ctx.workspace:
+            # Linux-команды и шаги агента исполняются терминальной песочницей.
+            tools["terminal"] = BashTool()
+            tools["python"] = PythonTool()
+            tools["file_read"] = FileReadTool()
+            tools["file_write"] = FileWriteTool()
+            tools["file_find"] = FileFinderTool()
+            tools["file_edit"] = FileEditTool()
+        if ctx.tools_ctx is not None:
+            tools.update(build_nova_tools(ctx.tools_ctx, state=self.state,
+                                          emit=self._emit))
+        # Динамическое получение инструментов завершено: запоминаем реальный
+        # список для события «Вспомнил инструменты» (а не выдуманный анонс).
+        self.recalled_tools = sorted({str(getattr(tool, "tag", tag) or tag)
+                                      for tag, tool in tools.items()})
+        return tools
 
-    # 1. Сначала собираем ВСЕ потенциально доступные инструменты (как сейчас)
-    if ctx.search is not None:
-        tools["web_search"] = WebSearchTool(ctx.search, state=self.state)
-    if ctx.read_page is not None:
-        tools["web_open"] = WebOpenTool(ctx.read_page, state=self.state)
-    if ctx.workspace:
-        tools["terminal"] = BashTool()
-        tools["python"] = PythonTool()
-        tools["file_read"] = FileReadTool()
-        tools["file_write"] = FileWriteTool()
-        tools["file_find"] = FileFinderTool()
-        tools["file_edit"] = FileEditTool()
-    if ctx.tools_ctx is not None:
-        tools.update(build_nova_tools(ctx.tools_ctx, state=self.state, emit=self._emit))
-
-    # 2. Фильтруем по намерению (эвристика)
-    # Если это простой чат/приветствие — вообще не отдаём инструменты
-    if re.match(r"^(привет|столица|сколько|кто такой|перевод|как дела)", goal):
-        return {}
-
-    # Если просят найти информацию — оставляем только веб-инструменты
-    if any(word in goal for word in ["найди", "поиск", "книг", "интернет", "статью", "источник"]):
-        return {k: v for k, v in tools.items() if k in ("web_search", "web_open")}
-
-    # Если работа с файлами/кодом — только терминал и файлы
-    if any(word in goal for word in ["файл", "терминал", "код", "папк", "запусти", "скрипт"]):
-        return {k: v for k, v in tools.items() if k in ("terminal", "python", "file_read", "file_write", "file_find", "file_edit")}
-
-    # Если явно упомянут MCP — оставляем только MCP-инструменты
-    if "mcp" in goal:
-        return {k: v for k in tools if k.startswith("mcp_")}
-
-    # Для сложных смешанных запросов отдаём базовый набор
-    return tools
 
     @staticmethod
     def _with_aliases(tools: dict) -> dict:
@@ -429,6 +686,9 @@ def _build_tools(self) -> dict:
             only = {tag: tool for tag, tool in shared.items() if tag == "mcp_call"}
             if only:
                 shared = only
+                # В строгом режиме реально доступен только mcp_call — список
+                # «вспомнил инструменты» должен быть честным.
+                self.recalled_tools = ["mcp_call"]
                 for agent in agents:
                     if agent.role != "talk":
                         agent.tools = dict(shared)
@@ -532,11 +792,19 @@ def _build_tools(self) -> dict:
     # ── execution ─────────────────────────────────────────────────────────
     def _run_agent(self) -> None:
         ctx = self.ctx
+        if not ctx.tools_allowed:
+            # Ни медиа, ни офлайн-поиск, ни автопоиск, ни выбор инструментов.
+            self._run_direct()
+            return
         if ctx.media_kind and ctx.media_generate is not None:
             self._run_media()
             return
         if ctx.offline or ctx.provider == "local_demo":
-            self._run_offline()
+            if (ctx.workspace and ctx.runner is not None
+                    and _OFFLINE_TERMINAL_HINT.search(ctx.goal)):
+                self._run_offline_terminal()
+            else:
+                self._run_offline()
             return
         if ctx.force_search:
             self._search_observation = self._run_forced_search()
@@ -615,10 +883,11 @@ def _build_tools(self) -> dict:
         label = KIND_RU.get(kind, kind)
         self._emit({"type": "stage", "scene": "media", "title": "Генерирую медиа",
                     "text": f"{label}: запрос принят"})
-        try:
-            result, model, errors = ctx.media_generate(kind, ctx.goal, {})
-        except Exception as error:  # noqa: BLE001 — reported honestly
-            result, model, errors = None, None, [f"{type(error).__name__}: {error}"]
+        with self._thinking(f"создать {label}"):
+            try:
+                result, model, errors = ctx.media_generate(kind, ctx.goal, {})
+            except Exception as error:  # noqa: BLE001 — reported honestly
+                result, model, errors = None, None, [f"{type(error).__name__}: {error}"]
         if result:
             self.state.add_media(result, model)
             self._emit({"type": "media", "media": result, "model": model})
@@ -683,8 +952,11 @@ def _build_tools(self) -> dict:
         )
         self._emit({"type": "step", "icon": "🔎",
                     "text": f"Нашёл {len(results)} источников по запросу «{goal}»"})
-        self._emit({"type": "tool", "name": "web_search", "command": f"nova search {goal}",
+        search_step = f"nova search {goal}"
+        self._emit(think_event("before", search_step))
+        self._emit({"type": "tool", "name": "web_search", "command": search_step,
                     "code": 0, "output": lines, "results": results})
+        self._emit(think_event("after", search_step, done=True))
 
         pages = []
         for item in results[:3]:
@@ -693,15 +965,17 @@ def _build_tools(self) -> dict:
             url = str(item.get("url") or "")
             if ctx.read_page is None or not url.startswith(("http://", "https://")):
                 continue
-            try:
-                text, _elapsed = ctx.read_page(url)
-            except Exception:  # noqa: BLE001 — a page error is not a run failure
-                continue
-            if not text:
-                continue
-            pages.append(f"--- {url} ---\n{clip(text, 2000)}")
-            self._emit({"type": "tool", "name": "web_open", "command": url, "code": 0,
-                        "output": clip(text, 1200)})
+            # Думаем, что делать после чтения страницы, и осмысляем результат.
+            with self._thinking(f"nova read {url}"):
+                try:
+                    text, _elapsed = ctx.read_page(url)
+                except Exception:  # noqa: BLE001 — a page error is not a run failure
+                    continue
+                if not text:
+                    continue
+                pages.append(f"--- {url} ---\n{clip(text, 2000)}")
+                self._emit({"type": "tool", "name": "web_open", "command": url, "code": 0,
+                            "output": clip(text, 1200)})
 
         if ctx.save_research is not None:
             body = (f"# {goal}\n\n_поиск {time.strftime('%Y-%m-%d %H:%M')}_\n\n{lines}\n\n"
@@ -719,6 +993,45 @@ def _build_tools(self) -> dict:
                 + "\n\nВАЖНО: данных достаточно. Ответь пользователю сейчас обычным "
                   "текстом по-русски, со ссылками на номера источников [1], [2]. "
                   "НЕ вызывай web_search и web_open, не пиши теги и блоки.")
+
+    def _run_offline_terminal(self) -> None:
+        """Demo mode (no LLM key): still perform real steps in the Linux sandbox.
+
+        Без языковой модели некому придумывать следующий шаг, поэтому набор
+        команд детерминирован. Все они идут через тот же runner песочницы, что
+        и обычные шаги агента: allow-list, лимиты, личная рабочая папка.
+        """
+        from agenticseek.timeline import tool_event
+
+        ctx = self.ctx
+        self._emit({"type": "stage", "scene": "agent", "title": "Терминал",
+                    "text": "Выполняю шаги Linux-командами в песочнице"})
+        lines = []
+        for index, command in enumerate(_offline_terminal_commands(ctx.goal), 1):
+            if ctx.cancel is not None and ctx.cancel.is_set():
+                raise AgentStopped("cancelled")
+            # Каждый шаг терминала: думаем, что делать дальше → выполняем →
+            # обдумываем результат и выбираем следующую команду.
+            with self._thinking(command):
+                try:
+                    result = ctx.runner(command, timeout=20) if ctx.runner is not None else None
+                except Exception as error:  # noqa: BLE001 — команда не должна ронять ход
+                    result = {"code": 2, "stdout": "", "stderr": str(error)}
+                result = result or {"code": 2, "stdout": "", "stderr": "Песочница недоступна"}
+                code = int(result.get("code") or 0)
+                output = ((result.get("stdout") or "") + (result.get("stderr") or "")).strip()
+                ok = code == 0 and not result.get("timed_out")
+                self._emit(tool_event("terminal", command, ok=ok, command=command,
+                                      output=clip(output, 1200), code=code))
+                self.state.add_tool("terminal", ok)   # StepState сам считает шаги
+            lines.append(
+                f"{index}. `{command}` → {'успех' if ok else f'код {code}'}"
+                + (f":\n```text\n{clip(output, 700)}\n```" if output else ""))
+        self.answer = (
+            "Выполнил шаги в терминале песочницы (демо-режим без языковой модели):\n\n"
+            + "\n\n".join(lines)
+            + "\n\nПодключите ключ провайдера — тогда ИИ сможет сам выбирать "
+              "следующую команду по результату каждого шага.")
 
     def _run_offline(self) -> None:
         """No language model: real search/media, honest answers (see offline.py)."""
@@ -1008,6 +1321,36 @@ _TOOL_ONLY = _re.compile(
 def _is_tool_only(text) -> bool:
     t = str(text or "").strip()
     return not t or bool(_TOOL_ONLY.match(t))
+
+
+#: Теги, которые в прямом режиме (без инструментов) означают попытку вызова,
+#: а не пример кода для пользователя.
+_DIRECT_TOOL_TAGS = {
+    "terminal", "bash", "sh", "python", "json", "web_search", "web_open",
+    "file_read", "file_write", "file_edit", "file_find", "file_finder",
+    "mcp_call", "image", "audio", "video", "remember", "recall", "forget",
+    "task", "task_done", "schedule", "skill_create", "tool_code", "tool_call",
+}
+
+
+def _is_tool_call_answer(text) -> bool:
+    """Ответ целиком представляет собой вызов недоступного инструмента."""
+    value = str(text or "").strip()
+    if not value:
+        return False
+    if _TOOL_ONLY.match(value):
+        return True
+    block = re.fullmatch(r"```([a-zA-Z_][\w-]*)\n(.*?)```", value, re.S)
+    if block and block.group(1).strip().lower() in _DIRECT_TOOL_TAGS:
+        return True
+    if value.startswith("{") and value.endswith("}"):
+        try:
+            payload = json.loads(value)
+        except (ValueError, TypeError):
+            return False
+        return isinstance(payload, dict) and bool(
+            {"tool", "action", "tool_input"} & set(payload))
+    return False
 
 
 

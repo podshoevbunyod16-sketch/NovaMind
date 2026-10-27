@@ -70,10 +70,14 @@ def coding_stream():
 
     @stream_with_context
     def generate():
+        # Тот же выключатель автопоиска, что и в главном чате: без инструментов
+        # запрос уходит прямо в модель (не в агента чтения исходников).
+        from routes.agent import request_tools_allowed
+        tools_allowed = request_tools_allowed(data)
         engine = AgentEngine(EngineContext(
             goal=goal, complete=chat_completion, emit=lambda event: None,
             provider=provider, model=model, profile="coding",
-            workspace=False, timeout=TIMEOUT))
+            workspace=False, timeout=TIMEOUT, tools_allowed=tools_allowed))
         proposals: list = []
         try:
             for event in engine.stream():

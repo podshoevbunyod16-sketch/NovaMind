@@ -212,7 +212,11 @@ def test_schedule_api_blocks_foreign_job(google_client, db):
 
 
 def test_schedule_run_now(google_client, db, monkeypatch):
-    job = scheduler.create_job("иван", "своё", "every", "1h")   # google_client = «Иван»
+    # Владелец теперь проверяемая личность (email:/anon:), а не ник.
+    import identity
+    with google_client.session_transaction() as sess:
+        owner = identity.chat_owner(sess)
+    job = scheduler.create_job(owner, "своё", "every", "1h")
     monkeypatch.setattr(scheduler, "run_job",
                         lambda current: {"id": current["id"], "reply": "готово", "error": ""})
     response = google_client.post(f"/api/schedule/{job['id']}/run")
@@ -244,7 +248,7 @@ def test_agent_creates_schedule_via_tool(admin_client, sandbox, db, monkeypatch)
     events = _ndjson(admin_client.post("/api/agent/stream",
                                        json={"message": "каждое утро в 9 присылай сводку новостей"}))
     assert any(event["type"] == "schedule" for event in events)
-    jobs = database.list_jobs(owner="admin")
+    jobs = database.list_jobs(owner="admin:admin")
     assert len(jobs) == 1 and jobs[0]["expr"] == "0 9 * * *"
     assert "сводку" in answer_of(events)
 
@@ -257,5 +261,5 @@ def test_agent_schedule_needs_expression(admin_client, sandbox, db, monkeypatch)
     events = _ndjson(admin_client.post("/api/agent/stream",
                                        json={"message": "поставь отчёт по расписанию"}))
     assert not any(event["type"] == "schedule" for event in events)
-    assert database.list_jobs(owner="admin") == []
+    assert database.list_jobs(owner="admin:admin") == []
     assert events_of(events, "tool")[0]["code"] == 1

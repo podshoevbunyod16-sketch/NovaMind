@@ -105,6 +105,33 @@ const AGENT_STREAM = [
   { type: 'done' },
 ];
 
+// Динамическое получение инструментов и размышление вокруг каждого шага
+const RECALL_STREAM = [
+  { type: 'stage', scene: 'agent', title: 'Понимаю запрос', text: 'Разбираю задачу и решаю, что понадобится' },
+  { type: 'recall', phase: 'tools', icon: '🧰', text: 'Вспоминаю инструменты',
+    detail: 'Linux-команды и терминал', done: false, items: ['terminal'] },
+  { type: 'recall', phase: 'mcp', icon: '🔌', text: 'Вспоминаю MCP-серверы',
+    detail: 'Проверяю подключённые MCP-серверы', done: false },
+  { type: 'recall', phase: 'tools', icon: '✅', text: 'Вспомнил инструменты',
+    detail: 'Подключено для этого запроса: 1', done: true, items: ['terminal'] },
+  { type: 'recall', phase: 'mcp', icon: '✅', text: 'Вспомнил MCP-серверы',
+    detail: 'Список MCP-инструментов обновлён', done: true },
+  { type: 'recall', phase: 'ready', icon: '✅', text: 'Инструменты наготове',
+    detail: 'Получено инструментов: 1', done: true, items: ['terminal'] },
+  { type: 'step', icon: '🧰', text: 'Получил инструменты под задачу: terminal' },
+  { type: 'think', phase: 'before', icon: '🧠', label: 'Думает…', detail: 'pwd',
+    text: 'Думаю, что сделать после шага «pwd».', done: false },
+  { type: 'tool', name: 'terminal', kind: 'command', label: 'Выполнил команду',
+    detail: 'pwd', command: 'pwd', code: 0, status: 'ok', output: '/workspace' },
+  { type: 'think', phase: 'after', icon: '🧠', label: 'Думал', detail: 'pwd',
+    text: 'Осмыслил результат «pwd» и выбираю следующий шаг.', done: true },
+  { type: 'token', token: 'Команда ' },
+  { type: 'token', token: 'выполнена.' },
+  { type: 'result', reply: 'Команда выполнена.', steps: 1, model: 'mock-model',
+    tools: ['terminal'], linux: true },
+  { type: 'done' },
+];
+
 // Простой вопрос: модель ответила сразу, без окружения
 const SIMPLE_STREAM = [
   { type: 'token', token: 'Привет! ' },
@@ -482,6 +509,12 @@ console.log('\n2) Без окружения: поиск старым путём 
 window.document.getElementById('chat-input').value = 'сколько стоит?';
 window.toggleWebSearch();
 check('кнопка поиска активна', document.getElementById('btn-web-search').classList.contains('active'));
+check('старое имя toggleAutoSearch управляет той же кнопкой автопоиска', (() => {
+  window.toggleAutoSearch();
+  const off = !document.getElementById('btn-web-search').classList.contains('active');
+  window.toggleAutoSearch();
+  return off && document.getElementById('btn-web-search').classList.contains('active');
+})());
 
 await window.sendMessage();
 await new Promise((resolve) => setTimeout(resolve, 120));
@@ -1251,6 +1284,8 @@ check('обычное сообщение ушло в главный чат с Li
   mock.agentRequests.length === 1 && mock.agentRequests[0].message === 'привет'
   && mock.agentRequests[0].search === false && mock.sendStreamCalls === sendCallsBefore,
   JSON.stringify(mock.agentRequests));
+check('автопоиск выключен → серверу явно запрещены ВСЕ инструменты',
+  mock.agentRequests[0].tools === false, JSON.stringify(mock.agentRequests[0]));
 check('простой вопрос — сразу текст, без блока Linux',
   lastAi().querySelector('.answer').textContent.includes('Чем помочь')
   && !lastAi().querySelector('.agent-term'));
@@ -1400,7 +1435,8 @@ await window.sendMessage();
 await settle();
 const searchTurn = lastAi();
 check('кнопка «Поиск» отправляет запрос в Linux-окружение',
-  mock.agentRequests[mock.agentRequests.length - 1].search === true);
+  mock.agentRequests[mock.agentRequests.length - 1].search === true
+  && mock.agentRequests[mock.agentRequests.length - 1].tools === true);
 check('поиск виден шагами nova search / nova read',
   searchTurn.querySelector('.agent-term')?.textContent.includes('nova search цена ноутбука') === true
   && searchTurn.querySelector('.agent-term').textContent.includes('nova read'));
@@ -1726,6 +1762,40 @@ document.getElementById('chat-input').value = 'ещё ответ';
 await window.sendMessage();
 await settle(120);
 check('кнопка снова доступна после нового чата', speakButton.disabled === false);
+
+// ══════════════════════════════════════════════════════════════
+// 20) «Вспоминаю инструменты / MCP-серверы» и думаем вокруг шагов
+// ══════════════════════════════════════════════════════════════
+console.log('\n20) Динамическое получение инструментов и мысли вокруг шагов');
+window.NovaSpeech.saveSettings({ auto_speak: false });
+mock.agentStream = RECALL_STREAM;
+document.getElementById('chat-input').value = 'выполни pwd в терминале';
+await window.sendMessage();
+await settle();
+const recallTurn = lastAi();
+const toolsRow = recallTurn.querySelector('.stage-step[data-recall="tools"]');
+const mcpRow = recallTurn.querySelector('.stage-step[data-recall="mcp"]');
+check('первый шаг — понимание запроса',
+  recallTurn.querySelector('.stage-title')?.textContent.includes('Понимаю') === true,
+  recallTurn.querySelector('.stage-title')?.textContent);
+check('после понимания запроса агент вспоминает инструменты',
+  !!toolsRow && toolsRow.textContent.includes('Вспомнил инструменты'),
+  toolsRow?.textContent);
+check('строка «вспоминаю MCP-серверы» тоже показывается при необходимости',
+  !!mcpRow && mcpRow.textContent.includes('Вспомнил MCP-серверы'),
+  mcpRow?.textContent);
+check('анимация «вспоминаю» завершилась — живых точек не осталось',
+  !recallTurn.querySelector('.stage-step.is-live[data-recall]')
+  && [...recallTurn.querySelectorAll('.stage-step[data-recall]')]
+    .every((row) => row.classList.contains('is-done')));
+check('после инструментов виден настоящий шаг терминала',
+  recallTurn.querySelector('.agent-term-row')?.textContent.includes('pwd') === true);
+check('перед шагом и после него агент думает — «Думает…» → «Думал»',
+  [...recallTurn.querySelectorAll('.agent-thought-label')].some((el) => el.textContent === 'Думал')
+  && !recallTurn.querySelector('.agent-thought.is-live')
+  && !recallTurn.querySelector('.think-dots'),
+  [...recallTurn.querySelectorAll('.agent-thought-label')].map((el) => el.textContent).join('|'));
+
 check('консоль после сценариев озвучки чистая', consoleErrors.length === 0, consoleErrors.join(' | '));
 
 if (failures.length) {
