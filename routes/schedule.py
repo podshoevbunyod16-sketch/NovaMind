@@ -11,6 +11,7 @@
 from flask import Blueprint, jsonify, request, session
 
 import database
+import identity
 import scheduler
 from routes.terminal import signed_in
 
@@ -18,10 +19,8 @@ schedule_bp = Blueprint("schedule", __name__)
 
 
 def owner_key():
-    """Кто владелец задания: ник, e-mail или пусто для гостя."""
-    return str(session.get("admin_username") or session.get("nova_user_nick")
-               or session.get("nova_user_email") or session.get("user_email")
-               or session.get("username") or "").strip().lower()[:180]
+    """Кто владелец задания: email:/admin:/anon: (ник не доказательство), пусто - гость."""
+    return identity.chat_owner() if signed_in() else ""
 
 
 def is_admin():
@@ -30,9 +29,9 @@ def is_admin():
 
 @schedule_bp.route("/api/schedule", methods=["GET"])
 def list_schedule():
-    jobs = database.list_jobs(owner=owner_key() or None)
-    if not signed_in():
-        jobs = []
+    jobs = database.list_jobs(owner=owner_key() or None) if signed_in() else []
+    if signed_in() and is_admin():
+        jobs = database.list_jobs()        # админ видит и старые задания (владелец - ник)
     return jsonify({"jobs": jobs, "tick": scheduler.TICK_SECONDS,
                     "signed_in": signed_in()})
 

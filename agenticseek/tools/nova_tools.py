@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 from typing import Any
 
@@ -192,6 +193,8 @@ class McpBridgeTool(BridgeTool):
         if not server_id or not tool:
             return ("[failure] Нужны server_id и tool. Пример: "
                     '{"server_id":"github","tool":"search_repositories","arguments":{"query":"x","minimal_output":true}}')
+        if not getattr(self.ctx, "is_admin", False) and os.getenv("MCP_ALLOW_USER_READ", "0") != "1":
+            return "[failure] MCP-подключения владельца доступны только администратору."
         # админ: без ограничений; остальные: только чтение
         if not getattr(self.ctx, "is_admin", False) and \
                 any(h in tool.lower() for h in _MCP_WRITE_HINTS):

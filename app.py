@@ -25,6 +25,8 @@ from routes import ALL_BLUEPRINTS
 # ---------- Flask ----------
 app = Flask(__name__, static_folder="static", template_folder="templates")
 app.secret_key = ADMIN_SESSION_KEY
+from datetime import timedelta as _timedelta  # noqa: E402
+app.permanent_session_lifetime = _timedelta(days=365)   # id браузера - основа изоляции данных
 app.config["MAX_CONTENT_LENGTH"] = 500 * 1024 * 1024  # 500 MB
 
 # ---------- Регистрация Blueprint'ов ----------

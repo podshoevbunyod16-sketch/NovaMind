@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from typing import Any
 
@@ -9,6 +10,20 @@ from ai_providers import chat_completion
 import mcp_registry
 
 _JSON_RE = re.compile(r"\{.*\}", re.S)
+
+
+def _mcp_allowed_for_user() -> bool:
+    """MCP-подключения принадлежат владельцу сервера (его токены GitHub и т.п.).
+
+    Обычным пользователям они недоступны; MCP_ALLOW_USER_READ=1 возвращает доступ.
+    """
+    if os.getenv("MCP_ALLOW_USER_READ", "0") == "1":
+        return True
+    try:
+        from routes.terminal import is_admin
+        return bool(is_admin())
+    except Exception:  # noqa: BLE001 - нет запроса или сессии: закрыто
+        return False
 
 
 def _extract_action(text: str) -> dict[str, Any] | None:
@@ -45,6 +60,8 @@ def complete_with_mcp(messages: list[dict[str, Any]], *, system: str, provider: 
                       model: str, temperature: float = 0.7, max_tokens: int = 8192,
                       timeout: float = 120, max_calls: int = 4):
     """Return (reply, meta, events). If no MCP is connected, behaves normally."""
+    if not _mcp_allowed_for_user():
+        return None, None, []
     try:
         tools = mcp_registry.connected_tools()
     except Exception:

@@ -4,6 +4,7 @@ routes/chat.py — Маршруты чата: /send, /send_stream, /api/chats/*,
 from flask import Blueprint, request, jsonify, session, Response, stream_with_context
 import json
 import queue
+import re
 import threading
 import time
 import os
@@ -25,6 +26,23 @@ from mcp_chat import complete_with_mcp
 contents = []
 
 chat_bp = Blueprint("chat", __name__)
+
+_CHAT_PATH = re.compile(r"^/api/chats/([^/]+)(?:/(?:traces|switch))?$")
+
+
+@chat_bp.before_request
+def _chat_ownership_guard():
+    """Чужие чаты недоступны: ни чтение, ни удаление, ни запись по chat_id."""
+    from database import chat_allowed
+    match = _CHAT_PATH.match(request.path)
+    if match and match.group(1) not in ("current", "clear"):
+        if not chat_allowed(match.group(1)):
+            return jsonify({"error": "Чат не найден"}), 404
+    if request.method == "POST" and request.path == "/send":
+        chat_id = (request.get_json(silent=True) or {}).get("chat_id")
+        if chat_id and not chat_allowed(chat_id):
+            return jsonify({"error": "Чат не найден"}), 404
+    return None
 
 
 def is_agent_enabled():

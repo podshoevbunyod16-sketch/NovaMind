@@ -7,6 +7,15 @@ import os
 
 composio_bp = Blueprint("composio", __name__)
 
+
+@composio_bp.before_request
+def _composio_admin_only():
+    """Composio работает с аккаунтами ВЛАДЕЛЬЦА (GitHub, почта...): только админ."""
+    from routes.terminal import is_admin
+    if not is_admin():
+        return jsonify({"error": "Composio доступен только администратору"}), 403
+    return None
+
 @composio_bp.route('/composio')
 def composio_page():
     return render_template('composio.html')

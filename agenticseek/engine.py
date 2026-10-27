@@ -32,6 +32,7 @@ It is deliberately free of Flask imports: the route passes callables in
 
 from __future__ import annotations
 
+import contextvars
 import logging
 import os
 import re
@@ -203,7 +204,10 @@ class AgentEngine:
             finally:
                 queue.put(done)
 
-        thread = threading.Thread(target=work, name="agenticseek-run", daemon=True)
+        # Поток агента наследует контекст запроса: рабочая папка и владелец пользователя.
+        run_context = contextvars.copy_context()
+        thread = threading.Thread(target=lambda: run_context.run(work),
+                                  name="agenticseek-run", daemon=True)
         thread.start()
         try:
             while True:

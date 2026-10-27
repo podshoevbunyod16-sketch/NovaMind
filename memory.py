@@ -55,13 +55,19 @@ def user_key(session, signed_in) -> str:
     """Ключ памяти пользователя. Пустая строка — гостю память не положена."""
     if not memory_enabled() or not signed_in:
         return ""
-    for field in ("nova_user_email", "user_email", "email",
-                  "nova_user_nick", "username"):
+    # Ник вводит кто угодно (вход без пароля), поэтому «по нику» к ключу
+    # добавляется id браузера: чужой ник больше не открывает чужую память.
+    # Google-почта и админ - проверенные личности, их ключи прежние.
+    for field in ("nova_user_email", "user_email", "email"):
         value = str(session.get(field) or "").strip()
         if value:
             return value.lower()[:180]
+    nick = str(session.get("nova_user_nick") or session.get("username") or "").strip().lower()
     if session.get("admin_logged_in"):
-        return "admin"
+        return (nick or "admin")[:180]
+    if nick:
+        from identity import browser_id
+        return ("nick:%s:%s" % (nick, browser_id(session)[:12]))[:180]
     # Сессия есть, но имени нет (например, вход по cookie) — ключ по самой сессии.
     key = str(session.get("agent_memory_key") or "").strip()
     return f"session:{key}"[:180] if key else ""

@@ -76,13 +76,37 @@ SITE_URL             = os.getenv("SITE_URL", "http://localhost:5000").rstrip("/"
 GOOGLE_REDIRECT_URI  = os.getenv("GOOGLE_REDIRECT_URI",
                                  f"{SITE_URL}/auth/google/callback")
 
+def _persistent_session_secret():
+    """Ключ подписи cookie, переживающий рестарт.
+
+    Случайный ключ на каждый запуск разлогинивал всех, а теперь ещё и «терял» чаты:
+    владелец чата определяется по подписанной cookie. Хранится в .session_secret.
+    """
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".session_secret")
+    try:
+        with open(path, encoding="utf-8") as handle:
+            value = handle.read().strip()
+        if len(value) >= 32:
+            return value
+    except OSError:
+        pass
+    value = secrets.token_hex(32)
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(value)
+    except OSError:
+        pass
+    return value
+
+
 # ---------- Безопасность ----------
 # Пароль администратора. Предсказуемый дефолт опасен: без ADMIN_CODE
 # в окружении генерируем случайный код и печатаем его в лог при старте —
 # войти «по умолчанию» снаружи уже нельзя.
 ADMIN_CODE        = os.getenv("ADMIN_CODE") or secrets.token_urlsafe(9)
 ADMIN_CODE_IS_DEFAULT = not bool(os.getenv("ADMIN_CODE"))
-ADMIN_SESSION_KEY = os.getenv("SESSION_SECRET") or os.urandom(24).hex()
+ADMIN_SESSION_KEY = os.getenv("SESSION_SECRET") or _persistent_session_secret()
 # Логин и код администратора. ADMIN_USER можно переопределить в .env,
 # иначе вход идёт под именем admin с кодом ADMIN_CODE.
 ADMIN_USER        = os.getenv("ADMIN_USER", "admin").strip() or "admin"

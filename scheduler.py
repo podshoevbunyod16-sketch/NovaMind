@@ -188,7 +188,7 @@ def create_job(owner, prompt, kind, expr, chat_id="", owner_admin=False):
         parse_cron(expr)
     else:
         parse_every(expr)
-    result_chat_id = database.create_chat(_result_chat_title(owner))
+    result_chat_id = database.create_chat(_result_chat_title(owner), owner=owner or "")
     job = {
         "id": uuid.uuid4().hex[:12],
         "owner": owner or "",
@@ -206,19 +206,19 @@ def create_job(owner, prompt, kind, expr, chat_id="", owner_admin=False):
 
 def _result_chat_title(owner) -> str:
     """Один отдельный чат на владельца: результаты не мешают разговору."""
-    return f"⏰ Расписание · {owner}" if owner else "⏰ Расписание"
+    return "⏰ Расписание"       # чаты и так раздельные: у каждого владельца свой
 
 
 def result_chat_for(owner) -> str:
     """Отдельный чат для результатов (или новый, если ещё нет)."""
     title = _result_chat_title(owner)
     try:
-        for chat in database.list_chats(limit=200):
+        for chat in database.list_chats(limit=200, owner=owner or ""):
             if chat.get("title") == title:
                 return chat["id"]
     except Exception:
         pass
-    return database.create_chat(title)
+    return database.create_chat(title, owner=owner or "")
 
 
 def describe(job) -> str:
@@ -246,12 +246,24 @@ def _run_agent_prompt(job):
             "/api/agent/stream", method="POST", json={"message": job["prompt"]},
             headers={"X-Internal-Token": security.INTERNAL_RUN_TOKEN}):
         session["chat_id"] = job["result_chat_id"]
-        if job.get("owner"):
-            session["nova_user_nick"] = job["owner"]
+        # Личность восстанавливается из владельца задания (его строка - в таблице чатов):
+        # так запуск попадает в чаты, память и папку именно этого пользователя.
+        who = str(job.get("owner") or "")
+        if who.startswith("email:"):
+            session["nova_user_email"] = who[6:]
+            session["nova_google_login"] = True
+            session["nova_signed_in"] = True
+        elif who.startswith("anon:"):
+            session["nova_sid"] = who[5:]
+            session["nova_signed_in"] = True
+        elif who.startswith("admin:"):
+            pass                                   # ниже: owner_admin
+        elif who:
+            session["nova_user_nick"] = who        # старые задания: владелец - ник
             session["nova_signed_in"] = True
         if job.get("owner_admin"):
             session["admin_logged_in"] = True
-            session["admin_username"] = "admin"
+            session["admin_username"] = who[6:] if who.startswith("admin:") else "admin"
         response = agent_routes.agent_stream()
         for raw in response.response:
             try:

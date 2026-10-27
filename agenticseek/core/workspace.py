@@ -18,6 +18,7 @@ Runtime data (logs, sessions, screenshots) lives in ``AGENT_RUNTIME_DIR``
 
 from __future__ import annotations
 
+import contextvars
 import os
 
 DEFAULT_RUNTIME_DIR = ".agent-data"
@@ -25,6 +26,9 @@ _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__f
 
 #: Exposed for tests and for the engine: the directory agents may touch.
 _WORK_DIR: str | None = None
+
+#: Рабочая папка текущего запроса/потока (у каждого пользователя своя).
+_CTX_WORK_DIR = contextvars.ContextVar("agent_work_dir", default=None)
 
 
 def get_runtime_dir() -> str:
@@ -45,6 +49,9 @@ def runtime_subdir(name: str) -> str:
 def get_work_dir() -> str:
     """Directory where agents may read, write, and execute code."""
     global _WORK_DIR
+    scoped = _CTX_WORK_DIR.get()
+    if scoped:
+        return scoped
     if _WORK_DIR:
         return _WORK_DIR
     path = (os.getenv("AGENTICSEEK_WORK_DIR", "").strip()
@@ -59,6 +66,17 @@ def set_work_dir(path: str) -> str:
     """Pin the workspace for the current process (used by Flask setup and tests)."""
     global _WORK_DIR
     _WORK_DIR = os.path.realpath(os.path.abspath(path)) if path else None
+    return get_work_dir()
+
+
+def set_context_work_dir(path: str | None) -> str:
+    """Pin the workspace for the current request/thread only (per-user isolation).
+
+    Unlike ``set_work_dir`` it never touches the process-wide value, so concurrent
+    users cannot overwrite each other's directory.  Threads started with
+    ``contextvars.copy_context()`` inherit it.
+    """
+    _CTX_WORK_DIR.set(os.path.realpath(os.path.abspath(path)) if path else None)
     return get_work_dir()
 
 

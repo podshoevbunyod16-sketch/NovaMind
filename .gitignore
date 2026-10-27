@@ -25,3 +25,5 @@ mcp_connections.json
 .npm/
 
 *.bak
+.session_secret
+.patch_backup_*/

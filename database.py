@@ -10,6 +10,8 @@ import re
 import threading
 from flask import session
 
+import identity as _identity
+
 DB_PATH = os.path.join(os.path.dirname(__file__), "novamind_chats.db")
 _db_lock = threading.Lock()
 
@@ -18,6 +20,16 @@ def get_db():
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     return conn
+
+def _ensure_column(conn, table, column, ddl):
+    """Добавляет колонку в старую базу (миграция без потери данных)."""
+    cols = [row[1] for row in conn.execute(f"PRAGMA table_info({table})")]
+    if column in cols:
+        return
+    try:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
+    except sqlite3.OperationalError:
+        pass  # параллельный процесс уже добавил колонку
 
 def init_db():
     """Создаёт таблицы если не существуют."""
@@ -40,19 +52,24 @@ def init_db():
             CREATE INDEX IF NOT EXISTS idx_messages_chat ON messages(chat_id);
             CREATE INDEX IF NOT EXISTS idx_chats_updated ON chats(updated_at DESC);
         """)
+        # владелец чата: без него все пользователи видели чужие чаты
+        _ensure_column(conn, "chats", "owner", "TEXT NOT NULL DEFAULT ''")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_chats_owner ON chats(owner, updated_at DESC)")
     print("[DB] База данных чатов инициализирована:", DB_PATH)
 
 init_db()
 
-def create_chat(title="Новый чат"):
-    """Создаёт новый чат, возвращает его id."""
+def create_chat(title="Новый чат", owner=None):
+    """Создаёт новый чат, возвращает его id. Владелец - текущий пользователь."""
     chat_id = str(uuid.uuid4())
     now = time.time()
+    if owner is None:
+        owner = _identity.chat_owner()
     with _db_lock:
         with get_db() as conn:
             conn.execute(
-                "INSERT INTO chats (id, title, created_at, updated_at) VALUES (?, ?, ?, ?)",
-                (chat_id, title, now, now)
+                "INSERT INTO chats (id, title, created_at, updated_at, owner) VALUES (?, ?, ?, ?, ?)",
+                (chat_id, title, now, now, owner)
             )
     return chat_id
 
@@ -91,16 +108,25 @@ def add_message(chat_id, role, content):
                 title = content[:60].replace("\n", " ").strip()
                 conn.execute("UPDATE chats SET title=? WHERE id=?", (title, chat_id))
 
-def list_chats(limit=50):
-    """Возвращает список чатов (новые сначала)."""
+def list_chats(limit=50, owner=None):
+    """Чаты текущего пользователя (новые сначала).
+
+    owner=None - берётся текущий пользователь; если пользователя нет (внутренний
+    вызов без запроса) - без фильтра. Старые чаты без владельца видит только админ.
+    """
+    if owner is None:
+        owner = _identity.chat_owner() or None
+    legacy = owner is not None and _identity.is_admin_owner(owner)
+    sql = ("SELECT c.id, c.title, c.created_at, c.updated_at, COUNT(m.id) as msg_count "
+           "FROM chats c LEFT JOIN messages m ON c.id=m.chat_id")
+    args = []
+    if owner is not None:
+        sql += " WHERE (c.owner=? OR c.owner='')" if legacy else " WHERE c.owner=?"
+        args.append(owner)
+    sql += " GROUP BY c.id ORDER BY c.updated_at DESC LIMIT ?"
+    args.append(int(limit))
     with get_db() as conn:
-        rows = conn.execute(
-            """SELECT c.id, c.title, c.created_at, c.updated_at,
-               COUNT(m.id) as msg_count
-               FROM chats c LEFT JOIN messages m ON c.id=m.chat_id
-               GROUP BY c.id ORDER BY c.updated_at DESC LIMIT ?""",
-            (limit,)
-        ).fetchall()
+        rows = conn.execute(sql, args).fetchall()
     return [dict(r) for r in rows]
 
 def delete_chat(chat_id):
@@ -114,10 +140,30 @@ def delete_chat(chat_id):
     except sqlite3.Error:
         pass
 
+def chat_owner_of(chat_id):
+    """Владелец чата ("" - старый чат без владельца или чата нет)."""
+    with get_db() as conn:
+        row = conn.execute("SELECT owner FROM chats WHERE id=?", (str(chat_id or ""),)).fetchone()
+    return (row[0] or "") if row else ""
+
+def chat_allowed(chat_id):
+    """Можно ли текущему пользователю работать с этим чатом."""
+    actor = _identity.chat_owner()
+    if not actor:
+        return True               # внутренний вызов без пользователя
+    with get_db() as conn:
+        row = conn.execute("SELECT owner FROM chats WHERE id=?", (str(chat_id or ""),)).fetchone()
+    if row is None:
+        return False
+    owner = row[0] or ""
+    return owner == actor or (owner == "" and _identity.is_admin_owner(actor))
+
 def get_or_create_session_chat():
-    """Получает или создаёт chat_id для текущей Flask-сессии."""
-    if "chat_id" not in session:
-        session["chat_id"] = create_chat()
+    """Получает или создаёт chat_id для текущей Flask-сессии (только свой чат)."""
+    chat_id = session.get("chat_id")
+    if chat_id and chat_allowed(chat_id):
+        return chat_id
+    session["chat_id"] = create_chat()
     return session["chat_id"]
 
 def trim_messages(chat_id, max_messages=100):
@@ -608,6 +654,7 @@ def init_tasks():
             );
             CREATE INDEX IF NOT EXISTS idx_tasks_updated ON tasks(updated_at DESC);
         """)
+        _ensure_column(conn, "tasks", "owner", "TEXT NOT NULL DEFAULT ''")
     _tasks_ready.add(DB_PATH)
 
 def _row_to_task(row):
@@ -619,18 +666,30 @@ def _row_to_task(row):
     data["steps"] = steps if isinstance(steps, list) else []
     return data
 
+def _task_allowed(row_owner):
+    actor = _identity.chat_owner()
+    if not actor:
+        return True               # внутренний вызов без пользователя
+    owner = row_owner or ""
+    return owner == actor or (owner == "" and _identity.is_admin_owner(actor))
+
 def list_tasks(status=None, limit=100):
     init_tasks()
+    clauses, args = [], []
+    if status:
+        clauses.append("status=?")
+        args.append(status)
+    actor = _identity.chat_owner()
+    if actor:
+        clauses.append("(owner=? OR owner='')" if _identity.is_admin_owner(actor) else "owner=?")
+        args.append(actor)
+    sql = "SELECT * FROM tasks"
+    if clauses:
+        sql += " WHERE " + " AND ".join(clauses)
+    sql += " ORDER BY updated_at DESC LIMIT ?"
+    args.append(limit)
     with get_db() as conn:
-        if status:
-            rows = conn.execute(
-                "SELECT * FROM tasks WHERE status=? ORDER BY updated_at DESC LIMIT ?",
-                (status, limit),
-            ).fetchall()
-        else:
-            rows = conn.execute(
-                "SELECT * FROM tasks ORDER BY updated_at DESC LIMIT ?", (limit,)
-            ).fetchall()
+        rows = conn.execute(sql, args).fetchall()
     return [_row_to_task(r) for r in rows]
 
 def create_task(title, detail="", source="user", steps=None):
@@ -640,9 +699,10 @@ def create_task(title, detail="", source="user", steps=None):
     with _db_lock:
         with get_db() as conn:
             conn.execute(
-                "INSERT INTO tasks (id, title, detail, status, source, steps, created_at, updated_at)"
-                " VALUES (?, ?, ?, 'todo', ?, ?, ?, ?)",
-                (task_id, title[:200], detail[:2000], source, json.dumps(steps or [], ensure_ascii=False), now, now),
+                "INSERT INTO tasks (id, title, detail, status, source, steps, created_at, updated_at, owner)"
+                " VALUES (?, ?, ?, 'todo', ?, ?, ?, ?, ?)",
+                (task_id, title[:200], detail[:2000], source, json.dumps(steps or [], ensure_ascii=False), now, now,
+                 _identity.chat_owner()),
             )
     return get_task(task_id)
 
@@ -650,11 +710,15 @@ def get_task(task_id):
     init_tasks()
     with get_db() as conn:
         row = conn.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
-    return _row_to_task(row) if row else None
+    if row is None or not _task_allowed(row["owner"]):
+        return None
+    return _row_to_task(row)
 
 def update_task(task_id, **fields):
     """Обновляет перечисленные поля задачи (title, detail, status)."""
     init_tasks()
+    if get_task(task_id) is None:      # чужая или несуществующая задача
+        return None
     allowed = {key: fields[key] for key in ("title", "detail", "status")
                if key in fields and fields[key] is not None}
     if not allowed:
@@ -681,6 +745,8 @@ def append_task_step(task_id, title, status="doing", log=""):
 
 def delete_task(task_id):
     init_tasks()
+    if get_task(task_id) is None:      # чужую задачу удалить нельзя
+        return
     with _db_lock:
         with get_db() as conn:
             conn.execute("DELETE FROM tasks WHERE id=?", (task_id,))

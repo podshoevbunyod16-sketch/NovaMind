@@ -26,10 +26,21 @@ import threading
 import time
 import uuid
 
+import identity  # noqa: E402
+
 terminal_bp = Blueprint("terminal", __name__)
 
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 WORKSPACE = os.path.realpath(os.environ.get("TERMINAL_DIR") or os.path.join(ROOT_DIR, "workspace"))
+
+
+def _ws():
+    """Рабочая папка ТЕКУЩЕГО пользователя.
+
+    Админ работает в общем корне WORKSPACE (старые файлы на месте), остальные -
+    каждый в своей WORKSPACE/users/<хэш>. Без запроса и без привязки - корень.
+    """
+    return identity.current_workspace(WORKSPACE)
 
 COMMAND_TIMEOUT = float(os.getenv("TERMINAL_TIMEOUT", "20"))
 MAX_OUTPUT = int(os.getenv("TERMINAL_MAX_OUTPUT", "12000"))
@@ -175,6 +186,10 @@ def can_use_workspace():
         return True
     if os.getenv("TERMINAL_STRICT_ADMIN", "0") == "1":
         return False
+    # Вход «по нику» не проверяется паролем: исполнять команды на сервере ему нельзя.
+    # TERMINAL_ALLOW_NICK=1 возвращает прежнее поведение.
+    if os.getenv("TERMINAL_ALLOW_NICK", "0") != "1" and not session.get("nova_google_login"):
+        return False
     return signed_in()
 
 
@@ -188,7 +203,7 @@ def guard():
     if not is_enabled():
         return denied("Окружение выключено. Включите TERMINAL_ENABLED=1 в .env и перезапустите сервер.")
     if not can_use_workspace():
-        return denied("Войдите в аккаунт (Google или другой), чтобы пользоваться рабочей папкой.")
+        return denied("Войдите через Google, чтобы пользоваться рабочей папкой.")
     return None
 
 
@@ -201,15 +216,15 @@ def safe_path(relative=""):
     if os.path.isabs(relative):
         raise ValueError("Абсолютные пути запрещены")
     relative = relative.lstrip("/")
-    target = os.path.realpath(os.path.join(WORKSPACE, relative))
-    if target != WORKSPACE and not target.startswith(WORKSPACE + os.sep):
+    target = os.path.realpath(os.path.join(_ws(), relative))
+    if target != _ws() and not target.startswith(_ws() + os.sep):
         raise ValueError("Путь выходит за пределы рабочей папки")
     return target
 
 
 def relative_to_workspace(path):
     try:
-        return os.path.relpath(path, WORKSPACE).replace(os.sep, "/")
+        return os.path.relpath(path, _ws()).replace(os.sep, "/")
     except ValueError:
         return path
 
@@ -240,13 +255,13 @@ def ensure_workspace():
     """Создаёт песочницу и заготовки, если их ещё нет."""
     created = []
     for relative, content in STARTER_FILES.items():
-        target = os.path.join(WORKSPACE, relative)
+        target = os.path.join(_ws(), relative)
         if not os.path.exists(target):
             os.makedirs(os.path.dirname(target), exist_ok=True)
             with open(target, "w", encoding="utf-8") as handle:
                 handle.write(content)
             created.append(relative)
-    gitignore = os.path.join(WORKSPACE, ".gitignore")
+    gitignore = os.path.join(_ws(), ".gitignore")
     if not os.path.exists(gitignore):
         with open(gitignore, "w", encoding="utf-8") as handle:
             handle.write(GITIGNORE)
@@ -261,7 +276,7 @@ def _outside_path_message(path: str) -> str:
     работает только внутри рабочей папки и ждёт относительный путь.
     """
     return (f"Путь «{path}» не разрешён: команды выполняются только внутри рабочей "
-            f"папки ({WORKSPACE}), и только по относительным путям. "
+            f"папки ({_ws()}), и только по относительным путям. "
             "Пишите, например, «python -m venv venv» или «ls -la app.py».")
 
 
@@ -285,12 +300,12 @@ def _validate_command_paths(segments):
                 raise ValueError(_outside_path_message(arg))
             # Симлинк внутри рабочей папки может указывать наружу: сверяем
             # реальный путь уже существующих аргументов.
-            candidate = os.path.join(WORKSPACE, arg)
+            candidate = os.path.join(_ws(), arg)
             if os.path.lexists(candidate):
                 real = os.path.realpath(candidate)
-                if real != WORKSPACE and not real.startswith(WORKSPACE + os.sep):
+                if real != _ws() and not real.startswith(_ws() + os.sep):
                     raise ValueError(f"Ссылка «{arg}» ведёт за пределы рабочей папки "
-                                     f"({WORKSPACE}). Используйте обычный файл внутри неё.")
+                                     f"({_ws()}). Используйте обычный файл внутри неё.")
 
 
 def _tokenize(command):
@@ -413,7 +428,7 @@ def _save_research(title, body, kind="search"):
     """Кладёт найденное в песочницу, чтобы результат не потерялся."""
     ensure_workspace()
     stamp = time.strftime("%Y-%m-%d")
-    folder = os.path.join(WORKSPACE, "notes", "research")
+    folder = os.path.join(_ws(), "notes", "research")
     os.makedirs(folder, exist_ok=True)
     path = os.path.join(folder, f"{stamp}-{_slug(title)}-{kind}.md")
     with open(path, "w", encoding="utf-8") as handle:
@@ -498,7 +513,7 @@ def _sandbox_env():
     """Окружение песочницы: HOME указывает в workspace, git настроен."""
     return {
         "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
-        "HOME": WORKSPACE,
+        "HOME": _ws(),
         "LANG": os.environ.get("LANG", "C.UTF-8"),
         "TERM": "dumb",
         "PYTHONDONTWRITEBYTECODE": "1",
@@ -579,7 +594,7 @@ def run_command(command, timeout=None, cancel=None):
             try:
                 proc = subprocess.Popen(
                     segment,
-                    cwd=WORKSPACE,
+                    cwd=_ws(),
                     stdin=stdin,
                     stdout=stdout,
                     stderr=stderr,
@@ -667,14 +682,14 @@ def terminal_status():
     allowed = can_use_workspace()
     payload = {"enabled": enabled, "user": user, "admin": is_admin(),
                "available": enabled and allowed,
-               "workspace": relative_to_workspace(WORKSPACE)}
+               "workspace": relative_to_workspace(_ws())}
     if not (enabled and allowed):
         payload["hint"] = ("Включите TERMINAL_ENABLED=1 в .env и перезапустите сервер"
                            if not enabled else "Войдите в аккаунт, чтобы открыть рабочую папку")
         return jsonify(payload)
     ensure_workspace()
-    payload["cwd"] = WORKSPACE
-    payload["git"] = bool(os.path.isdir(os.path.join(WORKSPACE, ".git")))
+    payload["cwd"] = _ws()
+    payload["git"] = bool(os.path.isdir(os.path.join(_ws(), ".git")))
     payload["commands"] = sorted(ALLOWED_COMMANDS)
     return jsonify(payload)
 
@@ -684,7 +699,7 @@ def terminal_bootstrap():
     """Создаёт песочницу заново (не трогая существующие файлы)."""
     if (blocked := guard()):
         return blocked
-    return jsonify({"created": ensure_workspace(), "workspace": relative_to_workspace(WORKSPACE)})
+    return jsonify({"created": ensure_workspace(), "workspace": relative_to_workspace(_ws())})
 
 
 @terminal_bp.route("/api/terminal/files")
@@ -714,8 +729,8 @@ def terminal_files():
                 "dir": os.path.dirname(relative_to_workspace(full)) or ".",
             })
             if len(items) >= limit:
-                return jsonify({"files": items, "truncated": True, "workspace": relative_to_workspace(WORKSPACE)})
-    return jsonify({"files": items, "truncated": False, "workspace": relative_to_workspace(WORKSPACE)})
+                return jsonify({"files": items, "truncated": True, "workspace": relative_to_workspace(_ws())})
+    return jsonify({"files": items, "truncated": False, "workspace": relative_to_workspace(_ws())})
 
 
 @terminal_bp.route("/api/terminal/file", methods=["POST"])
@@ -773,12 +788,12 @@ def terminal_run():
         # callers can recover; malformed shell constructs keep a 400.
         if ".." in str(command):
             return jsonify({**_result(2, "", str(exc)), "command": command,
-                            "cwd": relative_to_workspace(WORKSPACE)})
+                            "cwd": relative_to_workspace(_ws())})
         return jsonify({"error": str(exc), "command": command}), 400
     except RuntimeError as exc:
         return jsonify({"error": str(exc), "command": command}), 429
     result["command"] = command
-    result["cwd"] = relative_to_workspace(WORKSPACE)
+    result["cwd"] = relative_to_workspace(_ws())
     return jsonify(result)
 
 
@@ -786,7 +801,7 @@ def terminal_run():
 def terminal_help():
     if (blocked := guard()):
         return blocked
-    return jsonify({"text": HELP_TEXT.format(workspace=relative_to_workspace(WORKSPACE)),
+    return jsonify({"text": HELP_TEXT.format(workspace=relative_to_workspace(_ws())),
                     "commands": sorted(ALLOWED_COMMANDS)})
 
 
@@ -795,7 +810,7 @@ def terminal_git():
     """Структурированное состояние git — для панели, без ручной набора команд."""
     if (blocked := guard()):
         return blocked
-    if not os.path.isdir(os.path.join(WORKSPACE, ".git")):
+    if not os.path.isdir(os.path.join(_ws(), ".git")):
         return jsonify({"repo": False, "message": "Это не git-репозиторий. Выполните: git init"})
 
     def git(*args):

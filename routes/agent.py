@@ -29,6 +29,7 @@ import time
 
 from ai_providers import chat_completion, chat_stream, resolve_target  # noqa: F401
 import database
+import identity as _identity
 import usage_stats
 from agenticseek import policy
 from agenticseek.policy import clip  # noqa: F401  (обрезка текста в трассе)
@@ -49,10 +50,25 @@ def workspace_dir() -> str:
     TERMINAL_DIR подменяют модульную переменную; копия значения на импорте
     рассинхронизировала бы агент с файловым менеджером.
     """
-    return terminal_routes.WORKSPACE
-from agenticseek.core.workspace import set_work_dir as _set_agent_workspace
+    return terminal_routes._ws()
+from agenticseek.core.workspace import set_context_work_dir as _set_agent_workspace
 
 agent_bp = Blueprint("agent", __name__)
+
+
+@agent_bp.before_request
+def _runs_ownership_guard():
+    """История запусков агента - только своя (без chat_id раньше отдавалась чужая)."""
+    path = request.path
+    if path == "/api/agent/runs":
+        chat_id = request.args.get("chat_id") or session.get("chat_id") or ""
+        if not chat_id or not database.chat_allowed(chat_id):
+            return jsonify({"ok": True, "runs": []})
+    elif path.startswith("/api/agent/runs/"):
+        record = database.get_agent_run(path.rsplit("/", 1)[-1])
+        if not record or not database.chat_allowed(record.get("chat_id") or ""):
+            return jsonify({"ok": False, "error": "Запуск не найден"}), 404
+    return None
 log = logging.getLogger("novamind.agent")
 
 #: Служебный чат-ключ → последние сообщения. Страховка, если база недоступна.
@@ -832,9 +848,7 @@ def _sandbox_runner(command, timeout=None):
 
 
 def _owner_name() -> str:
-    return (str(session.get("admin_username") or session.get("nova_user_nick")
-                or session.get("nova_user_email") or "").lower()[:180]
-            if signed_in() else "")
+    return _identity.chat_owner() if signed_in() else ""
 
 
 def _media_markers(media) -> list:
@@ -899,6 +913,7 @@ def agent_stream():
         ensure_workspace()
     # Агент и песочница работают в одной папке: иначе файлы агента не видны
     # в файловом менеджере, а команды выполняются в другом дереве.
+    _identity.bind_owner(_identity.chat_owner())   # поток агента узнает своего владельца
     _set_agent_workspace(workspace_dir())
     # Инструменты движка исполняют команды только через эту песочницу.
     sandbox.set_runner(_sandbox_runner)
