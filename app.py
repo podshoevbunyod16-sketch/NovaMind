@@ -24,7 +24,8 @@ from routes import ALL_BLUEPRINTS
 
 # ---------- Flask ----------
 app = Flask(__name__, static_folder="static", template_folder="templates")
-app.secret_key = ADMIN_SESSION_KEY
+app.secret_key = os.getenv('SESSION_SECRET') or ADMIN_SESSION_KEY
+app.permanent_session_lifetime = __import__('datetime').timedelta(days=365)
 app.config["MAX_CONTENT_LENGTH"] = 500 * 1024 * 1024  # 500 MB
 
 # ---------- Регистрация Blueprint'ов ----------
