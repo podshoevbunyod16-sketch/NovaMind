@@ -298,6 +298,52 @@ def _text_answer(text: str):
     return None
 
 
+#: Вопросы про устройство самого проекта офлайн-контур отвечает по-настоящему:
+#: структура репозитория известна ему без языковой модели.
+_PROJECT_RE = re.compile(
+    r"(?i)(структур\w*\s+проект|как\s+устроен\w*\s+проект|устройств\w*\s+проект|"
+    r"архитектур\w*\s+проект|из\s+чего\s+состоит|какие\s+(?:файлы|модули|папки)|"
+    r"где\s+(?:лежит|находится|хранится)|про\s+структуру|project\s+structure)")
+
+_PROJECT_ANSWER = """**Офлайн-режим: языковой модели нет**, но устройство проекта я знаю точно.
+
+**Корень репозитория**
+- `app.py` — точка входа Flask: создаёт приложение, регистрирует blueprints, поднимает сервер.
+- `config.py` — провайдеры ИИ, модели, системный промпт, runtime-настройки.
+- `ai_providers.py` — единый слой обращения к моделям (Groq, Gemini, OpenRouter, Cerebras, OpenAI-совместимые, локальный сервер и офлайн-контур).
+- `database.py` — SQLite: чаты, сообщения, трассы шагов, запуски агента, расписания.
+- `identity.py`, `security.py` — владелец чата, лимиты, права.
+- `mcp_registry.py`, `mcp_chat.py`, `memory.py`, `skills_registry.py`, `scheduler.py` — MCP-серверы, память, навыки и задачи по расписанию.
+- `media_generation.py`, `media_agent.py`, `tts_service.py` — картинки, видео, аудио и озвучка.
+- `local_llm.py` — вот этот детерминированный офлайн-помощник.
+
+**HTTP-слой (`routes/`)**
+`agent.py` — NDJSON-поток агента, `chat.py` — обычный чат и `/send_stream`, `terminal.py` — песочница Linux, `search.py` — поиск, `media.py` — медиа, `admin.py` — вход и настройки.
+
+**Движок агента (`agenticseek/`)**
+`engine.py` управляет ходом, `router.py` выбирает исполнителя, `timeline.py` формирует события таймлайна, `core/` — базовые агенты и цикл, `tools/` — терминал, Python, файлы, веб и MCP-мост, `providers/nova_provider.py` — адаптер к `ai_providers`, `prompts/base/` — русские промпты агентов.
+
+**Фронтенд (`static/`, `templates/`)**
+`app.js` рисует чат и ответ, `linux.js` разбирает NDJSON-поток, `style.css` — оформление, остальные файлы — настройки, MCP, медиа, озвучка, аккордеоны.
+
+**Проверки (`tests/`)**
+PyTest-тесты движка, маршрутов, поиска, терминала, MCP и медиа плюс jsdom-смоук фронтенда.
+
+Итог: это тонкий Flask-слой поверх единого провайдера ИИ и агентного движка; все пользовательские возможности вынесены в отдельные маршруты, а состояние хранится в SQLite.
+
+Чтобы получить развёрнутый ответ на любой другой вопрос, подключите модель:
+{setup}
+
+{disclaimer}"""
+
+
+def _project_answer(text: str):
+    """Полный ответ про структуру проекта в офлайн-режиме."""
+    if not _PROJECT_RE.search(text or ""):
+        return None
+    return _PROJECT_ANSWER.format(setup=_SETUP_HINT, disclaimer=DISCLAIMER)
+
+
 def _file_answer(text: str):
     # «покажи файлы» — это не имя файла: после «покажи» обязательно
     # должно идти слово «файл»/«содержимое», иначе получался ложный ответ
@@ -365,7 +411,7 @@ def complete(messages, **_kwargs) -> str:
     lowered = prompt.lower()
 
     for handler in (_math_answer, _unit_answer, _datetime_answer, _system_answer,
-                    _text_answer, _file_answer):
+                    _text_answer, _project_answer, _file_answer):
         try:
             answer = handler(prompt)
         except Exception:                     # ни одна команда не должна ронять чат

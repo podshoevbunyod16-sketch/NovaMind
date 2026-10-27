@@ -77,7 +77,20 @@ MAX_STEPS = max(1, min(int(os.getenv("AGENT_MAX_STEPS", "20")), 60))
 CLEAN_ANSWER_SYSTEM = (
     "Ты — NovaMind. Ответь пользователю только готовым ответом по-русски: "
     "без рассуждений, без английских черновиков и без пояснений о том, как ты думаешь. "
-    "Если ниже есть результаты поиска — опирайся на них и перечисли найденное (название, ссылка, суть). Только если данных нет совсем — скажи это одной короткой фразой.")
+    "Ответ должен быть полным и законченным: раскрой тему, приведи детали и примеры, "
+    "заверши последнее предложение, не обрывай текст на полуслове. "
+    "Если ниже есть результаты поиска — опирайся на них и перечисли найденное "
+    "(название, ссылка, суть), добавь краткий вывод. Только если данных нет совсем — "
+    "честно скажи об этом и предложи, что можно проверить ещё.")
+
+#: Ответ упёрся в лимит токенов: просим модель дописать ТОЛЬКО хвост.
+CONTINUE_ANSWER_SYSTEM = (
+    "Ты — NovaMind. Твой предыдущий ответ оборвался на середине из-за лимита "
+    "длины. Напиши ТОЛЬКО продолжение этого ответа, ровно с места обрыва. "
+    "Не повторяй уже написанный текст, не начинай заново, не пиши вступлений "
+    "вроде «Продолжаю». Пиши по-русски, полно и по существу, заверши последнюю "
+    "мысль и весь ответ законченным предложением. Без рассуждений, без блоков "
+    "кода-инструментов и без служебных пометок.")
 #: Blocks that run code: they are never re-dispatched from a plain answer.
 #: Запуск команд и кода. В ответе собеседника такой блок — пример, а не
 #: действие: «как создать venv?» не должен выполнять свой же ответ. Правки
@@ -146,6 +159,11 @@ _BLOCK = re.compile(r"```([a-zA-Z_][\w-]*)\n(.*?)```", re.S)
 KIND_RU = {"image": "изображение", "audio": "аудио", "video": "видео"}
 AGENT_TIMEOUT = max(10.0, float(os.getenv("AGENT_TIMEOUT", "9999")))
 SPEED = float(os.getenv("AGENTICSEEK_SPEED", "1.0"))     # <1 = faster, shorter turns
+#: Сколько токенов может занять ОДИН ответ модели в агентном режиме. Раньше
+#: здесь было жёстко 1200 * SPEED: модель обрывалась на полуслове, фильтр
+#: полноты ответа его отбрасывал, и пользователь видел одну строку ошибки.
+#: Роут дополнительно ограничивает это значение лимитом конкретного провайдера.
+AGENT_MAX_TOKENS = max(1024, min(int(os.getenv("AGENT_MAX_TOKENS", "4096")), 32768))
 
 
 @dataclass
@@ -176,6 +194,11 @@ class EngineContext:
         tools_allowed: when False (auto-search button off) the engine registers
             no tools at all and the router sends the request straight to the AI
             model in one call.
+        max_tokens: token budget for one model answer (already clamped by the
+            provider's own limit); 0 = use ``AGENT_MAX_TOKENS``.
+        repair_answer: ``(text) -> str`` — returns the completed part of a
+            long answer cut off at the token limit, or ``""`` when there is
+            nothing worth keeping. Lets the engine finish the answer to the end.
     """
 
     goal: str
@@ -211,6 +234,8 @@ class EngineContext:
     tools_allowed: bool = True    # «Автопоиск» выключен → вообще без инструментов
     max_steps: int = MAX_STEPS
     timeout: float = AGENT_TIMEOUT
+    max_tokens: int = 0
+    repair_answer: Optional[Callable[[str], str]] = None
 
 
 class AgentEngine:
@@ -219,8 +244,12 @@ class AgentEngine:
     def __init__(self, ctx: EngineContext):
         self.ctx = ctx
         self.state = RunState()
+        # Лимит ответа модели. SPEED может только укоротить бюджет (ускорить
+        # ход), но не превысить лимит провайдера, переданный роутом.
+        budget = int(ctx.max_tokens or AGENT_MAX_TOKENS)
+        tokens = max(1024, int(budget * max(0.6, min(SPEED, 1.0))))
         self.provider = NovaProvider(ctx.complete, ctx.provider, ctx.model,
-                                     max_tokens=int(1200 * max(0.6, min(SPEED, 2.0))))
+                                     max_tokens=tokens)
         self.agents: dict[str, object] = {}
         self.router: Optional[AgentRouter] = None
         self.chosen = None
@@ -319,6 +348,12 @@ class AgentEngine:
             self._shutdown()
 
         self._raw_answer = str(self.answer or "")
+        # Ответ упёрся в лимит токенов: сначала дописываем его до конца,
+        # и только потом применяем фильтры чистоты ответа.
+        if self.state.status == "ok":
+            head = self._truncated_head()
+            if head:
+                self.answer = self._continue_answer(head)
         self.answer = self._finalize(self.answer)
         if not self.answer.strip() and self.state.status == "ok":
             # Модель ушла в рассуждения: просим чистый ответ и спасаем цитату.
@@ -537,7 +572,9 @@ class AgentEngine:
         agent.extra_context = (
             "Инструменты отключены пользователем (кнопка автопоиска выключена). "
             "Не вызывай инструменты, не пиши блоки ```tag```, теги <tool_code> "
-            "и JSON-действия. Отвечай на языке пользователя только готовым текстом.")
+            "и JSON-действия. Отвечай на языке пользователя только готовым текстом, "
+            "полно и по существу: раскрывай тему, завершай последнюю мысль, "
+            "не обрывай ответ на полуслове.")
         if ctx.memory_prompt:
             agent.extra_context += "\n\n" + ctx.memory_prompt
         agent.attach(events=self._emit, cancel=ctx.cancel,
@@ -992,6 +1029,8 @@ class AgentEngine:
                 + ("\n\nПрочитанные страницы:\n\n" + "\n\n".join(pages) if pages else "")
                 + "\n\nВАЖНО: данных достаточно. Ответь пользователю сейчас обычным "
                   "текстом по-русски, со ссылками на номера источников [1], [2]. "
+                  "Ответ должен быть полным и законченным: опиши найденное, "
+                  "добавь вывод, заверши последнее предложение. "
                   "НЕ вызывай web_search и web_open, не пиши теги и блоки.")
 
     def _run_offline_terminal(self) -> None:
@@ -1144,7 +1183,7 @@ class AgentEngine:
                 system=("Ты — NovaMind. Ответь по-русски на запрос пользователя. "
                         "Инструменты сейчас недоступны, поэтому не обещай выполнить "
                         "команды, а дай максимум полезной информации."),
-                temperature=0.3, max_tokens=800, timeout=45)
+                temperature=0.3, max_tokens=self.provider.max_tokens, timeout=45)
             if text:
                 return str(text)
         except Exception:  # noqa: BLE001
@@ -1159,12 +1198,13 @@ class AgentEngine:
                     "text": "Собираю ответ по найденным источникам"})
         messages = [
             {"role": "system", "content": (
-                "Ты NovaMind. Отвечай по-русски, чётко и по делу. Инструментов нет: "
+                "Ты NovaMind. Отвечай по-русски, полно и по делу. Инструментов нет: "
                 "не пиши теги и блоки вызова. Используй только данные ниже, "
                 "ссылайся на номера [1], [2]. Даже если данных мало — перечисли всё найденное: названия, ссылки, суть из описаний. Не отвечай одной фразой «данных недостаточно».")},
             {"role": "user", "content": f"{self.ctx.goal}\n\n{self._search_observation}\n\n"
-                                        "Ответь списком из 3–5 пунктов: название, ссылка, "
-                                        "1 строка что делает (название, ссылка, 1 строка)."},
+                                        "Дай развёрнутый, законченный ответ: начни с сути, "
+                                        "затем перечисли 3–5 пунктов (название, ссылка, что внутри), "
+                                        "в конце — краткий вывод. Не обрывай ответ на полуслове."},
         ]
         try:
             text = str(agent.provider.respond(messages) or "")
@@ -1185,6 +1225,63 @@ class AgentEngine:
             lines.append(f"{index}. **{title}**\n   {item.get('url', '')}\n   {snippet}".rstrip())
         lines.append("\nМодель не собрала связный ответ, поэтому показываю найденное как есть.")
         return "\n".join(lines)
+
+    def _truncated_head(self) -> str:
+        """Завершённая часть ответа, если он оборвался на лимите токенов."""
+        ctx = self.ctx
+        if ctx.repair_answer is None or ctx.offline:
+            return ""
+        try:
+            head = str(ctx.repair_answer(self._raw_answer) or "").strip()
+        except Exception:  # noqa: BLE001 — фильтр не должен ронять ход
+            log.warning("truncation repair failed", exc_info=True)
+            return ""
+        return head if len(head) >= 200 else ""
+
+    def _continue_answer(self, head: str) -> str:
+        """Дописать оборванный ответ до конца отдельным запросом к модели.
+
+        Модель получает только хвост уже написанного и просит продолжение —
+        без повторов. Если продолжить не удалось (модель недоступна, офлайн или
+        ответил тем же обрывком), пользователь всё равно видит длинную
+        завершённую часть, а не одну строку «Не удалось получить ответ».
+        """
+        ctx = self.ctx
+        self._emit({"type": "step", "icon": "✍️",
+                    "text": "Ответ оборвался на лимите длины — дописываю до конца"})
+        tail_text = ""
+        try:
+            tail_text = str(self.provider.respond([
+                {"role": "system", "content": CONTINUE_ANSWER_SYSTEM},
+                {"role": "user", "content": (
+                    f"Запрос пользователя: {ctx.goal}\n\n"
+                    f"Уже написанная часть ответа (окончание):\n…{head[-1200:]}\n\n"
+                    "Напиши только недостающее продолжение. Не повторяй "
+                    "последнее предложение и не начинай ответ заново.")},
+            ]) or "").strip()
+        except AgentStopped:
+            raise
+        except Exception as error:  # noqa: BLE001 — продолжение не обязательно
+            log.warning("answer continuation failed: %s", type(error).__name__)
+        if not tail_text:
+            return head
+        tail_text = self._drop_overlap(head, tail_text)
+        if not tail_text:
+            return head
+        joiner = "\n\n" if head.endswith((".", "!", "?", ":", "```")) else " "
+        return (head + joiner + tail_text).strip()
+
+    @staticmethod
+    def _drop_overlap(head: str, tail: str) -> str:
+        """Убрать повтор: модель могла начать ответ заново или с хвоста head."""
+        low_tail = tail.lower().lstrip()
+        start = head[:120].strip().lower()
+        if start and low_tail.startswith(start):
+            return ""                    # ответили заново — повтор не нужен
+        for size in (120, 80, 50, 30):
+            if len(head) >= size and low_tail.startswith(head[-size:].lower()):
+                return tail[size:].lstrip()
+        return tail
 
     def _recover_answer(self) -> str:
         """Last attempt at a clean answer when the model only produced reasoning.

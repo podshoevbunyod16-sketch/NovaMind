@@ -132,6 +132,17 @@ const RECALL_STREAM = [
   { type: 'done' },
 ];
 
+// Длинный ответ: проверяем, что интерфейс показывает его ЦЕЛИКОМ, до конца
+const LONG_TEXT = 'NovaMind устроен как тонкий слой Flask поверх единого провайдера ИИ. '.repeat(45);
+const LONG_STREAM = [
+  { type: 'stage', scene: 'agent', title: 'Понимаю запрос', text: 'Готовлю развёрнутый ответ' },
+  ...Array.from({ length: Math.ceil(LONG_TEXT.length / 48) }, (_, index) => ({
+    type: 'token', token: LONG_TEXT.slice(index * 48, (index + 1) * 48),
+  })),
+  { type: 'result', reply: LONG_TEXT, steps: 0, model: 'mock-model' },
+  { type: 'done' },
+];
+
 // Простой вопрос: модель ответила сразу, без окружения
 const SIMPLE_STREAM = [
   { type: 'token', token: 'Привет! ' },
@@ -1795,6 +1806,21 @@ check('перед шагом и после него агент думает — 
   && !recallTurn.querySelector('.agent-thought.is-live')
   && !recallTurn.querySelector('.think-dots'),
   [...recallTurn.querySelectorAll('.agent-thought-label')].map((el) => el.textContent).join('|'));
+
+// ══════════════════════════════════════════════════════════════
+// 21) Длинный ответ показывается целиком, без обрезки
+// ══════════════════════════════════════════════════════════════
+console.log('\n21) Длинный ответ отображается до конца');
+mock.agentStream = LONG_STREAM;
+document.getElementById('chat-input').value = 'расскажи подробно про структуру проекта';
+await window.sendMessage();
+await settle();
+const longAnswer = lastAi().querySelector('.answer')?.textContent || '';
+check('длинный ответ не обрезается в пузыре', longAnswer.length >= LONG_TEXT.length,
+  `получено ${longAnswer.length} из ${LONG_TEXT.length}`);
+check('конец ответа на месте', longAnswer.trimEnd().endsWith('провайдера ИИ.'),
+  longAnswer.slice(-80));
+check('ответ не заменён короткой ошибкой', !longAnswer.includes('Не удалось получить ответ'));
 
 check('консоль после сценариев озвучки чистая', consoleErrors.length === 0, consoleErrors.join(' | '));
 

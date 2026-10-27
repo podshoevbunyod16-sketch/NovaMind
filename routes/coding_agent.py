@@ -17,7 +17,7 @@ import os
 from flask import Blueprint, Response, jsonify, request, session, stream_with_context
 
 from ai_providers import chat_completion, resolve_target
-from agenticseek.engine import AgentEngine, EngineContext
+from agenticseek.engine import AGENT_MAX_TOKENS, AgentEngine, EngineContext
 
 coding_agent_bp = Blueprint("coding_agent", __name__)
 log = logging.getLogger("novamind.coding_agent")
@@ -72,12 +72,18 @@ def coding_stream():
     def generate():
         # Тот же выключатель автопоиска, что и в главном чате: без инструментов
         # запрос уходит прямо в модель (не в агента чтения исходников).
-        from routes.agent import request_tools_allowed
+        from routes.agent import repair_truncated_answer, request_tools_allowed
         tools_allowed = request_tools_allowed(data)
+        # Тот же бюджет ответа, что и в главном чате: иначе длинный разбор
+        # исходников обрывался на полуслове (см. AGENT_MAX_TOKENS).
+        answer_tokens = max(1024, min(AGENT_MAX_TOKENS,
+                                      int(_cfg.get("max_tokens") or AGENT_MAX_TOKENS)))
         engine = AgentEngine(EngineContext(
             goal=goal, complete=chat_completion, emit=lambda event: None,
             provider=provider, model=model, profile="coding",
-            workspace=False, timeout=TIMEOUT, tools_allowed=tools_allowed))
+            workspace=False, timeout=TIMEOUT, tools_allowed=tools_allowed,
+            max_tokens=answer_tokens,
+            repair_answer=lambda text: repair_truncated_answer(text, goal)))
         proposals: list = []
         try:
             for event in engine.stream():

@@ -35,7 +35,7 @@ import usage_stats
 from agenticseek import policy
 from agenticseek.policy import clip  # noqa: F401  (обрезка текста в трассе)
 from agenticseek.core.prompt_paths import prompt_path  # noqa: F401 (документация/тесты)
-from agenticseek.engine import AgentEngine, EngineContext
+from agenticseek.engine import AGENT_MAX_TOKENS, AgentEngine, EngineContext
 from agenticseek.router import looks_complex  # noqa: F401 (реэкспорт для тестов)
 from agenticseek.state import RunState  # noqa: F401
 from agenticseek.tools import sandbox
@@ -209,6 +209,14 @@ _CODE_START = ("```", "~~~", "def ", "class ", "import ", "from ", "{", "[", "<"
 
 _BAD_ENDINGS = set(",;:—–-\\([{")
 
+#: Длинный ответ, оборванный на лимите токенов, НЕ выбрасываем целиком.
+#: Короткие обрывки — это утечка рассуждений, их по-прежнему отбрасываем.
+MIN_TRUNCATED_KEEP_CHARS = 240
+
+#: Граница законченного предложения: до неё обрезаем «хвост» оборванного ответа.
+_SENTENCE_END = re.compile(r"[.!?:;…]+(?=\s|$)")
+_FENCED_CODE = re.compile(r"```.*?```", re.S)
+
 _TRUNCATED_WORDS = {
     "и", "в", "во", "на", "с", "со", "по", "для", "что", "как", "это", "не",
     "а", "но", "или", "же", "ли", "при", "из", "от", "до", "к", "о", "об",
@@ -224,18 +232,28 @@ def _has_cyrillic(text):
 def _split_paragraphs(text):
     return [part.strip() for part in re.split(r"\n\s*\n", text or "") if part.strip()]
 
+def _prose_without_code(text):
+    """Текст без блоков кода: кавычки и слова внутри кода не признак обрыва."""
+    return _FENCED_CODE.sub(" ", text or "")
+
+
 def _looks_complete_answer(text):
     """Похож ли текст на законченный ответ, а не на обрезанный черновик.
 
     Точка в конце не обязательна (модели часто её опускают), а вот запятая,
     тире, открытая кавычка или служебное слово на конце — признак обрыва.
+    Содержимое fenced-блоков кода в этой проверке не участвует: там бывают
+    непарные кавычки и «служебные» слова в конце.
     """
     text = (text or "").strip()
     if not text:
         return False
-    if text.count('"') % 2:             # открытая кавычка — ответ оборван
+    if text.count("```") % 2:           # незакрытый блок кода — явный обрыв
         return False
-    if text.count("«") != text.count("»"):
+    prose = _prose_without_code(text)
+    if prose.count('"') % 2:            # открытая кавычка — ответ оборван
+        return False
+    if prose.count("«") != prose.count("»"):
         return False
     if text[-1] in _BAD_ENDINGS:
         return False
@@ -244,10 +262,41 @@ def _looks_complete_answer(text):
     last = text.splitlines()[-1].lstrip()
     if last.startswith(("-", "*", "•", "|")) or re.match(r"^\d+[.)]\s", last):
         return True
-    words = re.findall(r"[A-Za-zА-Яа-яЁё]+", text)
+    words = re.findall(r"[A-Za-zА-Яа-яЁё]+", prose)
     if words and words[-1].lower() in _TRUNCATED_WORDS:
         return False
     return True
+
+
+def repair_truncated_answer(text, goal=""):
+    """Спасает длинный ответ, оборванный на лимите токенов.
+
+    Возвращает ``""`` для коротких обрывков и утечек рассуждений (их лечит
+    :func:`_recover_answer`), а для длинного текста — его завершённую часть:
+    всё до последнего полного предложения. Движок использует её как основу
+    и дописывает ответ до конца отдельным запросом к модели.
+    """
+    text = strip_think(text)
+    if not text or len(text) < MIN_TRUNCATED_KEEP_CHARS:
+        return ""
+    if looks_like_leaked_reasoning(text):
+        return ""
+    if _looks_complete_answer(text):
+        return ""
+    body = text
+    if body.count("```") % 2:           # закрываем блок кода, чтобы ответ не рвался
+        body += "\n```"
+    ends = list(_SENTENCE_END.finditer(body))
+    if ends:
+        head = body[:ends[-1].end()].strip()
+    else:
+        head = re.sub(r"\s+\S*$", "", body).strip()
+    head = head.rstrip("".join(sorted(_BAD_ENDINGS)))
+    if len(head) < MIN_TRUNCATED_KEEP_CHARS:
+        return ""
+    if not _looks_complete_answer(head):
+        head = head.rstrip() + "."
+    return head
 
 
 def is_enabled():
@@ -424,20 +473,37 @@ def strip_leaked_reasoning(text, goal=""):
                 and not looks_like_leaked_reasoning(candidate)
                 and _looks_complete_answer(candidate)):
             return candidate
-    # Иначе оставляем непрерывный хвост русских абзацев, похожих на ответ.
-    tail = []
-    for paragraph in reversed(_split_paragraphs(text)):
-        cyr, lat = len(_CYR.findall(paragraph)), len(_LAT.findall(paragraph))
-        draft = paragraph[:1] in "\"'«“„" or bool(_LEAK_START.match(paragraph)) \
-            or bool(_LEAK_START_RU.match(paragraph)) or bool(_DRAFT_HINT.search(paragraph))
-        if draft or cyr < 15 or cyr < lat * 1.5:
-            break
-        tail.append(paragraph)
-    answer = "\n\n".join(reversed(tail)).strip()
+    # Иначе берём всё, что идёт после последнего абзаца-черновика. Раньше
+    # собирался только непрерывный хвост русских абзацев: длинный ответ,
+    # заканчивавшийся кодом или английским примером, обрезался до пары строк
+    # (или вообще терялся). Теперь код, списки и латиница внутри готового
+    # ответа остаются на месте — убираются только сами рассуждения.
+    paragraphs = _split_paragraphs(text)
+    last_draft = -1
+    for index, paragraph in enumerate(paragraphs):
+        if _is_draft_paragraph(paragraph):
+            last_draft = index
+    answer = "\n\n".join(paragraphs[last_draft + 1:]).strip()
     if (len(answer) >= 40 and not looks_like_leaked_reasoning(answer)
             and _looks_complete_answer(answer)):
         return answer
     return ""
+
+
+def _is_draft_paragraph(paragraph: str) -> bool:
+    """Похож ли абзац на рассуждение модели, а не на готовый ответ."""
+    if paragraph.lstrip().startswith(_CODE_START):
+        return False                     # код/разметка — часть ответа
+    if paragraph[:1] in "\"'«“„":
+        return True
+    if _LEAK_START.match(paragraph) or _LEAK_START_RU.match(paragraph):
+        return True
+    if _DRAFT_HINT.search(paragraph):
+        return True
+    if looks_like_leaked_reasoning(paragraph):
+        return True
+    cyr, lat = len(_CYR.findall(paragraph)), len(_LAT.findall(paragraph))
+    return cyr < 15 and lat > cyr       # почти сплошной английский без русского
 
 
 def salvage_quoted_answer(text, goal=""):
@@ -488,7 +554,9 @@ def final_answer_text(raw, goal=""):
         return ""
     answer = strip_leaked_reasoning(text, goal)
     if answer and not _looks_complete_answer(answer):
-        return ""
+        # Длинный ответ, оборванный на лимите токенов, не выбрасываем:
+        # сохраняем его завершённую часть, а движок допишет хвост.
+        return repair_truncated_answer(answer, goal)
     return answer
 
 
@@ -941,6 +1009,11 @@ def agent_stream():
         return response, 429
 
     provider, model, _cfg = resolve_target()
+    # Один ответ агента должен влезать в лимит провайдера, но не быть 1200
+    # токенов: на таком потолке модель обрывалась на полуслове, а фильтр
+    # полноты ответа отбрасывал весь текст (пользователь видел одну строку).
+    answer_tokens = max(1024, min(AGENT_MAX_TOKENS,
+                                   int(_cfg.get("max_tokens") or AGENT_MAX_TOKENS)))
     tools_allowed = request_tools_allowed(data)
     use_tools = tools_enabled() and tools_allowed
     strict_mcp = strict_mcp_request(goal) if tools_allowed else False
@@ -1013,6 +1086,8 @@ def agent_stream():
             strict_mcp=strict_mcp,
             finalize=lambda text: final_answer_text(text, goal),
             salvage_answer=lambda text: salvage_quoted_answer(text, goal),
+            repair_answer=lambda text: repair_truncated_answer(text, goal),
+            max_tokens=answer_tokens,
             chat_id=chat_id or "",
             run_id=run_id, force_role=("files" if media_kind else ""),
             media_kind=media_kind or "",
