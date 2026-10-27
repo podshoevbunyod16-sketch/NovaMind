@@ -969,7 +969,7 @@ def agent_stream():
             save_research=(terminal_routes._save_research if use_tools else None),
             max_steps=MAX_STEPS,
         ))
-        tools_ctx.emit = engine._emit
+        tools_ctx.emit = getattr(engine, "emit", getattr(engine, "_emit", lambda *args, **kwargs: None))
         try:
             for event in engine.stream():
                 yield _ndjson(event)

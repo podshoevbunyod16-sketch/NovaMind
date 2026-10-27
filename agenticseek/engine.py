@@ -370,23 +370,47 @@ class AgentEngine:
             agent.extra_context = self.ctx.memory_prompt
         self.router = AgentRouter([agent])
 
-    def _build_tools(self) -> dict:
-        ctx = self.ctx
-        tools: dict = {}
-        if ctx.search is not None:
-            tools["web_search"] = WebSearchTool(ctx.search, state=self.state)
-        if ctx.read_page is not None:
-            tools["web_open"] = WebOpenTool(ctx.read_page, state=self.state)
-        if ctx.workspace:
-            tools["terminal"] = BashTool()
-            tools["python"] = PythonTool()
-            tools["file_read"] = FileReadTool()
-            tools["file_write"] = FileWriteTool()
-            tools["file_find"] = FileFinderTool()
-            tools["file_edit"] = FileEditTool()
-        if ctx.tools_ctx is not None:
-            tools.update(build_nova_tools(ctx.tools_ctx, state=self.state, emit=self._emit))
-        return tools
+import re
+
+def _build_tools(self) -> dict:
+    ctx = self.ctx
+    goal = (ctx.goal or "").lower()
+    tools: dict = {}
+
+    # 1. Сначала собираем ВСЕ потенциально доступные инструменты (как сейчас)
+    if ctx.search is not None:
+        tools["web_search"] = WebSearchTool(ctx.search, state=self.state)
+    if ctx.read_page is not None:
+        tools["web_open"] = WebOpenTool(ctx.read_page, state=self.state)
+    if ctx.workspace:
+        tools["terminal"] = BashTool()
+        tools["python"] = PythonTool()
+        tools["file_read"] = FileReadTool()
+        tools["file_write"] = FileWriteTool()
+        tools["file_find"] = FileFinderTool()
+        tools["file_edit"] = FileEditTool()
+    if ctx.tools_ctx is not None:
+        tools.update(build_nova_tools(ctx.tools_ctx, state=self.state, emit=self._emit))
+
+    # 2. Фильтруем по намерению (эвристика)
+    # Если это простой чат/приветствие — вообще не отдаём инструменты
+    if re.match(r"^(привет|столица|сколько|кто такой|перевод|как дела)", goal):
+        return {}
+
+    # Если просят найти информацию — оставляем только веб-инструменты
+    if any(word in goal for word in ["найди", "поиск", "книг", "интернет", "статью", "источник"]):
+        return {k: v for k, v in tools.items() if k in ("web_search", "web_open")}
+
+    # Если работа с файлами/кодом — только терминал и файлы
+    if any(word in goal for word in ["файл", "терминал", "код", "папк", "запусти", "скрипт"]):
+        return {k: v for k, v in tools.items() if k in ("terminal", "python", "file_read", "file_write", "file_find", "file_edit")}
+
+    # Если явно упомянут MCP — оставляем только MCP-инструменты
+    if "mcp" in goal:
+        return {k: v for k in tools if k.startswith("mcp_")}
+
+    # Для сложных смешанных запросов отдаём базовый набор
+    return tools
 
     @staticmethod
     def _with_aliases(tools: dict) -> dict:
