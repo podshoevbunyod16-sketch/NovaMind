@@ -13,6 +13,8 @@ def composio_page():
 
 @composio_bp.route('/api/composio/connect', methods=['POST'])
 def composio_connect():
+    if not session.get('admin_logged_in'):
+        return jsonify({'error': 'Только администратор может настроить общий API-ключ Composio'}), 403
     data = request.get_json() or {}
     api_key = data.get('api_key', '')
     if not api_key:
@@ -48,9 +50,13 @@ def composio_connected_accounts():
         return jsonify({'error': 'Composio не подключен'}), 400
     try:
         headers = {'x-api-key': api_key, 'Content-Type': 'application/json'}
-        resp = requests.get('https://backend.composio.dev/api/v3.1/connected_accounts', headers=headers, timeout=10)
+        resp = requests.get('https://backend.composio.dev/api/v3.1/connected_accounts', headers=headers, params={'user_id': _composio_user_id()}, timeout=10)
         resp.raise_for_status()
-        return jsonify(resp.json())
+        payload = resp.json()
+        records = payload if isinstance(payload, list) else payload.get('items', payload.get('connected_accounts', [])) if isinstance(payload, dict) else []
+        uid = _composio_user_id()
+        own = [item for item in records if isinstance(item, dict) and str(item.get('user_id') or item.get('user_uid') or '') == uid]
+        return jsonify({'items': own, 'connected_accounts': own})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
@@ -65,7 +71,7 @@ def composio_connect_account():
         return jsonify({'error': 'Укажи toolkit'}), 400
     try:
         headers = {'x-api-key': api_key, 'Content-Type': 'application/json'}
-        session_resp = requests.post('https://backend.composio.dev/api/v3.1/tool_router/session', headers=headers, json={"user_id": "novauser"}, timeout=10)
+        session_resp = requests.post('https://backend.composio.dev/api/v3.1/tool_router/session', headers=headers, json={"user_id": _composio_user_id()}, timeout=10)
         session_resp.raise_for_status()
         session_data = session_resp.json()
         session_id = session_data.get('session_id', '')
@@ -88,6 +94,18 @@ def composio_execute():
     action_name = data.get('action', '')
     params = data.get('params', {})
     connected_account_id = data.get('connected_account_id', '')
+    if connected_account_id:
+        try:
+            check_headers = {'x-api-key': api_key, 'Content-Type': 'application/json'}
+            check = requests.get('https://backend.composio.dev/api/v3.1/connected_accounts', headers=check_headers, params={'user_id': _composio_user_id()}, timeout=10)
+            check.raise_for_status()
+            payload = check.json()
+            records = payload if isinstance(payload, list) else payload.get('items', payload.get('connected_accounts', [])) if isinstance(payload, dict) else []
+            allowed_ids = {str(item.get('id') or item.get('connected_account_id') or '') for item in records if isinstance(item, dict) and str(item.get('user_id') or item.get('user_uid') or '') == _composio_user_id()}
+            if str(connected_account_id) not in allowed_ids:
+                return jsonify({'error': 'Подключение не найдено для текущего пользователя'}), 404
+        except Exception:
+            return jsonify({'error': 'Не удалось проверить владельца подключения; действие заблокировано'}), 502
     if not action_name:
         return jsonify({'error': 'Укажи действие'}), 400
     try:
@@ -121,3 +139,21 @@ def composio_actions():
 
 
 # ========== LEGACY HISTORY API ==========
+
+# >>> NOVA-USER-ISOLATION
+def _composio_user_id():
+    """Stable Composio user ID derived from the authenticated NovaMind identity."""
+    import hashlib
+    import identity
+    if not (session.get("nova_google_login") or session.get("admin_logged_in") or session.get("nova_signed_in")):
+        return ""
+    return "nova_" + hashlib.sha256(identity.chat_owner().encode("utf-8")).hexdigest()[:40]
+
+
+@composio_bp.before_request
+def _nova_composio_auth_guard():
+    if request.path in ("/api/composio/connected_accounts", "/api/composio/connect_account", "/api/composio/execute"):
+        if not _composio_user_id():
+            return jsonify({"error": "Войдите в аккаунт для доступа к Composio"}), 401
+    return None
+# <<< NOVA-USER-ISOLATION
