@@ -37,13 +37,9 @@ import usage_stats
 from agenticseek import policy
 from agenticseek.policy import clip  # noqa: F401  (обрезка текста в трассе)
 from agenticseek.core.prompt_paths import prompt_path  # noqa: F401 (документация/тесты)
-<<<<<<< HEAD
-from agenticseek.engine import AGENT_MAX_TOKENS, AgentEngine, EngineContext
-=======
 import prompt_registry
 import telemetry
 from agenticseek.engine import AgentEngine, EngineContext
->>>>>>> origin/arena/a2f17351-novamind
 from agenticseek.router import looks_complex  # noqa: F401 (реэкспорт для тестов)
 from agenticseek.state import RunState  # noqa: F401
 from agenticseek.tools import sandbox
@@ -257,24 +253,15 @@ def _prose_without_code(text):
 
 def _looks_complete_answer(text):
     """Похож ли текст на законченный ответ, а не на обрезанный черновик.
-
-<<<<<<< HEAD
-    Точка в конце не обязательна (модели часто её опускают), а вот запятая,
-    тире, открытая кавычка или служебное слово на конце — признак обрыва.
-    Содержимое fenced-блоков кода в этой проверке не участвует: там бывают
-    непарные кавычки и «служебные» слова в конце.
-=======
     Точка в конце не обязательна (модели часто её опускают). Обрыв — это
     запятая/тире/двоеточие/открытая скобка или кавычка на конце, а также
     «висящее» служебное слово БЕЗ единого знака конца предложения в последнем
     абзаце.
-
     Раньше правило было строже: любой текст, оканчивающийся на предлог или
     союз, считался обрывом и выбрасывался целиком. Из-за этого нормальные
     ответы вида «… чаще берут Python или JavaScript» исчезали из чата (пустой
     пузырь и «Не удалось получить ответ»). Теперь решение принимается по
     признакам обрыва, а не по одному слову.
->>>>>>> origin/arena/a2f17351-novamind
     """
     text = (text or "").strip()
     if not text:
@@ -293,14 +280,10 @@ def _looks_complete_answer(text):
     last = text.splitlines()[-1].lstrip()
     if last.startswith(("-", "*", "•", "|")) or re.match(r"^\d+[.)]\s", last):
         return True
-<<<<<<< HEAD
-    words = re.findall(r"[A-Za-zА-Яа-яЁё]+", prose)
-=======
     tail = text[-200:]
     if re.search(r"[.!?…)\]]\s*$", tail):
         return True                     # ответ закончился знаком препинания
     words = re.findall(r"[A-Za-zА-Яа-яЁё]+", text)
->>>>>>> origin/arena/a2f17351-novamind
     if words and words[-1].lower() in _TRUNCATED_WORDS:
         # Служебное слово на конце подозрительно только тогда, когда в самом
         # хвосте нет ни одного законченного предложения.

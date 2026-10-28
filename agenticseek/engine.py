@@ -597,18 +597,11 @@ class AgentEngine:
         agent.extra_context = (
             "Инструменты отключены пользователем (кнопка автопоиска выключена). "
             "Не вызывай инструменты, не пиши блоки ```tag```, теги <tool_code> "
-<<<<<<< HEAD
-            "и JSON-действия. Отвечай на языке пользователя только готовым текстом, "
-            "полно и по существу: раскрывай тему, завершай последнюю мысль, "
-            "не обрывай ответ на полуслове.")
-        if ctx.memory_prompt:
-            agent.extra_context += "\n\n" + ctx.memory_prompt
-=======
             "и JSON-действия. Отвечай на языке пользователя только готовым текстом.")
         for block in (ctx.memory_prompt, ctx.knowledge_prompt):
             if block:
                 agent.extra_context += "\n\n" + block
->>>>>>> origin/arena/a2f17351-novamind
+
         agent.attach(events=self._emit, cancel=ctx.cancel,
                      deadline=ctx.deadline or (time.monotonic() + ctx.timeout),
                      step_budget=self._budget, confirm=None,

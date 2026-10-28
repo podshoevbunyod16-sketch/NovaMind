@@ -1,7 +1,7 @@
 {
   "prompts": {
     "browser_agent": {
-      "active": "e23611a00984",
+      "active": "ee6fd0d586f6",
       "versions": [
         {
           "chars": 1102,
@@ -9,11 +9,18 @@
           "lines": 26,
           "source": "prompts/base/browser_agent.txt",
           "version": "e23611a00984"
+        },
+        {
+          "chars": 1204,
+          "created_at": 1793187338.52,
+          "lines": 27,
+          "source": "prompts/base/browser_agent.txt",
+          "version": "ee6fd0d586f6"
         }
       ]
     },
     "casual_agent": {
-      "active": "21c033c44258",
+      "active": "d94daeb5c26d",
       "versions": [
         {
           "chars": 357,
@@ -21,6 +28,13 @@
           "lines": 6,
           "source": "prompts/base/casual_agent.txt",
           "version": "21c033c44258"
+        },
+        {
+          "chars": 643,
+          "created_at": 1793187338.54,
+          "lines": 10,
+          "source": "prompts/base/casual_agent.txt",
+          "version": "d94daeb5c26d"
         }
       ]
     },
@@ -49,7 +63,7 @@
       ]
     },
     "orchestrator_agent": {
-      "active": "6cc8dc5e028e",
+      "active": "6115955deaab",
       "versions": [
         {
           "chars": 887,
@@ -57,6 +71,13 @@
           "lines": 13,
           "source": "prompts/base/orchestrator_agent.txt",
           "version": "6cc8dc5e028e"
+        },
+        {
+          "chars": 978,
+          "created_at": 1793187338.555,
+          "lines": 14,
+          "source": "prompts/base/orchestrator_agent.txt",
+          "version": "6115955deaab"
         }
       ]
     },
@@ -85,6 +106,6 @@
       ]
     }
   },
-  "updated_at": 1793148317.782,
+  "updated_at": 1793187338.56,
   "version": 1
 }
