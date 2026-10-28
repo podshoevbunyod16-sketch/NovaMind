@@ -15,13 +15,23 @@ PROMPT_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file
 
 
 def prompt_path(name: str) -> str:
-    """Path of ``<name>.txt``; ``name`` may include the ``.txt`` suffix."""
+    """Path of ``<name>.txt``; ``name`` may include the ``.txt`` suffix.
+
+    С версии 2026-10-28 путь разрешает :mod:`prompt_registry`: он умеет
+    закреплять конкретную версию промпта (``PROMPT_VERSION_<NAME>``) и хранит
+    архив изменений. Если реестр недоступен, работает прежний путь — движок не
+    должен падать из-за версионирования.
+    """
     name = str(name or "").strip()
     if not name:
         raise ValueError("Empty prompt name")
-    if not name.endswith(".txt"):
-        name = f"{name}.txt"
-    return os.path.join(PROMPT_DIR, name)
+    if name.endswith(".txt"):
+        name = name[:-4]
+    try:
+        from prompt_registry import resolve
+        return resolve(name)
+    except Exception:                                      # noqa: BLE001
+        return os.path.join(PROMPT_DIR, f"{name}.txt")
 
 
 def available() -> list[str]:

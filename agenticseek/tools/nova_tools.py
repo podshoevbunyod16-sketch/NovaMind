@@ -311,6 +311,40 @@ class MediaTool(BridgeTool):
                 "Не вставляй ссылку в ответ — достаточно короткого подтверждения.")
 
 
+def _knowledge(ctx, payload: str) -> str:
+    """knowledge_search: поиск по внутренней базе знаний с цитатами [K1]."""
+    import knowledge as knowledge_module
+    raw = str(payload or "").strip()
+    query, limit = raw, 5
+    try:
+        data = json.loads(raw)
+    except (ValueError, TypeError):
+        data = None
+    if isinstance(data, dict):
+        query = str(data.get("query") or data.get("q") or raw).strip()
+        try:
+            limit = max(1, min(int(data.get("limit") or 5), 12))
+        except (TypeError, ValueError):
+            limit = 5
+    if not query:
+        return "Пустой запрос: напиши в блоке knowledge_search текст вопроса."
+    owner = str(getattr(ctx, "knowledge_owner", "") or getattr(ctx, "owner", "") or "")
+    result = knowledge_module.search_tool(query, limit=limit, owner=owner)
+    hits = result.get("results") or []
+    if not hits:
+        return ("В базе знаний нет подходящих фрагментов. Скажи об этом честно "
+                "и не придумывай содержимое документов.")
+    lines = ["Фрагменты базы знаний (ссылайся на них как [K1], [K2]):"]
+    for hit in hits:
+        title = hit.get("title") or "документ"
+        source = f" — {hit['source']}" if hit.get("source") else ""
+        text = str(hit.get("text") or "").strip()
+        if len(text) > 1200:
+            text = text[:1200].rstrip() + " …"
+        lines.append(f"[{hit.get('ref')}] {title}{source}\n{text}")
+    return "\n\n".join(lines)
+
+
 def build_nova_tools(ctx, state=None, emit=None) -> dict:
     """Register the NovaMind tools the current run really supports."""
     tools: dict[str, Tools] = {}
@@ -332,6 +366,12 @@ def build_nova_tools(ctx, state=None, emit=None) -> dict:
         tools["forget"] = BridgeTool(
             "forget", "Удалить воспоминание по id: {id}",
             lambda payload: _forget(ctx, payload), state=state, emit=emit)
+
+    if getattr(ctx, "knowledge_available", False):
+        tools["knowledge_search"] = BridgeTool(
+            "knowledge_search",
+            "Найти фрагменты во внутренней базе знаний: {query, limit}",
+            lambda payload: _knowledge(ctx, payload), risk="safe", state=state, emit=emit)
 
     if getattr(ctx, "tasks_available", False):
         tools["task"] = BridgeTool(

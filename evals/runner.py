@@ -27,6 +27,14 @@ from evals import yamlmini                                        # noqa: E402
 
 TASKS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tasks")
 
+#: Что делать, если сервер ограничил запросы. Замеры — не пользовательский
+#: трафик, им нужен свой режим.
+RATE_LIMIT_HINT = (
+    "⚠️  Сервер ограничивает запросы агента (429). Прогон остановлен.\n"
+    "    Запустите сервер для замеров без лимита:\n"
+    "        AGENT_RATE_LIMIT=0 python app.py\n"
+    "    или поднимите лимит: AGENT_RATE_GUEST=500 AGENT_RATE_WINDOW=60")
+
 
 # ══════════════ разбор потока ответа ══════════════
 
@@ -54,6 +62,8 @@ def summarize(events):
     usage = None
     error = ""
     stopped = False
+    offline = False
+    provider = ""
     for event in events:
         kind = event.get("type")
         if kind == "token":
@@ -67,14 +77,30 @@ def summarize(events):
         elif kind == "result":
             usage = event.get("usage") or usage
             stopped = bool(event.get("stopped"))
+            offline = bool(event.get("offline")) or offline
+            provider = str(event.get("provider") or provider)
             if event.get("reply") and not answer_parts:
                 answer_parts.append(str(event["reply"]))
         elif kind == "error":
             error = str(event.get("text") or event.get("error") or "ошибка")
     answer = "".join(answer_parts).strip()
     tokens = _tokens(usage, answer)
+    if provider == "local_demo":
+        offline = True
     return {"answer": answer, "steps": steps, "tools": tools,
-            "tokens": tokens, "error": error, "stopped": stopped, "usage": usage}
+            "tokens": tokens, "error": error, "stopped": stopped, "usage": usage,
+            "offline": offline, "provider": provider}
+
+
+def is_rate_limited(events) -> bool:
+    """Прогон упёрся в лимит запросов агента, а не в качество ответа."""
+    for event in events or []:
+        if event.get("type") != "error":
+            continue
+        text = str(event.get("text") or event.get("error") or "").lower()
+        if "слишком много запросов" in text or "too many requests" in text:
+            return True
+    return False
 
 
 def _tokens(usage, answer):
@@ -115,14 +141,48 @@ def evaluate(task, result):
 # ══════════════ транспорт ══════════════
 
 class HttpTransport:
-    """Шлёт запрос в живой сервер и читает поток NDJSON."""
+    """Шлёт запрос в живой сервер и читает поток NDJSON.
 
-    def __init__(self, base_url: str, timeout: int = 240, cookies: str = ""):
+    Лимит агента (``AGENT_RATE_LIMIT``) рассчитан на живого пользователя:
+    по умолчанию 30 гостевых запросов на окно в 3600 секунд. Прогон из 35
+    задач в него не влезает, поэтому транспорт различает «модель ответила
+    плохо» и «сервер попросил подождать»:
+
+    * короткая пауза (``Retry-After`` до ``quick_wait`` секунд) — повторяем,
+      это дешёво и обычно срабатывает;
+    * длинная пауза — не ждём: окно в час, ожидание умножится на число задач.
+      Возвращаем ошибку с флагом ``rate_limited``, и прогон честно
+      останавливается с подсказкой, как запускать замеры.
+    """
+
+    def __init__(self, base_url: str, timeout: int = 240, cookies: str = "",
+                 retries: int = 1, quick_wait: float = 5.0):
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
         self.cookies = cookies
+        self.retries = max(0, int(retries))
+        self.quick_wait = max(0.0, float(quick_wait))
 
     def __call__(self, prompt: str):
+        attempt = 0
+        while True:
+            events, elapsed, retry_after = self._once(prompt)
+            rate_limited = retry_after is not None or is_rate_limited(events)
+            if not rate_limited or attempt >= self.retries:
+                return events, elapsed
+            pause = 30.0 if retry_after is None else retry_after
+            if pause > self.quick_wait:
+                return events, elapsed          # ждать дольше, чем стоит замер
+            if pause > 0:
+                time.sleep(pause)
+            attempt += 1
+
+    def _once(self, prompt: str):
+        """Один запрос. Возвращает (события, время, пауза_до_повтора).
+
+        Пауза ``None`` — ответ не упёрся в лимит; ``0.0`` — упёрся, но сервер
+        разрешил повторять сразу.
+        """
         import requests
         headers = {"Content-Type": "application/json", "Accept": "application/x-ndjson"}
         if self.cookies:
@@ -131,16 +191,25 @@ class HttpTransport:
         response = requests.post(f"{self.base_url}/api/agent/stream",
                                  json={"message": prompt}, headers=headers,
                                  stream=True, timeout=self.timeout)
+        retry_after = None
+        if response.status_code == 429:
+            retry_after = 30.0
+            raw = response.headers.get("Retry-After")
+            if raw is not None:
+                try:
+                    retry_after = max(0.0, float(raw))
+                except (TypeError, ValueError):
+                    retry_after = 30.0
         if response.status_code >= 400:
             try:
                 payload = response.json()
             except ValueError:
                 payload = {"error": response.text[:200]}
             return [{"type": "error", "text": str(payload.get("error") or response.status_code)}], \
-                time.time() - started
+                time.time() - started, retry_after
         lines = response.iter_lines(decode_unicode=True)
         events = parse_events(line for line in lines if line)
-        return events, time.time() - started
+        return events, time.time() - started, retry_after
 
 
 def run_task(task, transport):
@@ -158,11 +227,26 @@ def run_task(task, transport):
     return {"id": task["id"], "category": task.get("category", ""), "ok": ok,
             "reason": reason, "steps": summary["steps"],
             "time": round(elapsed, 2), "tokens": summary["tokens"],
-            "tools": summary["tools"], "answer": summary["answer"][:500]}
+            "tools": summary["tools"], "answer": summary["answer"][:500],
+            "offline": bool(summary.get("offline")),
+            "provider": summary.get("provider", ""),
+            "rate_limited": is_rate_limited(events)}
 
 
 def run_all(tasks, transport):
-    return [run_task(task, transport) for task in tasks]
+    """Прогон по всем задачам.
+
+    Упираемся в лимит запросов — останавливаемся: продолжение бессмысленно,
+    сервер всё равно отвечает 429, а отчёт из тридцати «слишком много
+    запросов» выглядит как регрессия, хотя модель тут ни при чём.
+    """
+    results = []
+    for task in tasks:
+        result = run_task(task, transport)
+        results.append(result)
+        if result.get("rate_limited"):
+            break
+    return results
 
 
 # ══════════════ отчёт ══════════════
@@ -228,6 +312,12 @@ def main(argv=None):
     print(f"Сервер: {base_url} · задач: {len(tasks)}")
     results = run_all(tasks, HttpTransport(base_url))
     print(format_table(results))
+    if results and results[-1].get("rate_limited"):
+        print(RATE_LIMIT_HINT)
+        print(f"Пройдено до остановки: {len(results)} из {len(tasks)} задач.")
+        if json_path:
+            print("Отчёт не сохранён: неполный прогон нельзя сравнивать с базовой линией.")
+        return 3
     print(summary_line(results))
     if json_path:
         with open(json_path, "w", encoding="utf-8") as handle:

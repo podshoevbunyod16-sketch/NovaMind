@@ -1,0 +1,15 @@
+# RAG: агент умеет искать во внутренней базе знаний и честно говорить, что в ней пусто.
+id: knowledge-01
+category: knowledge
+prompt: Что есть в моей базе знаний?
+max_steps: 6
+---
+id: knowledge-02
+category: knowledge
+prompt: Найди в моей базе знаний регламент по отпускам и процитируй срок подачи заявления.
+max_steps: 8
+---
+id: knowledge-03
+category: knowledge
+prompt: Если в базе знаний нет документа про командировки — так и скажи, не выдумывай.
+max_steps: 6

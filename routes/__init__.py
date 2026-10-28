@@ -13,6 +13,7 @@ from .terminal import terminal_bp, tasks_bp
 from .agent import agent_bp
 from .diagnostics import diagnostics_bp
 from .memory import memory_bp
+from .ops import ops_bp
 from .schedule import schedule_bp
 from .tts import tts_bp
 
@@ -30,6 +31,7 @@ ALL_BLUEPRINTS = [
     agent_bp,
     diagnostics_bp,
     memory_bp,
+    ops_bp,
     schedule_bp,
     tts_bp,
 ]

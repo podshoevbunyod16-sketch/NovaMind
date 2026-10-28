@@ -37,6 +37,14 @@ for bp in ALL_BLUEPRINTS:
 init_db()
 load_plugins()
 
+# Версии промптов: фиксируем текущие тексты в манифесте, чтобы каждое изменение
+# агента было видно в трассе и могло быть откачено одной переменной окружения.
+try:
+    import prompt_registry
+    prompt_registry.ensure()
+except Exception:  # noqa: BLE001 — версионирование не должно мешать запуску
+    logging.getLogger(__name__).warning("Не удалось обновить манифест промптов", exc_info=True)
+
 # ---------- Планировщик (Б4) ----------
 # В тестах и при SCHEDULER_ENABLED=0 поток не поднимается: он не должен
 # влиять ни на прогон pytest, ни на отладку.

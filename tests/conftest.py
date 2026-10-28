@@ -61,6 +61,17 @@ def isolated_env(tmp_path, monkeypatch):
     security.agent_limiter.clear()
     security.tts_limiter.clear()
 
+    # Трассы и база знаний: у каждого теста свои файлы. Иначе «последние
+    # трассы» и документы предыдущего теста попадали в следующий, и тесты
+    # начинали зависеть от порядка запуска.
+    import telemetry
+    monkeypatch.setattr(telemetry.TRACER, "directory", str(tmp_path / "traces"))
+    telemetry.TRACER._recent.clear()
+
+    import knowledge
+    monkeypatch.setattr(knowledge, "DB_PATH", str(tmp_path / "knowledge.db"))
+    monkeypatch.setattr(knowledge, "_DEFAULT", None)
+
     yield
 
     security.login_limiter.clear()
