@@ -1,0 +1,90 @@
+{
+  "prompts": {
+    "browser_agent": {
+      "active": "e23611a00984",
+      "versions": [
+        {
+          "chars": 1102,
+          "created_at": 1793148317.779,
+          "lines": 26,
+          "source": "prompts/base/browser_agent.txt",
+          "version": "e23611a00984"
+        }
+      ]
+    },
+    "casual_agent": {
+      "active": "21c033c44258",
+      "versions": [
+        {
+          "chars": 357,
+          "created_at": 1793148317.78,
+          "lines": 6,
+          "source": "prompts/base/casual_agent.txt",
+          "version": "21c033c44258"
+        }
+      ]
+    },
+    "coder_agent": {
+      "active": "51de918a6c87",
+      "versions": [
+        {
+          "chars": 3931,
+          "created_at": 1793148317.78,
+          "lines": 96,
+          "source": "prompts/base/coder_agent.txt",
+          "version": "51de918a6c87"
+        }
+      ]
+    },
+    "file_agent": {
+      "active": "d87ad849e1fb",
+      "versions": [
+        {
+          "chars": 1572,
+          "created_at": 1793148317.781,
+          "lines": 49,
+          "source": "prompts/base/file_agent.txt",
+          "version": "d87ad849e1fb"
+        }
+      ]
+    },
+    "orchestrator_agent": {
+      "active": "6cc8dc5e028e",
+      "versions": [
+        {
+          "chars": 887,
+          "created_at": 1793148317.781,
+          "lines": 13,
+          "source": "prompts/base/orchestrator_agent.txt",
+          "version": "6cc8dc5e028e"
+        }
+      ]
+    },
+    "planner_agent": {
+      "active": "6f836d517d75",
+      "versions": [
+        {
+          "chars": 273,
+          "created_at": 1793148317.781,
+          "lines": 5,
+          "source": "prompts/base/planner_agent.txt",
+          "version": "6f836d517d75"
+        }
+      ]
+    },
+    "project_agent": {
+      "active": "a7f0bae18b3c",
+      "versions": [
+        {
+          "chars": 1382,
+          "created_at": 1793148317.781,
+          "lines": 47,
+          "source": "prompts/base/project_agent.txt",
+          "version": "a7f0bae18b3c"
+        }
+      ]
+    }
+  },
+  "updated_at": 1793148317.782,
+  "version": 1
+}

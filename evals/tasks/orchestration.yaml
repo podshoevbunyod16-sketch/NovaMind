@@ -1,0 +1,15 @@
+# Мультиагентная оркестрация: сложные запросы обрабатываются паттерном (AGENT_PATTERN=auto).
+id: orchestration-01
+category: orchestration
+prompt: Сравни PostgreSQL и SQLite для небольшого проекта на 10 тысяч пользователей: плюсы, минусы и что выбрать.
+max_steps: 12
+---
+id: orchestration-02
+category: orchestration
+prompt: Проверь этот план и скажи, где он сломается: 1) сделать бэкап, 2) обновить схему, 3) удалить старые таблицы.
+max_steps: 12
+---
+id: orchestration-03
+category: orchestration
+prompt: Исследуй и напиши короткий план запуска лендинга за неделю.
+max_steps: 10

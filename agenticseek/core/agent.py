@@ -160,6 +160,55 @@ class Agent:
         """Sub-agents (only the planner has any)."""
         return []
 
+    def _guarded(self, tag: str, payload: str) -> str:
+        """Проверяет ограждения и права хода. Пустая строка — можно выполнять.
+
+        Два независимых слоя:
+
+        * :mod:`guardrails` — мусорные аргументы (NUL, гигантский блок, выход
+          из папки) и опасная разметка;
+        * :mod:`capabilities` — криптографически подписанные права именно
+          этого хода: инструмент не в списке = отказ, даже если модель его
+          «увидела» в промпте.
+
+        Оба слоя необязательны: если модулей нет (например, движок используется
+        отдельно от NovaMind), поведение остаётся прежним.
+        """
+        try:
+            import guardrails
+        except Exception:                                   # noqa: BLE001
+            guardrails = None
+        if guardrails is not None:
+            try:
+                verdict = guardrails.guard_tool_call(tag, payload)
+            except Exception:                               # noqa: BLE001 — фильтр не должен ломать ход
+                verdict = None
+            if verdict is not None and not verdict.allowed:
+                reasons = ", ".join(verdict.reasons) or "нарушение правил"
+                self.emit({"type": "guard", "stage": "tool", "severity": verdict.severity,
+                           "allowed": False, "reasons": list(verdict.reasons),
+                           "tool": tag})
+                self.emit({"type": "step", "icon": "🛡",
+                           "text": f"Ограждение отклонило вызов «{tag}»: {reasons}"})
+                return (f"[failure] Вызов «{tag}» отклонён ограждением ({reasons}). "
+                        "Не повторяй его в таком виде — используй корректные аргументы.")
+        try:
+            import capabilities
+        except Exception:                                   # noqa: BLE001
+            capabilities = None
+        if capabilities is not None:
+            try:
+                error = capabilities.require(tag, payload)
+            except Exception:                               # noqa: BLE001
+                error = None
+            if error:
+                message = str((error.get("error") or {}).get("message") or "нет прав")
+                self.emit({"type": "step", "icon": "🔒",
+                           "text": f"Нет прав на инструмент «{tag}»: {message}"})
+                return (f"[failure] {message}. Обойти ограничение нельзя — "
+                        "предложи пользователю безопасную альтернативу.")
+        return ""
+
     def emit(self, event: dict) -> None:
         kind = str(event.get("type") or "")
         if kind == "step":
@@ -408,6 +457,12 @@ class Agent:
         if repeats > MAX_LOOP_REPEATS:
             return False, ("[failure] Этот блок уже выполнялся и не помог. "
                            "Не повторяй его: измени подход или закончи ответом.")
+
+        # Ограждения входа инструмента и права этого хода проверяются ДО
+        # подтверждения: отклонённый вызов не должен даже спрашивать «разрешить?».
+        denied = self._guarded(tag, payload)
+        if denied:
+            return False, denied
 
         risk = getattr(tool, "risk", "write")
         if self.confirm is not None:

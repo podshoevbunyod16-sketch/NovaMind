@@ -216,6 +216,16 @@ class EngineContext:
     tools_ctx: object = None
     memory_prompt: str = ""
     skills_prompt: str = ""
+    #: Фрагменты базы знаний (RAG) с цитатами [K1]; пусто — база не подключена.
+    knowledge_prompt: str = ""
+    #: Те же фрагменты в виде событий для интерфейса (``[{ref, title, excerpt}]``).
+    #: Показываются сразу после первого шага, чтобы ход всё равно начинался
+    #: со ``stage``: интерфейс ждёт этот порядок.
+    knowledge_items: list = field(default_factory=list)
+    #: Паттерн мультиагентной оркестрации: ``off`` (по умолчанию), ``auto``,
+    #: ``sequential``, ``parallel``, ``critic``, ``router``. См.
+    #: :mod:`agenticseek.orchestration`.
+    pattern: str = "off"
     strict_mcp: bool = False
     finalize: Optional[Callable[[str], str]] = None
     salvage_answer: Optional[Callable[[str], str]] = None
@@ -322,6 +332,7 @@ class AgentEngine:
         """
         self.record_id = self._start_run()
         self._understanding_stage()
+        self._knowledge_stage()
         try:
             self._recall_start()          # анимация «вспоминаю …»
             self._build_agents()          # ← здесь инструменты реально грузятся
@@ -373,6 +384,20 @@ class AgentEngine:
         self._finish_run()
 
     # ── шаг 1: понять запрос, шаг 2: вспомнить и получить инструменты ─────
+    def _knowledge_stage(self) -> None:
+        """Фрагменты базы знаний (RAG) — сразу после шага «понимаю запрос».
+
+        Раньше они отправлялись из маршрута до запуска движка, и ход начинался
+        с ``step``, а не со ``stage``; интерфейс рассчитывает на первое событие
+        ``stage`` и терял постановку задачи.
+        """
+        items = list(getattr(self.ctx, "knowledge_items", None) or [])
+        if not items:
+            return
+        self._emit({"type": "step", "icon": "📚",
+                    "text": f"Нашёл в базе знаний фрагментов: {len(items)}"})
+        self._emit({"type": "knowledge", "items": items})
+
     def _understanding_stage(self) -> None:
         """Первый шаг хода: понять запрос (сцена поиска — для кнопки «Поиск»)."""
         ctx = self.ctx
@@ -538,7 +563,7 @@ class AgentEngine:
 
         from agenticseek.tools.terminal_commands import HELP as terminal_help
         extras = "\n\n".join(part for part in (
-            ctx.memory_prompt, ctx.skills_prompt,
+            ctx.memory_prompt, ctx.knowledge_prompt, ctx.skills_prompt,
             terminal_help if ctx.workspace and not ctx.strict_mcp else "",
         ) if part)
         if extras:
@@ -572,11 +597,18 @@ class AgentEngine:
         agent.extra_context = (
             "Инструменты отключены пользователем (кнопка автопоиска выключена). "
             "Не вызывай инструменты, не пиши блоки ```tag```, теги <tool_code> "
+<<<<<<< HEAD
             "и JSON-действия. Отвечай на языке пользователя только готовым текстом, "
             "полно и по существу: раскрывай тему, завершай последнюю мысль, "
             "не обрывай ответ на полуслове.")
         if ctx.memory_prompt:
             agent.extra_context += "\n\n" + ctx.memory_prompt
+=======
+            "и JSON-действия. Отвечай на языке пользователя только готовым текстом.")
+        for block in (ctx.memory_prompt, ctx.knowledge_prompt):
+            if block:
+                agent.extra_context += "\n\n" + block
+>>>>>>> origin/arena/a2f17351-novamind
         agent.attach(events=self._emit, cancel=ctx.cancel,
                      deadline=ctx.deadline or (time.monotonic() + ctx.timeout),
                      step_budget=self._budget, confirm=None,
@@ -646,7 +678,8 @@ class AgentEngine:
             self._build_tools(), max_turns=ctx.max_steps,
         )
         agent.extra_context = "\n\n".join(
-            part for part in (ctx.memory_prompt, ctx.skills_prompt) if part)
+            part for part in (ctx.memory_prompt, ctx.knowledge_prompt,
+                              ctx.skills_prompt) if part)
         # Operational instructions are separate from untrusted remembered facts.
         if ctx.workspace:
             agent.prompt += "\n\n" + terminal_help
@@ -845,6 +878,12 @@ class AgentEngine:
             return
         if ctx.force_search:
             self._search_observation = self._run_forced_search()
+        # Мультиагентные паттерны: только если их включили (AGENT_PATTERN) и
+        # запрос действительно сложный. Иначе — прежний путь с одним
+        # исполнителем, чтобы простые вопросы не стоили втрое дороже.
+        if self._pattern_requested():
+            self._run_orchestrated()
+            return
         agent = (self.router.by_role(ctx.force_role) if ctx.force_role else None)
         if (agent is None and getattr(self, "_search_observation", "")
                 and not _needs_tools(ctx.goal)):
@@ -907,6 +946,69 @@ class AgentEngine:
         self.state.steps = self._budget.used
         self._emit({"type": "step", "icon": "🏁",
                     "text": f"Готово · шагов: {self.state.steps} · модель: {ctx.model or '?'}"})
+
+    def _pattern_requested(self) -> bool:
+        """Нужен ли мультиагентный паттерн для этого запроса."""
+        ctx = self.ctx
+        pattern = str(getattr(ctx, "pattern", "off") or "off").strip().lower()
+        if pattern in ("", "off") or not ctx.tools_allowed:
+            return False
+        if ctx.offline or ctx.media_kind or ctx.force_role:
+            return False
+        from agenticseek.orchestration import PATTERNS, choose_pattern
+        from agenticseek.router import looks_complex
+        if pattern not in PATTERNS:
+            return False
+        resolved = choose_pattern(ctx.goal) if pattern == "auto" else pattern
+        # Короткий разговорный запрос не требует нескольких ролей даже при
+        # включённом паттерне: цена важнее «красоты» схемы.
+        return bool(looks_complex(ctx.goal)) or resolved == "critic"
+
+    def _run_orchestrated(self) -> None:
+        """Ход по паттерну: роли, синтез, критика (см. orchestration.py)."""
+        import os
+        from agenticseek.orchestration import run as run_pattern
+        ctx = self.ctx
+        pattern = str(getattr(ctx, "pattern", "auto") or "auto")
+        self._emit({"type": "step", "icon": "🧠",
+                    "text": f"Мультиагентный режим: {pattern}"})
+        # Поиск здесь не запускаем: он уже выполнен, если пользователь нажал
+        # «Поиск» (force_search), и его данные попали в цель. Дополнительный
+        # поиск на каждый мультиагентный ход удваивал время и расход токенов.
+        goal = self._goal_with_context()
+        try:
+            rounds = int(os.getenv("AGENT_PATTERN_ROUNDS", "2"))
+        except ValueError:
+            rounds = 2
+        result = run_pattern(ctx.complete, goal, pattern=pattern,
+                             history=ctx.history, emit=self._emit,
+                             max_rounds=max(1, min(rounds, 4)))
+        if not result.ok:
+            self._emit({"type": "step", "icon": "⚠️",
+                        "text": "Паттерн не дал ответа — работаю обычным путём"})
+            if self.router is not None:
+                self._run_agent_single()
+                return
+            raise AgenticSeekError("orchestration", "Не удалось получить ответ")
+        self.answer = result.answer
+        self.state.steps = max(1, len(result.steps))
+        self._emit({"type": "step", "icon": "🏁",
+                    "text": f"Оркестрация «{result.pattern}»: ролей {len(result.steps)}, "
+                            f"шагов {self.state.steps}"})
+        for note in result.notes[-3:]:
+            self._emit({"type": "step", "icon": "•", "text": clip(note, 200)})
+        if result.verdict:
+            self._emit({"type": "thought", "done": True, "label": "Проверка критиком",
+                        "text": clip(result.verdict, 600)})
+
+    def _run_agent_single(self) -> None:
+        """Обычный путь: один исполнитель (без рекурсии в паттерн)."""
+        previous = getattr(self.ctx, "pattern", "off")
+        try:
+            self.ctx.pattern = "off"
+            self._run_agent()
+        finally:
+            self.ctx.pattern = previous
 
     def _run_media(self) -> None:
         """Explicit "нарисуй …" request: generate directly, no model needed.

@@ -43,17 +43,23 @@ def test_parse_rejects_broken_line():
 
 # ══════════════ набор задач ══════════════
 
-def test_task_set_has_25_unique_tasks():
+def test_task_set_has_unique_tasks_with_prompts():
+    # Набор растёт вместе с возможностями агента (сейчас 35 задач), поэтому
+    # проверяем инварианты, а не точное число: уникальные id и у каждой задачи
+    # есть запрос.
     tasks = yamlmini.load_tasks(TASKS_DIR)
-    assert len(tasks) == 25
-    assert len({task["id"] for task in tasks}) == 25
+    assert len(tasks) >= 25
+    assert len({task["id"] for task in tasks}) == len(tasks)
     assert all(task["prompt"] for task in tasks)
 
 
 def test_task_set_covers_all_categories():
     tasks = yamlmini.load_tasks(TASKS_DIR)
     categories = {task.get("category") for task in tasks}
-    assert categories == {"search", "terminal", "code", "memory", "safety"}
+    # Базовые категории + новые подсистемы: знания (RAG), ограждения,
+    # мультиагентная оркестрация.
+    assert {"search", "terminal", "code", "memory", "safety"} <= categories
+    assert {"knowledge", "guardrails", "orchestration"} <= categories
 
 
 def test_task_without_prompt_is_rejected(tmp_path):
@@ -179,3 +185,120 @@ def test_main_runs_with_fake_transport(monkeypatch, tmp_path, capsys):
     assert code == 0 and "Успех: 1/1" in output
     report = json.loads((tmp_path / "report.json").read_text(encoding="utf-8"))
     assert report[0]["id"] == "demo" and report[0]["ok"] is True
+
+
+# ══════════════ офлайн-прогон и лимит запросов ══════════════
+
+def test_summarize_marks_offline_provider():
+    events = [{"type": "token", "token": "привет"},
+              {"type": "result", "reply": "привет", "provider": "local_demo"}]
+    summary = runner.summarize(events)
+    assert summary["offline"] is True and summary["provider"] == "local_demo"
+
+
+def test_summarize_marks_online_provider():
+    events = [{"type": "result", "reply": "ок", "provider": "groq", "offline": False}]
+    summary = runner.summarize(events)
+    assert summary["offline"] is False and summary["provider"] == "groq"
+
+
+def test_is_rate_limited_detects_message():
+    assert runner.is_rate_limited([{"type": "error", "text": "Слишком много запросов к агенту."}])
+    assert runner.is_rate_limited([{"type": "error", "text": "Too many requests"}])
+    assert not runner.is_rate_limited([{"type": "error", "text": "провайдер недоступен"}])
+    assert not runner.is_rate_limited([])
+
+
+def test_run_task_reports_offline_flag():
+    def offline_transport(prompt):
+        return ([{"type": "token", "token": "офлайн"},
+                 {"type": "result", "reply": "офлайн", "provider": "local_demo"}], 0.01)
+    task = {"id": "demo", "category": "chat", "prompt": "привет", "expect": ["офлайн"],
+            "tools": [], "forbid_tools": [], "max_steps": 5}
+    result = runner.run_task(task, offline_transport)
+    assert result["offline"] is True and result["provider"] == "local_demo"
+
+
+class _FakeResponse:
+    def __init__(self, status_code, payload=None, retry_after=None):
+        import json as _json
+        self.status_code = status_code
+        self._payload = payload or []
+        self.headers = {}
+        if retry_after is not None:
+            self.headers["Retry-After"] = str(retry_after)
+        self.text = _json.dumps({"error": "Слишком много запросов к агенту."})
+
+    def json(self):
+        return {"error": "Слишком много запросов к агенту."}
+
+    def iter_lines(self, decode_unicode=True):
+        import json as _json
+        for event in self._payload:
+            yield _json.dumps(event, ensure_ascii=False)
+
+
+def test_transport_retries_short_rate_limit(monkeypatch):
+    import sys
+    import types
+    calls = []
+
+    def fake_post(url, json=None, headers=None, stream=None, timeout=None):
+        calls.append(url)
+        if len(calls) == 1:
+            return _FakeResponse(429, retry_after=0)      # Retry-After: 0 → без ожидания
+        return _FakeResponse(200, [{"type": "result", "reply": "готово"}])
+
+    monkeypatch.setitem(sys.modules, "requests", types.SimpleNamespace(post=fake_post))
+    transport = runner.HttpTransport("http://example.invalid", retries=1)
+    events, _elapsed = transport("привет")
+    assert len(calls) == 2
+    assert events == [{"type": "result", "reply": "готово"}]
+
+
+def test_transport_does_not_wait_out_long_rate_limit(monkeypatch):
+    import sys
+    import types
+    calls = []
+
+    def fake_post(url, json=None, headers=None, stream=None, timeout=None):
+        calls.append(url)
+        return _FakeResponse(429, retry_after=3600)       # окно в час — ждать бессмысленно
+
+    monkeypatch.setitem(sys.modules, "requests", types.SimpleNamespace(post=fake_post))
+    transport = runner.HttpTransport("http://example.invalid", retries=3)
+    events, _elapsed = transport("привет")
+    assert len(calls) == 1
+    assert runner.is_rate_limited(events)
+
+
+def test_run_all_stops_on_rate_limit():
+    calls = []
+
+    def transport(prompt):
+        calls.append(prompt)
+        return [{"type": "error", "text": "Слишком много запросов к агенту."}], 0.01
+
+    tasks = [{"id": f"t{i}", "prompt": "p", "expect": [], "tools": [],
+              "forbid_tools": [], "max_steps": 3} for i in range(5)]
+    results = runner.run_all(tasks, transport)
+    assert len(results) == 1 and results[0]["rate_limited"] is True
+    assert calls == ["p"]
+
+
+def test_main_stops_and_hints_on_rate_limit(monkeypatch, tmp_path, capsys):
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    (tasks_dir / "one.yaml").write_text(
+        "id: demo\ncategory: search\nprompt: курс\nmax_steps: 3\n", encoding="utf-8")
+
+    def limited(prompt):
+        return [{"type": "error", "text": "Слишком много запросов к агенту."}], 0.01
+
+    monkeypatch.setattr(runner, "HttpTransport", lambda *a, **k: limited)
+    report = tmp_path / "report.json"
+    code = runner.main(["--tasks", str(tasks_dir), "--json", str(report)])
+    output = capsys.readouterr().out
+    assert code == 3
+    assert "AGENT_RATE_LIMIT=0" in output
+    assert not report.exists()

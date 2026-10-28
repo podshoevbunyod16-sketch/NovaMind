@@ -211,9 +211,37 @@ def native_tool_risk(name: str) -> str:
 
 
 def call_tool(name: str, **kwargs) -> dict:
+    """Единая точка исполнения инструмента реестра.
+
+    Здесь стоят три проверки, которых раньше не было в одном месте:
+    существование инструмента, ограждения аргументов (:mod:`guardrails`) и
+    права хода (:mod:`capabilities`). Все три возвращают ошибку в общем формате,
+    поэтому агент видит причину и не повторяет запрещённый вызов.
+    """
     spec = get_tool(name)
     if not spec:
         return {"ok": False, "error": {"type": "unknown_tool", "message": f"Unknown tool: {name}", "retryable": False}}
+    try:
+        import guardrails
+        verdict = guardrails.guard_tool_call(name, kwargs)
+        if not verdict.allowed:
+            return {"ok": False, "tool": name,
+                    "error": {"type": "guardrail", "retryable": False,
+                              "message": "Вызов отклонён ограждением: "
+                                         + (", ".join(verdict.reasons) or "некорректные аргументы")}}
+    except ImportError:
+        pass
+    except Exception:                         # noqa: BLE001
+        log.warning("guardrail check failed", exc_info=True)
+    try:
+        import capabilities
+        denied = capabilities.require(name, kwargs)
+        if denied:
+            return denied
+    except ImportError:
+        pass
+    except Exception:                         # noqa: BLE001
+        log.warning("capability check failed", exc_info=True)
     return spec.call(**kwargs)
 
 def bootstrap_default_tools():
@@ -229,6 +257,18 @@ def bootstrap_default_tools():
             {"type":"object","properties":{"url":{"type":"string"},"max_chars":{"type":"integer"}},"required":["url"]},
             lambda url, max_chars=6000: _open_result(__import__("routes.search", fromlist=["fetch_page_text"]).fetch_page_text(url, max_chars=min(int(max_chars),8000))),
             permissions=("network",), timeout=15))
+    if get_tool("knowledge_search") is None:
+        def _knowledge_search(query, limit=5, owner=""):
+            import knowledge
+            return knowledge.search_tool(str(query), limit=int(limit or 5), owner=owner)
+
+        register_tool(ToolSpec(
+            "knowledge_search",
+            "Найти фрагменты во внутренней базе знаний (RAG) с цитатами [K1].",
+            {"type": "object",
+             "properties": {"query": {"type": "string"}, "limit": {"type": "integer"}},
+             "required": ["query"]},
+            _knowledge_search, permissions=(), timeout=10, risk="safe"))
     if get_tool("shell") is None:
         from routes.terminal import run_agent
         register_tool(ToolSpec(
@@ -612,6 +652,17 @@ def _workspace_guard():
     except Exception as exc:                 # импорт не должен ломать инструмент
         return {"ok": False, "error": {"type": "unavailable", "message": str(exc),
                                        "retryable": False}}
+    # Права хода: даже вошедший пользователь не может вызвать инструмент,
+    # которого нет в подписанном capability-токене этого запуска.
+    try:
+        import capabilities
+        denied = capabilities.require("file_read")
+        if denied:
+            return denied
+    except ImportError:
+        pass
+    except Exception:                        # noqa: BLE001 — проверка не должна ломать вызов
+        log.warning("capability check failed", exc_info=True)
     return None
 
 

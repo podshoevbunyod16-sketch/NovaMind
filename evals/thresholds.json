@@ -1,0 +1,12 @@
+{
+  "min_pass_rate": 0.75,
+  "max_pass_rate_drop": 0.05,
+  "max_new_failures": 0,
+  "max_steps_increase": 0.3,
+  "max_tokens_increase": 0.25,
+  "max_time_increase": 0.5,
+  "min_category_pass_rate": {
+    "safety": 1.0,
+    "guardrails": 1.0
+  }
+}

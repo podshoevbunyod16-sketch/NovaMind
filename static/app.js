@@ -688,7 +688,8 @@ function createAssistantTurn(options = {}) {
       row.className = 'stage-step is-last';
       row.innerHTML = `<span class="ico">${icon || '•'}</span><span class="txt">${escapeHtml(text || '')}</span>`;
       stepsEl.appendChild(row);
-      while (stepsEl.children.length > 7) stepsEl.firstChild.remove();
+      // Держим весь ход агента, а не последние 7 строк: список прокручивается.
+      while (stepsEl.children.length > 24) stepsEl.firstChild.remove();
       if (traceData.length < 60) traceData.push({ kind: 'step', icon: icon || '•', text: text || '' });
       scrollToBottom();
     },
@@ -833,7 +834,7 @@ function createAssistantTurn(options = {}) {
         }
         const out = document.createElement('pre');
         out.className = 'agent-term-out';
-        out.textContent = cleanOutput.slice(0, 1200);
+        out.textContent = cleanOutput.slice(0, 4000);
         wrap.append(head, out);
         row.appendChild(wrap);
       }
@@ -843,7 +844,7 @@ function createAssistantTurn(options = {}) {
         const traceItem = { kind: 'tool', name: event.name || 'run', icon: icon,
           label: label, detail: detail, code: event.code ?? 0 };
         if (failed && rawOutput) {
-          traceItem.error = rawOutput.replace(/^\[failure\]\s*/i, '').trim().slice(0, 400);
+          traceItem.error = rawOutput.replace(/^\[failure\]\s*/i, '').trim().slice(0, 1200);
         }
         traceData.push(traceItem);
       }
@@ -901,7 +902,7 @@ function createAssistantTurn(options = {}) {
         const dots = row.querySelector('.typing-dots');
         if (dots) dots.remove();
         if (traceData.length < 60) {
-          traceData.push({ kind: 'step', icon: event.icon || '🧰', text: caption.slice(0, 400) });
+          traceData.push({ kind: 'step', icon: event.icon || '🧰', text: caption.slice(0, 1200) });
         }
       }
       scrollToBottom();
@@ -929,13 +930,13 @@ function createAssistantTurn(options = {}) {
             const box = document.createElement('details');
             box.className = 'agent-thought-text';
             box.innerHTML = '<summary>Что думал</summary><div></div>';
-            box.querySelector('div').textContent = text.slice(0, 1200);
+            box.querySelector('div').textContent = text.slice(0, 4000);
             row.appendChild(box);
           }
           log.appendChild(row);
           api.refreshTermMeta(term);
           if (traceData.length < 60) {
-            traceData.push({ kind: 'thought', label, text: text.slice(0, 400) });
+            traceData.push({ kind: 'thought', label, text: text.slice(0, 1600) });
           }
         }
         scrollToBottom();
@@ -953,7 +954,7 @@ function createAssistantTurn(options = {}) {
         const box = document.createElement('details');
         box.className = 'agent-thought-text';
         box.innerHTML = `<summary>${escapeHtml(detail || 'Что думаю')}</summary><div></div>`;
-        box.querySelector('div').textContent = text.slice(0, 1200);
+        box.querySelector('div').textContent = text.slice(0, 4000);
         row.appendChild(box);
       }
       log.appendChild(row);
@@ -981,12 +982,12 @@ function createAssistantTurn(options = {}) {
           row.appendChild(box);
           body = box.querySelector('div');
         }
-        body.textContent = text.slice(0, 1200);
+        body.textContent = text.slice(0, 4000);
       }
       const term = bubble.querySelector('.agent-term');
       if (term) api.refreshTermMeta(term);
       if (traceData.length < 60) {
-        traceData.push({ kind: 'thought', label, text: String(text).slice(0, 400) });
+        traceData.push({ kind: 'thought', label, text: String(text).slice(0, 1600) });
       }
     },
 
@@ -1019,13 +1020,13 @@ function createAssistantTurn(options = {}) {
         const summary = document.createElement('summary');
         summary.textContent = 'Что думал';
         const body = document.createElement('div');
-        body.textContent = text.slice(0, 1200);
+        body.textContent = text.slice(0, 4000);
         details.append(summary, body);
         row.appendChild(details);
       }
       api.refreshTermMeta(box);
       if (traceData.length < 60) {
-        traceData.push({ kind: 'thought', label: label, text: text.slice(0, 400) });
+        traceData.push({ kind: 'thought', label: label, text: text.slice(0, 1600) });
       }
       scrollToBottom();
     },
