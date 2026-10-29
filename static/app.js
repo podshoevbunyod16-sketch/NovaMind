@@ -661,6 +661,7 @@ function createAssistantTurn(options = {}) {
 
     /** Смена сцены (search → write) без схлопывания. */
     setStage(scene, title, text) {
+      if (finished) return; // late NDJSON event must not resurrect a closed bubble
       ensureStage(scene, title);
       const sceneEl = stage.querySelector('.stage-scene');
       if (sceneEl) sceneEl.dataset.scene = scene;
@@ -677,6 +678,7 @@ function createAssistantTurn(options = {}) {
      * чтобы порядок «думал → сделал → заметка» не терялся.
      */
     step(icon, text) {
+      if (finished) return;
       const timeline = bubble.querySelector('.agent-term');
       if (timeline && text) {
         const note = document.createElement('div');
@@ -1141,7 +1143,7 @@ function createAssistantTurn(options = {}) {
     },
 
     appendToken(token) {
-      if (!token) return;
+      if (finished || !token) return;
       api.collapseStage();
       api.finishTerm();          // команды показаны — дальше только ответ
       answerText += token;
@@ -1151,6 +1153,7 @@ function createAssistantTurn(options = {}) {
     },
 
     appendText(text) {
+      if (finished) return;
       answerText = text || '';
       answerEl.innerHTML = formatContent(answerText);
       scrollToBottom();

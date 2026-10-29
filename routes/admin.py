@@ -240,12 +240,18 @@ def admin_settings():
     if "provider" in data and data["provider"] in PROVIDERS:
         config.current_provider = data["provider"]
     if "model" in data:
+        from ai_providers import is_free_ai_model
+        selected = None
         for key, pdata in PROVIDERS.items():
             for m in pdata["models"]:
-                if m["id"] == data["model"]:
-                    config.current_provider = key
-                    config.current_model = data["model"]
+                if m["id"] == data["model"] and is_free_ai_model(key, m["id"], m):
+                    selected = (key, m["id"])
                     break
+            if selected:
+                break
+        if selected is None:
+            return jsonify({"error": "Разрешены только бесплатные AI-модели"}), 400
+        config.current_provider, config.current_model = selected
     return jsonify({"success": True})
 
 @admin_bp.route('/api/admin/save_code', methods=['POST'])
