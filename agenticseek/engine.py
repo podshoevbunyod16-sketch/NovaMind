@@ -1174,7 +1174,8 @@ class AgentEngine:
                     "text": "Языковой модели нет — работаю без неё"})
         turn = OfflineTurn(ctx.goal, search=ctx.search, media=ctx.media_generate,
                            media_kind=ctx.media_kind, local_model=ctx.local_model,
-                           emit=self._emit, state=self.state, force_search=ctx.force_search)
+                           emit=self._emit, state=self.state, force_search=ctx.force_search,
+                           history=ctx.history)
         self.answer = turn.run()
         self.state.steps = 1
         self._emit({"type": "step", "icon": "ℹ️",

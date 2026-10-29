@@ -88,7 +88,9 @@ def test_send_stream_emits_real_statuses_then_media(client, gemini_key, monkeypa
     assert kinds[0] == "started"
     assert "progress" in kinds, "должны передаваться реальные шаги запроса"
     assert any(e.get("media") for e in events)
-    assert events[-1] == {"done": True}
+    # Финальный done несёт chat_id — фронтенд по нему привязывает следующие
+    # ходы к этому же диалогу (иначе история разъезжается по двум чатам).
+    assert events[-1].get("done") is True and events[-1].get("chat_id")
 
     # Никакого выдуманного прогресса: только текст статуса и реальное время.
     for event in events:
