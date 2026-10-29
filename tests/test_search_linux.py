@@ -131,6 +131,26 @@ def test_nova_call_is_explained_in_plain_terminal(admin_client, sandbox):
     assert result["code"] == 2 and "шагах агента" in result["stderr"]
 
 
+def test_python_gateway_really_calls_tool_in_terminal(admin_client, sandbox):
+    (sandbox / "gateway.txt").write_text("real output", encoding="utf-8")
+    result = _run(
+        admin_client,
+        "python3 -m novamind_cli call file_read "
+        "'{\"path\":\"gateway.txt\"}'",
+    ).get_json()
+    assert result["code"] == 0
+    assert "real output" in result["stdout"]
+
+
+def test_python_gateway_bad_json_returns_real_error(admin_client, sandbox):
+    result = _run(
+        admin_client,
+        "python3 -m novamind_cli call file_read '{\"path\":}'",
+    ).get_json()
+    assert result["code"] == 2
+    assert "JSON" in result["stderr"]
+
+
 def test_nova_unknown_verb_and_help(admin_client, sandbox, web):
     unknown = _run(admin_client, "nova delete everything").get_json()
     assert unknown["code"] == 2 and "неизвестная команда" in unknown["stderr"]
@@ -264,7 +284,11 @@ def test_search_button_goes_through_linux(google_client, sandbox, monkeypatch, w
     assert events[0]["type"] == "stage" and events[0]["scene"] == "search"
     tools = events_of(events, "tool")
     assert tools[0]["name"] == "web_search"
-    assert tools[0]["command"] == "nova search сколько стоит asyncio?"
+    assert tools[0]["command"] == (
+        "python3 -m novamind_cli call web_search "
+        "'{\"query\":\"сколько стоит asyncio\",\"limit\":5}'"
+    )
+    assert all("nova " not in tool["command"] for tool in tools)
     assert [tool["name"] for tool in tools[1:]] == ["web_open", "web_open", "web_open"]
     assert "sources" in kinds and kinds.index("sources") < kinds.index("token")
 

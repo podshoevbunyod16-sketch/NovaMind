@@ -128,12 +128,17 @@ NOVA_HELP = """Встроенная команда nova (работает чер
   nova web search <запрос>      то же, что nova search (синоним агента)
   nova web open <url>           то же, что nova read (синоним агента)
   nova tools                    список Linux-команд песочницы
-  nova mcp tools                каталог подключённых MCP-инструментов
   nova help                     эта справка
 
+Python gateway для реальных функций, инструментов и MCP:
+  python3 -m novamind_cli tools
+  python3 -m novamind_cli call web_search '{"query":"пример"}'
+  python3 -m novamind_cli mcp tools
+  python3 -m novamind_cli mcp call '{"server_id":"...","tool":"...","arguments":{}}'
+
 Поиск идёт теми же бэкендами, что и поиск в чате (searxng, ddg, wiki, ...),
-поэтому свежие данные доступны и терминалу, и агенту. Внутри блоков `terminal`
-агента дополнительно работают nova call <инструмент> '<payload>' и nova mcp call.
+поэтому свежие данные доступны и терминалу, и агенту. Команды gateway выполняют
+реальный инструмент с текущими правами и возвращают stdout/ошибку, а не анимацию.
 """
 
 HELP_TEXT = """Доступные команды внутри workspace:
@@ -488,7 +493,8 @@ def _nova_tools_text() -> str:
         "",
         "Пайпы и перенаправления: `ls -la | grep txt`, `echo x > note.txt`.",
         "Встроенные: nova search/read/help/tools, nova web search/open, nova mcp tools.",
-        "В блоках `terminal` агента: nova call <инструмент> '<payload>', nova mcp call '<JSON>'.",
+        "Все функции: python3 -m novamind_cli call <tool> '<JSON>'.",
+        "MCP: python3 -m novamind_cli mcp tools/call '<JSON>'.",
     ]
     return "\n".join(lines)
 
@@ -553,6 +559,50 @@ def _run_nova(parts, timeout):
     return _result(2, "", f"nova: неизвестная команда «{verb}». Список: nova help")
 
 
+def _run_python_gateway(parts):
+    """Execute ``python3 -m novamind_cli ...`` through the real tool registry.
+
+    This is a built-in terminal command (like ``nova search``), not a visual
+    simulation.  Running it inside the server keeps the current Flask user,
+    workspace and server-side MCP credentials while still returning a normal
+    process-shaped result: exit code, stdout and stderr.
+    """
+    import json
+    from agenticseek.tools.terminal_commands import _python_command
+    import tool_registry
+
+    try:
+        parsed = _python_command([str(item) for item in parts])
+        if parsed is None:
+            return None
+        target, body = parsed
+        tool_registry.bootstrap_default_tools()
+        if target == "__tools__":
+            payload = {item["name"]: item.get("description", "")
+                       for item in tool_registry.tool_schemas()}
+            return _result(0, json.dumps(payload, ensure_ascii=False, indent=2))
+        if target == "__mcp_tools__":
+            import mcp_registry
+            payload = mcp_registry.connected_tools()
+            return _result(0, json.dumps(payload, ensure_ascii=False, indent=2))
+
+        registry_name = tool_registry.ACTION_TO_TOOL.get(target, target)
+        try:
+            arguments = json.loads(body) if str(body).strip() else {}
+        except ValueError as exc:
+            return _result(2, "", f"invalid JSON: {exc}; исправьте структуру запроса и повторите")
+        if not isinstance(arguments, dict):
+            return _result(2, "", "аргументы должны быть JSON-объектом")
+        result = tool_registry.call_tool(registry_name, **arguments)
+        ok = not (isinstance(result, dict) and result.get("ok") is False)
+        text = json.dumps(result, ensure_ascii=False, indent=2, default=str)
+        return _result(0 if ok else 1, text if ok else "", "" if ok else text)
+    except (ValueError, TypeError) as exc:
+        return _result(2, "", f"novamind_cli: {exc}")
+    except Exception as exc:  # noqa: BLE001 — terminal gets the real error
+        return _result(1, "", f"novamind_cli: {type(exc).__name__}: {exc}")
+
+
 def _sandbox_env():
     """Окружение песочницы: HOME указывает в workspace, git настроен."""
     return {
@@ -585,6 +635,10 @@ def run_command(command, timeout=None, cancel=None):
     ensure_workspace()
     if len(prepared) == 1 and prepared[0][1] == "nova":    # встроенная команда — без subprocess
         return _run_nova(prepared[0][0], timeout)
+    if len(prepared) == 1 and prepared[0][1] in ("python", "python3"):
+        gateway = _run_python_gateway(prepared[0][0])
+        if gateway is not None:
+            return gateway
     timeout = float(timeout or COMMAND_TIMEOUT)
     if not _run_lock.acquire(blocking=False):
         raise RuntimeError("Занято: предыдущая команда ещё выполняется")

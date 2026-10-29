@@ -162,7 +162,7 @@ const RETRACT_STREAM = [
   { type: 'done' },
 ];
 
-// Кнопка «Поиск»: nova search → чтение страниц → ответ со ссылками
+// Кнопка «Поиск»: Python gateway → чтение страниц → ответ со ссылками
 const LINUX_SOURCES = [
   { title: 'Обзор рынка', url: 'https://example.com/a', host: 'example.com' },
   { title: 'Википедия', url: 'https://ru.wikipedia.org/wiki/X', host: 'ru.wikipedia.org' },
@@ -170,9 +170,9 @@ const LINUX_SOURCES = [
 const LINUX_SEARCH_STREAM = [
   { type: 'stage', scene: 'search', title: 'Поищу в интернете', text: 'Ищу через Linux-окружение…' },
   { type: 'step', icon: '🔎', text: 'Нашёл источников: 2 (searxng)' },
-  { type: 'tool', name: 'search', command: 'nova search цена ноутбука', code: 0, output: '[1] Обзор рынка' },
+  { type: 'tool', name: 'search', command: 'python3 -m novamind_cli call web_search \'{"query":"цена ноутбука"}\'', code: 0, output: '[1] Обзор рынка' },
   { type: 'sources', sources: LINUX_SOURCES },
-  { type: 'tool', name: 'open', command: 'nova read https://example.com/a', code: 0, output: 'Текст страницы' },
+  { type: 'tool', name: 'open', command: 'python3 -m novamind_cli call web_open \'{"url":"https://example.com/a"}\'', code: 0, output: 'Текст страницы' },
   { type: 'step', icon: '💾', text: 'Сохранил выдержки: notes/research/2026-09-29-cena-search.md' },
   { type: 'stage', scene: 'write', title: 'Разбираю найденное', text: 'Решаю, хватает ли данных' },
   { type: 'token', token: 'Средняя цена — **12 500 ₽** [1].' },
@@ -1448,12 +1448,14 @@ const searchTurn = lastAi();
 check('кнопка «Поиск» отправляет запрос в Linux-окружение',
   mock.agentRequests[mock.agentRequests.length - 1].search === true
   && mock.agentRequests[mock.agentRequests.length - 1].tools === true);
-check('поиск виден шагами nova search / nova read',
-  searchTurn.querySelector('.agent-term')?.textContent.includes('nova search цена ноутбука') === true
-  && searchTurn.querySelector('.agent-term').textContent.includes('nova read'));
+check('поиск виден реальными Python gateway-командами',
+  searchTurn.querySelector('.agent-term')?.textContent.includes('python3 -m novamind_cli call web_search') === true
+  && searchTurn.querySelector('.agent-term').textContent.includes('python3 -m novamind_cli call web_open'));
 check('источники внутри пузыря', searchTurn.querySelectorAll('.source-item').length === 2,
   String(searchTurn.querySelectorAll('.source-item').length));
 check('ответ напечатан', searchTurn.querySelector('.answer').textContent.includes('12 500'));
+check('панель «Ищу источники» закрыта после ответа',
+  searchTurn.querySelector('.stage')?.classList.contains('lg-hidden') === true);
 check('под ответом «с поиском»', searchTurn.querySelector('.msg-meta').textContent.includes('с поиском'),
   searchTurn.querySelector('.msg-meta').textContent);
 window.setWebSearch(false, true);

@@ -70,6 +70,67 @@ def test_github_mcp_rewrites_search_code_sets_minimal_output_and_calls_get_me_on
     assert calls[2][2].get("minimal_output") is True
 
 
+def test_strict_mcp_uses_python_gateway_and_registry_connections(
+    admin_client, sandbox, tmp_path, monkeypatch
+):
+    """MCP-only request still uses terminal syntax, but never enables shell."""
+    store = tmp_path / "mcp_connections.json"
+    store.write_text(json.dumps({
+        "github-real-id": {
+            "name": "GitHub MCP", "url": "https://mcp.example.test/mcp",
+            "auth": "bearer", "token": "secret", "connected": True,
+            "initialized": True,
+        }
+    }), encoding="utf-8")
+    monkeypatch.setattr(mcp_registry, "STORE", store)
+    monkeypatch.setattr(mcp_registry, "connected_tools", lambda: [
+        {"server_id": "github-real-id", "server_name": "GitHub MCP",
+         "name": "search_repositories", "inputSchema": {"type": "object"}},
+    ])
+    calls = []
+    monkeypatch.setattr(
+        mcp_registry, "call_tool",
+        lambda server_id, tool, arguments=None: calls.append(
+            (server_id, tool, dict(arguments or {}))) or {"items": [{"full_name": "demo/repo"}]},
+    )
+    monkeypatch.setenv("AGENT_CONFIRM", "off")
+    command = (
+        "python3 -m novamind_cli mcp call "
+        "'{\"server_id\":\"github-real-id\",\"tool\":\"search_repositories\","
+        "\"arguments\":{\"query\":\"flask\"}}'"
+    )
+    script(monkeypatch, [f"```terminal\n{command}\n```", "Нашёл demo/repo."])
+
+    events = ndjson(admin_client.post("/api/agent/stream", json={
+        "message": "используй только GitHub MCP и найди flask репозиторий",
+    }))
+
+    assert calls == [
+        ("github-real-id", "get_me", {}),
+        ("github-real-id", "search_repositories", {"query": "flask", "minimal_output": True}),
+    ]
+    tool = events_of(events, "tool")[0]
+    assert tool["name"] == "mcp_call" and tool["command"] == command
+    assert tool["status"] == "ok"
+    assert answer_of(events) == "Нашёл demo/repo."
+    assert any("shell запрещён" in event.get("text", "")
+               for event in events_of(events, "step"))
+
+
+def test_strict_mcp_gateway_refuses_ordinary_shell(admin_client, sandbox, monkeypatch):
+    monkeypatch.setattr(mcp_registry, "connected_tools", lambda: [
+        {"server_id": "github", "name": "search_repositories"},
+    ])
+    monkeypatch.setenv("AGENT_CONFIRM", "off")
+    script(monkeypatch, ["```terminal\nuname -s\n```", "Shell не запускался."])
+    events = ndjson(admin_client.post("/api/agent/stream", json={
+        "message": "используй только GitHub MCP; запусти uname",
+    }))
+    tool = events_of(events, "tool")[0]
+    assert tool["name"] == "terminal" and tool["status"] == "error"
+    assert "shell-команды запрещены" in tool["output"]
+
+
 def test_github_mcp_limits_search_calls_to_three_per_run(admin_client, sandbox, monkeypatch):
     """Не более 3 поисковых вызовов MCP за один запуск агента."""
     search_invocations = []

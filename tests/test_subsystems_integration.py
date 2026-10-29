@@ -183,6 +183,23 @@ def test_multiagent_pattern_is_used_when_enabled(admin_client, monkeypatch):
                for event in events if event["type"] == "step")
 
 
+def test_multi_command_launches_parallel_agents_without_env_setting(admin_client, monkeypatch):
+    monkeypatch.delenv("AGENT_PATTERN", raising=False)
+    seen = []
+    script(monkeypatch, ["Факты исследователя", "Разбор аналитика",
+                         "Общий ответ команды агентов"], seen)
+    events = ndjson(admin_client.post("/api/agent/stream", json={
+        "message": "/multi Как улучшить небольшой Python-проект?"}))
+
+    assert answer_of(events) == "Общий ответ команды агентов"
+    assert len(seen) == 3
+    steps = [str(event.get("text") or "") for event in events if event["type"] == "step"]
+    assert any("Мультиагентный режим: parallel" in text for text in steps)
+    assert any("researcher" in text for text in steps)
+    assert any("analyst" in text for text in steps)
+    assert any("writer" in text for text in steps)
+
+
 def test_pattern_off_keeps_single_agent(admin_client, monkeypatch):
     monkeypatch.setenv("AGENT_PATTERN", "off")
     seen = []

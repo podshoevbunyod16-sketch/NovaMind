@@ -10,6 +10,10 @@ from agenticseek.tools.terminal_commands import parse_command, dispatch
      'mcp_call', '{"server_id":"github","tool":"search"}'),
     ('nova call file_read \'{"path":"README.md"}\'',
      'file_read', '{"path":"README.md"}'),
+    ('python3 -m novamind_cli call file_read \'{"path":"README.md"}\'',
+     'file_read', '{"path":"README.md"}'),
+    ('python -m novamind_cli mcp call \'{"server_id":"github","tool":"search"}\'',
+     'mcp_call', '{"server_id":"github","tool":"search"}'),
 ])
 def test_parse(command, target, body):
     assert parse_command(command) == (target, body)
@@ -19,6 +23,9 @@ def test_parse(command, target, body):
     'nova call terminal ls', 'nova call python print',
     'nova web search query ; rm -rf data', 'nova mcp call \'[]\'',
     'nova call missing',
+    'python3 -m novamind_cli call terminal ls',
+    'python3 -m novamind_cli mcp call \'[]\'',
+    'python3 -m novamind_cli call web_search \'{"query":\'',
 ])
 def test_reject(command):
     with pytest.raises(ValueError):
@@ -39,6 +46,29 @@ def test_delegation_uses_target_policy_path():
     result = dispatch(agent, 'nova mcp call \'{"tool":"push"}\'')
     assert result == (False, 'denied')
     assert calls == [('mcp_call', '{"tool":"push"}')]
+
+
+def test_python_gateway_adapts_json_to_legacy_tool_payloads():
+    calls = []
+    agent = SimpleNamespace(
+        all_tools=lambda: {"web_search": object(), "web_open": object(),
+                           "file_find": object(), "file_write": object()},
+        run_tool=lambda *args: calls.append(args) or (True, "[success] ok"),
+    )
+    assert dispatch(agent, "python3 -m novamind_cli call web_search "
+                           "'{\"query\":\"weather Khujand\"}'")[0] is True
+    assert dispatch(agent, "python3 -m novamind_cli call web_open "
+                           "'{\"url\":\"https://example.com\"}'")[0] is True
+    assert dispatch(agent, "python3 -m novamind_cli call file_find "
+                           "'{\"name\":\"app.py\"}'")[0] is True
+    assert dispatch(agent, "python3 -m novamind_cli call file_write "
+                           "'{\"path\":\"note.txt\",\"content\":\"hello\"}'")[0] is True
+    assert calls == [
+        ("web_search", "weather Khujand"),
+        ("web_open", "https://example.com"),
+        ("file_find", "action=find\nname=app.py"),
+        ("file_write", "hello", "note.txt"),
+    ]
 
 
 def test_unavailable_not_called():

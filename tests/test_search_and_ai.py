@@ -444,8 +444,8 @@ def test_send_fallback_endpoint_works(client, local_runtime):
     assert data["chat_id"]
 
 
-def test_send_reports_error_instead_of_empty_reply(client, monkeypatch):
-    """Если провайдер недоступен — пользователь видит причину, а не пустоту."""
+def test_send_falls_back_instead_of_returning_empty_reply(client, monkeypatch):
+    """Мёртвый провайдер автоматически уступает бесплатной офлайн-модели."""
     monkeypatch.setitem(config.PROVIDERS, "openai_compatible", {
         **config.PROVIDERS["openai_compatible"],
         "url": "http://127.0.0.1:1/v1/chat/completions",
@@ -453,8 +453,9 @@ def test_send_reports_error_instead_of_empty_reply(client, monkeypatch):
     monkeypatch.setattr(config, "current_provider", "openai_compatible")
     monkeypatch.setattr(config, "current_model", "dead-model")
     response = client.post("/send", json={"message": "привет"})
-    assert response.status_code == 502
-    assert response.get_json()["error"]
+    data = response.get_json()
+    assert response.status_code == 200
+    assert data["reply"]
 
 
 def test_ai_status_endpoint_reports_offline_model(client, monkeypatch):

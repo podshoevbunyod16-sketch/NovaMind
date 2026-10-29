@@ -477,9 +477,88 @@ def resolve_target(provider: str = None, model: str = None):
     return provider, model, cfg
 
 
-def chat_completion(messages, provider=None, model=None, system=None,
-                    temperature=0.7, max_tokens=None, timeout=90, extra=None,
-                    tools=None, tool_choice=None):
+FREE_TIER_PROVIDERS = frozenset({
+    "groq", "cerebras", "google_ai_studio", "openai_compatible", "local_demo",
+})
+DEFAULT_FAILOVER_ORDER = (
+    "groq", "google_ai_studio", "cerebras", "openrouter", "pollinations",
+    "openai_compatible", "local_demo",
+)
+
+
+def is_free_ai_model(provider: str, model: str, entry: dict | None = None) -> bool:
+    """Whether a chat target is guaranteed not to select a paid model.
+
+    Groq/Cerebras/Google AI Studio are used only through their free developer
+    tiers in NovaMind. OpenRouter/Pollinations must explicitly mark a model as
+    free (or use the conventional ``:free`` suffix). Local targets are free.
+    """
+    provider = str(provider or "").strip()
+    model_id = str(model or "").strip().lower()
+    item = entry if isinstance(entry, dict) else {}
+    if provider == "google_ai_studio":
+        # Google catalog includes paid-only Pro/preview models. Keep only the
+        # explicit free-tier allowlist maintained in config.py.
+        try:
+            import config
+            allowed = {str(item.get("id") or "").lower()
+                       for item in config.PROVIDERS[provider].get("models", [])
+                       if item.get("free") is True}
+        except Exception:
+            allowed = set()
+        return model_id in allowed
+    if provider in FREE_TIER_PROVIDERS:
+        return True
+    if model_id.endswith(":free"):
+        return True
+    return item.get("free") is True or str(item.get("pricing_status") or "").lower() == "free"
+
+
+def _free_models(provider: str, selected: str = "") -> list[str]:
+    import config
+    configured = list((config.PROVIDERS.get(provider) or {}).get("models") or [])
+    found: list[str] = []
+    if selected and is_free_ai_model(provider, selected):
+        found.append(str(selected))
+    for item in configured:
+        model_id = str(item.get("id") or "").strip() if isinstance(item, dict) else ""
+        if model_id and is_free_ai_model(provider, model_id, item) and model_id not in found:
+            found.append(model_id)
+    # Dynamic providers may have a selected :free model although config.models
+    # is populated from the network only in the settings screen.
+    if selected and str(selected).endswith(":free") and selected not in found:
+        found.insert(0, str(selected))
+    if provider == "local_demo" and not found:
+        found.append("nova-local-1")
+    return found
+
+
+def free_failover_targets(provider: str | None = None, model: str | None = None) -> list[tuple[str, str]]:
+    """Primary target followed by credentialed free alternatives."""
+    import config
+    primary_provider, primary_model, _cfg = resolve_target(provider, model)
+    raw_order = [part.strip() for part in os.getenv("AI_FAILOVER_ORDER", "").split(",") if part.strip()]
+    order = [primary_provider, *(raw_order or DEFAULT_FAILOVER_ORDER)]
+    targets: list[tuple[str, str]] = []
+    for name in order:
+        if name not in config.PROVIDERS or any(p == name for p, _m in targets):
+            continue
+        if (name != primary_provider and name not in {"local_demo", "openai_compatible"}
+                and not config.has_credentials(name)):
+            continue
+        selected = primary_model if name == primary_provider else ""
+        models = _free_models(name, selected)
+        if not models:
+            continue
+        targets.append((name, models[0]))
+    if not any(name == "local_demo" for name, _model in targets):
+        targets.append(("local_demo", "nova-local-1"))
+    return targets
+
+
+def _chat_completion_once(messages, provider=None, model=None, system=None,
+                          temperature=0.7, max_tokens=None, timeout=90, extra=None,
+                          tools=None, tool_choice=None):
     """
     Синхронный запрос к текущей модели.
     Возвращает (text, meta) или (None, error_string).
@@ -546,7 +625,37 @@ def chat_completion(messages, provider=None, model=None, system=None,
                   "usage": data.get("usage") if isinstance(data, dict) else None}
 
 
-def chat_stream(messages, provider=None, model=None, system=None, temperature=0.7,
+def chat_completion(messages, provider=None, model=None, system=None,
+                    temperature=0.7, max_tokens=None, timeout=90, extra=None,
+                    tools=None, tool_choice=None):
+    """Completion with automatic failover across free models only."""
+    failures: list[dict] = []
+    targets = free_failover_targets(provider, model)
+    for index, (target_provider, target_model) in enumerate(targets):
+        text, meta = _chat_completion_once(
+            messages, provider=target_provider, model=target_model, system=system,
+            temperature=temperature, max_tokens=max_tokens, timeout=timeout,
+            extra=extra, tools=tools, tool_choice=tool_choice,
+        )
+        if text is not None:
+            result_meta = dict(meta or {}) if isinstance(meta, dict) else {}
+            result_meta["failover"] = list(failures)
+            result_meta["failover_count"] = len(failures)
+            result_meta["free_model"] = True
+            if failures:
+                logger.warning("AI failover succeeded: %s/%s after %d failure(s)",
+                               target_provider, target_model, len(failures))
+            return text, result_meta
+        failure = {"provider": target_provider, "model": target_model,
+                   "error": str(meta or "неизвестная ошибка")[:500]}
+        failures.append(failure)
+        logger.warning("AI provider failed (%s/%s), trying next free provider: %s",
+                       target_provider, target_model, failure["error"])
+    return None, "Все бесплатные AI-провайдеры недоступны: " + "; ".join(
+        f"{item['provider']}: {item['error']}" for item in failures)
+
+
+def _chat_stream_once(messages, provider=None, model=None, system=None, temperature=0.7,
                 max_tokens=None, timeout=90, reasoning=False, reasoning_effort="low"):
     """
     Потоковый ответ. Генератор кортежей (kind, text), где kind:
@@ -641,6 +750,52 @@ def chat_stream(messages, provider=None, model=None, system=None, temperature=0.
             "сразу сформировала ответ. Включите модель с поддержкой reasoning "
             "(например, gpt-oss-120b), чтобы видеть развёрнутую цепочку мыслей."
         )
+    yield "done", ""
+
+
+def chat_stream(messages, provider=None, model=None, system=None, temperature=0.7,
+                max_tokens=None, timeout=90, reasoning=False, reasoning_effort="low"):
+    """Stream from the first responsive free provider.
+
+    Events are buffered until the first answer token. Thus a provider that
+    times out or returns an empty response can be replaced without leaving a
+    broken bubble or leaking an intermediate error into the user response.
+    Once tokens started, the stream is never replayed through another model to
+    avoid duplicated/mixed answers.
+    """
+    failures: list[str] = []
+    targets = free_failover_targets(provider, model)
+    for target_provider, target_model in targets:
+        pending: list[tuple[str, str]] = []
+        produced_token = False
+        failed = ""
+        for kind, chunk in _chat_stream_once(
+            messages, provider=target_provider, model=target_model, system=system,
+            temperature=temperature, max_tokens=max_tokens, timeout=timeout,
+            reasoning=reasoning, reasoning_effort=reasoning_effort,
+        ):
+            if kind == "error" and not produced_token:
+                failed = str(chunk or "ошибка потока")
+                continue
+            if kind == "token":
+                if not produced_token:
+                    produced_token = True
+                    for buffered in pending:
+                        yield buffered
+                    pending.clear()
+                yield kind, chunk
+            elif kind == "done":
+                continue
+            elif produced_token:
+                yield kind, chunk
+            else:
+                pending.append((kind, chunk))
+        if produced_token:
+            yield "done", ""
+            return
+        failures.append(f"{target_provider}/{target_model}: {failed or 'пустой ответ'}")
+        logger.warning("AI stream failover: %s", failures[-1])
+    yield "error", "Все бесплатные AI-провайдеры недоступны: " + "; ".join(failures)
     yield "done", ""
 
 
@@ -807,7 +962,9 @@ def normalize_model(model, provider):
     pricing = model.get("pricing") or {}
     prompt_price = str(pricing.get("prompt", model.get("prompt_price", "")))
     completion_price = str(pricing.get("completion", model.get("completion_price", "")))
-    is_free = ":free" in model_id or (prompt_price in {"0","0.0","0.000000"} and completion_price in {"0","0.0","0.000000"})
+    is_free = (is_free_ai_model(provider, model_id, model)
+               or (prompt_price in {"0", "0.0", "0.000000"}
+                   and completion_price in {"0", "0.0", "0.000000"}))
     context = model.get("context_length") or model.get("context_window") or model.get("max_context_length") or 0
     architecture = model.get("architecture") or {}
     modality = architecture.get("modality", "text->text") if isinstance(architecture, dict) else "text->text"
@@ -979,6 +1136,10 @@ def fetch_available_models(provider, force=False):
                     and (provider != "groq" or m.get("active", True) is not False)
                 ]
 
+            # NovaMind text chat is free-only: paid/unknown cloud models are
+            # neither shown in settings nor eligible for failover.
+            models = [item for item in models
+                      if is_free_ai_model(provider, item.get("id", ""), item)]
             if models:
                 MODEL_CACHE[provider] = models
                 MODEL_ERRORS.pop(provider, None)
