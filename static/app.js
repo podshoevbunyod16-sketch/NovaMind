@@ -1283,6 +1283,9 @@ function createAssistantTurn(options = {}) {
       if (finished) return;
       finished = true;
       api.collapseStage();
+      // Mobile browsers throttle the delayed collapse timer in background
+      // tabs. Hide immediately so «Ищу источники…» cannot remain after reply.
+      stage.classList.add('lg-hidden');
       api.finishTerm();
       stopTimer();
       wrap.classList.remove('is-working');
@@ -1353,6 +1356,7 @@ function createAssistantTurn(options = {}) {
     fail(message) {
       finished = true;
       api.collapseStage();
+      stage.classList.add('lg-hidden');
       api.finishTerm();
       stopTimer();
       wrap.classList.remove('is-working');
