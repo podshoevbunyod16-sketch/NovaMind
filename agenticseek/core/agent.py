@@ -282,14 +282,22 @@ class Agent:
                        if alias != canonical]
             suffix = f" (старый тег ```{'``` / ```'.join(aliases)}``` тоже работает)" \
                 if aliases else ""
-            lines.append(f"- ```{canonical}``` — {tool.description}{suffix}")
+            if canonical not in {"terminal", "python"} and "terminal" in self.all_tools():
+                lines.append(
+                    f"- ```{canonical}``` — {tool.description}{suffix} Предпочтительный вызов: "
+                    f"в блоке `terminal` командой `python3 -m novamind_cli call {canonical} '<JSON>'`."
+                )
+            else:
+                lines.append(f"- ```{canonical}``` — {tool.description}{suffix}")
         return lines
 
     def _autonomy_lines(self, tags: list[str]) -> list[str]:
         """Подсказки автономного выбора ТОЛЬКО по реально доступным в этом запуске тегам."""
         present = set(tags)
         hints = [
-            "- Сам определяй по смыслу запроса пользователя, какое действие из списка выше нужно, без ожидания подсказок вида «в терминале» или «открой ссылку».",
+            "- Сам определяй по смыслу запроса пользователя, какое действие нужно, и сам сгенерируй Python-команду в блоке terminal.",
+            "- Любой инструмент, кроме обычного Python-кода и shell-команд, вызывай как `python3 -m novamind_cli call <tool> '<JSON>'`; MCP — как `python3 -m novamind_cli mcp call '<JSON>'`.",
+            "- Это не пример и не анимация: команда вернёт реальный [success]/[failure]. При ошибке измени JSON, имена полей или инструмент и пробуй снова до успеха в пределах лимитов.",
         ]
         if "web_open" in present:
             hints.append(
@@ -297,10 +305,10 @@ class Agent:
             )
         if "mcp_call" in present:
             hints.append(
-                "- Запросы к подключённым внешним сервисам → вызывай `mcp_call`, самостоятельно выбирая подходящий `server_id` и `tool`."
+                "- Подключённые сервисы → terminal-команда `python3 -m novamind_cli mcp call '<JSON>'`; самостоятельно выбери `server_id` и `tool`."
             )
         if "web_search" in present:
-            hints.append("- Поиск актуальной информации в интернете → `web_search`.")
+            hints.append("- Актуальные данные → terminal-команда `python3 -m novamind_cli call web_search '<JSON>'`.")
         ws_tags = [t for t in ("file_find", "file_read", "file_write", "file_edit", "terminal", "python") if t in present]
         if ws_tags:
             hints.append("- Локальные файлы песочницы, код и система → " + ", ".join(f"`{t}`" for t in ws_tags) + ".")
@@ -526,8 +534,13 @@ class Agent:
             except Exception:  # noqa: BLE001 — persistence must not stop the run
                 self.logger.warning("run recorder failed")
         err_code = getattr(tool, "last_error_code", None) if not ok else None
+        # A delegated Python gateway call is still the target tool for policy,
+        # metrics and labels, but the UI must show the exact command generated
+        # by the model — not a synthetic payload that looks like an animation.
+        shown_command = (str(getattr(self, "_gateway_command", "") or "").strip()
+                         or _describe(tag, payload, saved))
         self.emit(tool_event(tag, str(payload), ok=ok, saved=saved,
-                             command=_describe(tag, payload, saved),
+                             command=shown_command,
                              output=output, code=0 if ok else (err_code or 1)))
         return ok, feedback
 

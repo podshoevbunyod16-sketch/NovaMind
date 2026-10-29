@@ -10,6 +10,10 @@ from agenticseek.tools.terminal_commands import parse_command, dispatch
      'mcp_call', '{"server_id":"github","tool":"search"}'),
     ('nova call file_read \'{"path":"README.md"}\'',
      'file_read', '{"path":"README.md"}'),
+    ('python3 -m novamind_cli call file_read \'{"path":"README.md"}\'',
+     'file_read', '{"path":"README.md"}'),
+    ('python -m novamind_cli mcp call \'{"server_id":"github","tool":"search"}\'',
+     'mcp_call', '{"server_id":"github","tool":"search"}'),
 ])
 def test_parse(command, target, body):
     assert parse_command(command) == (target, body)
@@ -19,6 +23,9 @@ def test_parse(command, target, body):
     'nova call terminal ls', 'nova call python print',
     'nova web search query ; rm -rf data', 'nova mcp call \'[]\'',
     'nova call missing',
+    'python3 -m novamind_cli call terminal ls',
+    'python3 -m novamind_cli mcp call \'[]\'',
+    'python3 -m novamind_cli call web_search \'{"query":\'',
 ])
 def test_reject(command):
     with pytest.raises(ValueError):

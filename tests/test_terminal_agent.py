@@ -224,6 +224,23 @@ def test_agent_runs_command_then_answers(admin_client, monkeypatch, sandbox):
     assert events[-1]["type"] == "done"
 
 
+def test_agent_python_gateway_executes_real_tool_and_shows_command(
+        admin_client, monkeypatch, sandbox):
+    (sandbox / "gateway.txt").write_text("настоящий вывод", encoding="utf-8")
+    command = ("python3 -m novamind_cli call file_read "
+               "'{\"path\":\"gateway.txt\"}'")
+    script(monkeypatch, [f"```terminal\n{command}\n```", "Файл реально прочитан."])
+
+    events = ndjson(admin_client.post(
+        "/api/agent/stream", json={"message": "прочитай gateway.txt через терминал"}))
+    tool = events_of(events, "tool")[0]
+    assert tool["name"] == "file_read"
+    assert tool["command"] == command
+    assert "настоящий вывод" in tool["output"]
+    assert tool["status"] == "ok"
+    assert answer_of(events) == "Файл реально прочитан."
+
+
 def test_legacy_json_action_is_never_shown_to_user(admin_client, monkeypatch, sandbox):
     """Старый протокол удалён: JSON-действие не попадает в чат как ответ."""
     script(monkeypatch, ['{"action":"answer","text":"Готово, всё работает"}'])
