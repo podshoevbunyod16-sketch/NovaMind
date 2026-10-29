@@ -477,10 +477,11 @@ def resolve_target(provider: str = None, model: str = None):
     return provider, model, cfg
 
 
-def chat_completion(messages, provider=None, model=None, system=None,
-                    temperature=0.7, max_tokens=None, timeout=90, extra=None,
-                    tools=None, tool_choice=None):
+def _chat_completion_once(messages, provider=None, model=None, system=None,
+                          temperature=0.7, max_tokens=None, timeout=90, extra=None,
+                          tools=None, tool_choice=None):
     """
+    Один запрос к ОДНОЙ модели (без автопереключения; см. chat_completion ниже).
     Синхронный запрос к текущей модели.
     Возвращает (text, meta) или (None, error_string).
 
@@ -544,6 +545,181 @@ def chat_completion(messages, provider=None, model=None, system=None,
                   "native_tools": bool(tools_payload),
                   # usage пригодится на этапе счётчика токенов
                   "usage": data.get("usage") if isinstance(data, dict) else None}
+
+
+# ══════════════════════════════════════════════════════════════════
+# АВТОПЕРЕКЛЮЧЕНИЕ МЕЖДУ МОДЕЛЯМИ И ПРОВАЙДЕРАМИ
+#
+# Если выбранная модель упёрлась в лимит, вернула ошибку или пустой ответ,
+# ТОТ ЖЕ запрос уходит следующей модели. Данные агента (результаты поиска,
+# открытые страницы, история) не теряются: они лежат в `messages` у
+# вызывающего кода, а не внутри провайдера — запасная модель получает их
+# целиком (слишком длинные старые сообщения только сжимаются).
+#
+# Порядок: другие модели того же провайдера → остальные провайдеры, у которых
+# есть ключ (groq → google_ai_studio → openrouter → cerebras → pollinations).
+# Исчерпанная модель «отдыхает» (cooldown) и не тратит время на следующих
+# запросах.
+#
+# Настройки (все необязательные):
+#   AI_FAILOVER=0               — выключить автопереключение
+#   AI_FAILOVER_MAX=6           — максимум попыток на один запрос
+#   AI_FAILOVER_BUDGET=150      — общий бюджет времени, секунд
+#   POLLINATIONS_FALLBACK_MODEL — модель Pollinations для запасного маршрута
+# ══════════════════════════════════════════════════════════════════
+
+import threading
+
+_FAILOVER_ORDER = ("groq", "google_ai_studio", "openrouter", "cerebras", "pollinations")
+_FAILOVER_COOLDOWN: dict = {}
+_FAILOVER_LOCK = threading.Lock()
+
+
+def _failover_int(name: str, default: int) -> int:
+    try:
+        return max(0, int(os.getenv(name, str(default))))
+    except (TypeError, ValueError):
+        return default
+
+
+def _failover_classify(error) -> tuple:
+    """(вид, пауза в секундах): лимит / ключ / модель / прочее."""
+    text = str(error or "").lower()
+    if any(h in text for h in ("429", "лимит", "квот", "quota", "rate limit",
+                               "ограничил", "resource_exhausted")):
+        return "limit", 60
+    if any(h in text for h in ("401", "403", "ключ", "api key", "unauthorized",
+                               "не найден в .env")):
+        return "auth", 600
+    if any(h in text for h in ("404", "не найден", "unknown model", "model not found",
+                               "недоступна")):
+        return "model", 600
+    return "error", 20
+
+
+def _failover_cooled(provider: str, model: str) -> bool:
+    now = time.time()
+    with _FAILOVER_LOCK:
+        until = max(_FAILOVER_COOLDOWN.get((provider, model), 0),
+                    _FAILOVER_COOLDOWN.get((provider, "*"), 0))
+    return until > now
+
+
+def _failover_mark(provider: str, model: str, error) -> tuple:
+    kind, seconds = _failover_classify(error)
+    # Неверный ключ — проблема всего провайдера, а не одной модели.
+    key = (provider, "*" if kind == "auth" else model)
+    with _FAILOVER_LOCK:
+        _FAILOVER_COOLDOWN[key] = time.time() + seconds
+    return kind, seconds
+
+
+def _failover_shrink(messages, max_chars: int = 60000):
+    """Для запасной модели с меньшим окном: сжимаем СТАРЫЕ длинные сообщения.
+
+    Последние 4 сообщения и system остаются целыми, поэтому свежие результаты
+    поиска и вопрос пользователя доходят без потерь.
+    """
+    msgs = list(messages or [])
+
+    def size(item):
+        content = item.get("content") if isinstance(item, dict) else None
+        return len(content) if isinstance(content, str) else 0
+
+    if sum(size(m) for m in msgs) <= max_chars:
+        return msgs
+    keep_from = max(0, len(msgs) - 4)
+    out = []
+    for index, item in enumerate(msgs):
+        if (index < keep_from and isinstance(item, dict) and item.get("role") != "system"
+                and isinstance(item.get("content"), str) and len(item["content"]) > 3000):
+            text = item["content"]
+            item = dict(item)
+            item["content"] = text[:1800] + "\n...[сокращено для запасной модели]...\n" + text[-900:]
+        out.append(item)
+    return out
+
+
+def _failover_chain(provider=None, model=None) -> list:
+    """Список (провайдер, модель) в порядке попыток; первая — выбранная."""
+    import config
+    primary_provider, primary_model, primary_cfg = resolve_target(provider, model)
+    chain = [(primary_provider, primary_model)]
+    if primary_provider == "local_demo":
+        return chain
+    if primary_provider != "openai_compatible":
+        for item in (primary_cfg.get("models") or [])[:3]:
+            model_id = item.get("id") if isinstance(item, dict) else None
+            if model_id and (primary_provider, model_id) not in chain:
+                chain.append((primary_provider, model_id))
+    for name in _FAILOVER_ORDER:
+        if name == primary_provider or not config.has_credentials(name):
+            continue
+        if name == "pollinations":
+            model_id = (os.getenv("POLLINATIONS_FALLBACK_MODEL") or "").strip() or None
+        else:
+            models = (config.PROVIDERS.get(name) or {}).get("models") or []
+            model_id = models[0].get("id") if models and isinstance(models[0], dict) else None
+        if model_id and (name, model_id) not in chain:
+            chain.append((name, model_id))
+    return chain
+
+
+def chat_completion(messages, provider=None, model=None, system=None,
+                    temperature=0.7, max_tokens=None, timeout=90, extra=None,
+                    tools=None, tool_choice=None):
+    """
+    Запрос к модели с автопереключением. Возвращает (text, meta) или (None, error).
+
+    Контракт тот же, что у прежней chat_completion. Дополнительно в meta при
+    переключении: ``failover`` — список неудачных попыток
+    ``[{provider, model, error, kind}]``, ``requested_provider`` и
+    ``requested_model`` — что было выбрано изначально. ``meta["provider"]`` и
+    ``meta["model"]`` — кто реально ответил.
+    """
+    kwargs = dict(system=system, temperature=temperature, max_tokens=max_tokens,
+                  timeout=timeout, extra=extra, tools=tools, tool_choice=tool_choice)
+    if os.getenv("AI_FAILOVER", "1") != "1":
+        return _chat_completion_once(messages, provider=provider, model=model, **kwargs)
+
+    import config
+    chain = _failover_chain(provider, model)
+    live = [item for item in chain if not _failover_cooled(*item)] or chain[:1]
+    limit = _failover_int("AI_FAILOVER_MAX", 6) or 1
+    deadline = time.time() + max(1, _failover_int("AI_FAILOVER_BUDGET", 150))
+    attempts = []
+
+    for index, (prov, mod) in enumerate(live[:limit]):
+        if index and time.time() > deadline:
+            break
+        call = dict(kwargs)
+        payload_messages = messages
+        if (prov, mod) != chain[0]:
+            # Параметры, подобранные под выбранную модель, запасной могут не понять.
+            call["extra"] = None
+            payload_messages = _failover_shrink(messages)
+        cap = int((config.PROVIDERS.get(prov) or {}).get("max_tokens") or 0)
+        if call.get("max_tokens") and cap:
+            call["max_tokens"] = min(int(call["max_tokens"]), cap)
+        try:
+            text, meta = _chat_completion_once(payload_messages, provider=prov, model=mod, **call)
+        except Exception as exc:  # noqa: BLE001 — слой провайдера внешний
+            logger.warning("Сбой модели %s/%s", prov, mod, exc_info=True)
+            text, meta = None, f"{type(exc).__name__}: {exc}"
+        if text is not None:
+            if isinstance(meta, dict) and (attempts or (prov, mod) != chain[0]):
+                meta["failover"] = attempts
+                meta["requested_provider"], meta["requested_model"] = chain[0]
+            return text, meta
+        kind, seconds = _failover_mark(prov, mod, meta)
+        attempts.append({"provider": prov, "model": mod, "error": str(meta), "kind": kind})
+        logger.warning("Модель %s/%s не ответила (%s, пауза %ss): %s — пробую следующую",
+                       prov, mod, kind, seconds, str(meta)[:200])
+
+    if len(attempts) <= 1:
+        return None, (attempts[0]["error"] if attempts else "Нет доступных моделей")
+    details = "; ".join(f"{a['provider']}/{a['model']}: {a['error'][:160]}" for a in attempts)
+    return None, f"Все модели недоступны ({len(attempts)} попыток): {details}"
 
 
 def chat_stream(messages, provider=None, model=None, system=None, temperature=0.7,
