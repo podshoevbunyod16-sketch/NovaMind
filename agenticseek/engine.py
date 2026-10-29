@@ -756,15 +756,18 @@ class AgentEngine:
         if ctx.strict_mcp:
             only = {tag: tool for tag, tool in shared.items() if tag == "mcp_call"}
             if only:
-                shared = only
-                # В строгом режиме реально доступен только mcp_call — список
-                # «вспомнил инструменты» должен быть честным.
-                self.recalled_tools = ["mcp_call"]
+                # Модель должна использовать тот же Python-command подход, но
+                # обычный Bash в строгом режиме давать нельзя. Ограниченный
+                # terminal пропускает только novamind_cli → mcp_call; любой
+                # другой ввод заканчивается [failure] без запуска subprocess.
+                from agenticseek.tools.terminal_commands import McpGatewayTerminal
+                shared = {**only, "terminal": McpGatewayTerminal()}
+                self.recalled_tools = ["mcp_call", "terminal"]
                 for agent in agents:
                     if agent.role != "talk":
                         agent.tools = dict(shared)
                 self._emit({"type": "step", "icon": "🔒",
-                            "text": "Строгий режим MCP: доступен только mcp_call"})
+                            "text": "Строгий режим MCP: доступен Python gateway к mcp_call; shell запрещён"})
             else:
                 self._emit({"type": "step", "icon": "⚠️",
                             "text": "MCP не подключён: строгий режим снят, работаю обычными "

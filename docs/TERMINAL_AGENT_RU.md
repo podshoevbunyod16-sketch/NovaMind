@@ -56,9 +56,15 @@ python3 -m novamind_cli mcp tools
 python3 -m novamind_cli mcp call '{"server_id":"github","tool":"search_repositories","arguments":{"query":"NovaMind"}}'
 ```
 
-Имена MCP-сервера и инструмента берутся из доступного каталога. Любой инструмент
-текущего исполнителя доступен через `python3 -m novamind_cli call <имя>
-'<JSON>'`, например:
+Имена MCP-сервера и инструмента берутся из доступного каталога. Каталог и
+учётные данные загружает `mcp_registry.py` из файла, заданного
+`MCP_CONNECTIONS_FILE` (по умолчанию это защищённый `mcp_connections.json`, а
+не Python-файл). Модель не получает токены и не придумывает подключения.
+В строгом MCP-режиме ей доступен только ограниченный terminal gateway:
+`novamind_cli mcp`; обычные shell-команды через него не запускаются.
+
+Любой инструмент текущего исполнителя доступен через
+`python3 -m novamind_cli call <имя> '<JSON>'`, например:
 
 ```terminal
 python3 -m novamind_cli call file_read '{"path":"README.md"}'

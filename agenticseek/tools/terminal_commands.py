@@ -17,8 +17,45 @@ from __future__ import annotations
 import json
 import shlex
 
+from agenticseek.tools.tools import Tools
+
 MODULE = "novamind_cli"
 PYTHON_PROGRAMS = {"python", "python3"}
+
+
+class McpGatewayTerminal(Tools):
+    """Terminal facade for strict MCP mode; it cannot execute shell commands.
+
+    :class:`Agent` intercepts a valid ``novamind_cli mcp`` command before this
+    object runs and delegates it to ``mcp_call``. Any ordinary Bash/Python
+    command reaches :meth:`execute` and is refused, preserving strict MCP's
+    promise that no workspace or shell capability is available.
+    """
+
+    tag = "terminal"
+    aliases = ("bash",)
+    name = "MCP Python gateway"
+    description = (
+        "Только MCP через `python3 -m novamind_cli mcp tools` или "
+        "`python3 -m novamind_cli mcp call '<JSON>'`; shell-команды запрещены."
+    )
+    risk = "safe"
+    saved_path = ""
+    last_error_code = None
+
+    @staticmethod
+    def execute(_payload: str) -> str:
+        return ("[failure] Строгий режим MCP: обычные shell-команды запрещены. "
+                "Используй python3 -m novamind_cli mcp call '<JSON>'.")
+
+    @staticmethod
+    def execution_failure_check(output: str) -> bool:
+        return str(output or "").lstrip().startswith("[failure]")
+
+    @staticmethod
+    def interpreter_feedback(output: str) -> str:
+        return str(output or "")
+
 
 HELP = """Единый командный интерфейс (блок terminal).
 ВСЕ функции NovaMind (поиск, MCP, память, задачи, медиа и инструменты) вызывай
