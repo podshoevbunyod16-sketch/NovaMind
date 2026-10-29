@@ -115,11 +115,16 @@
     let result = {};
     let failure = null;
     const endpoint = coding ? '/api/agent/coding/stream' : '/api/agent/stream';
+    // chat_id открытого диалога — сервер пишет ходы в него же (иначе агент,
+    // поиск и обычный чат разъезжаются по разным серверным чатам).
+    const chatRef = (typeof window.serverChatRequest === 'function')
+      ? window.serverChatRequest() : {};
     try {
       const response = await fetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message, search, tools, reasoning: !!options.reasoning }),
+        body: JSON.stringify({ message, search, tools, reasoning: !!options.reasoning,
+                               ...chatRef }),
         signal: controller.signal,
       });
       state.runId = response.headers?.get?.('X-Agent-Run-Id') || '';

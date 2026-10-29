@@ -371,7 +371,8 @@ def test_search_stream_recovers_when_stream_dies_midway(client, monkeypatch, moc
         raise ConnectionError("провайдер закрыл соединение")
 
     monkeypatch.setattr(search_routes, "chat_stream", dying_stream)
-    monkeypatch.setattr(search_routes, "build_search_query", lambda message: "цены 2026")
+    monkeypatch.setattr(search_routes, "build_search_query",
+                        lambda message, history=None: "цены 2026")
 
     events = _read_ndjson(client.post("/api/auto_search_stream", json={"message": "сколько стоит?", "force": True}))
     types = [event["type"] for event in events]
@@ -392,7 +393,8 @@ def test_search_stream_falls_back_to_sources_when_model_is_dead(client, monkeypa
     monkeypatch.setattr(search_routes, "chat_stream", dead_stream)
     monkeypatch.setattr(search_routes, "chat_completion",
                         lambda messages, **kwargs: (None, "HTTP 503: upstream unavailable"))
-    monkeypatch.setattr(search_routes, "build_search_query", lambda message: "цены 2026")
+    monkeypatch.setattr(search_routes, "build_search_query",
+                        lambda message, history=None: "цены 2026")
 
     events = _read_ndjson(client.post("/api/auto_search_stream", json={"message": "сколько стоит?", "force": True}))
     result = next(event for event in events if event["type"] == "result")

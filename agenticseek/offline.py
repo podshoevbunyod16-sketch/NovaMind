@@ -45,7 +45,7 @@ class OfflineTurn:
     """
 
     def __init__(self, goal, search=None, media=None, media_kind="", local_model=None,
-                 emit=None, state=None, force_search=False):
+                 emit=None, state=None, force_search=False, history=None):
         self.goal = str(goal or "")
         self.search = search
         self.media = media
@@ -54,6 +54,23 @@ class OfflineTurn:
         self.emit = emit or (lambda event: None)
         self.state = state
         self.force_search = bool(force_search)
+        #: Предыдущие реплики диалога — без них уточнение («а сколько он
+        #: весит?») уходит в офлайн-модель вслепую и ответ получается ни о чём.
+        self.history = list(history or [])
+
+    def _messages(self) -> list:
+        """История (хвост, с ограничением длины) + текущий запрос."""
+        messages = []
+        for item in self.history[-6:]:
+            if not isinstance(item, dict):
+                continue
+            content = str(item.get("content") or "").strip()
+            if not content:
+                continue
+            role = item.get("role") or "user"
+            messages.append({"role": role, "content": content[:1200]})
+        messages.append({"role": "user", "content": self.goal})
+        return messages
 
     def run(self) -> str:
         if self.media_kind:
@@ -88,6 +105,14 @@ class OfflineTurn:
 
     def _search_answer(self) -> str:
         query = _search_query(self.goal)
+        # Уточнение («а какой у неё размер?») без контекста даёт мусорный
+        # запрос — добавляем предыдущую реплику пользователя в поиск.
+        for item in reversed(self.history):
+            if isinstance(item, dict) and item.get("role") == "user":
+                context = str(item.get("content") or "").strip()[:150]
+                if context and context.lower() not in query.lower():
+                    query = f"{context} {query}"
+                break
         self.emit({"type": "stage", "scene": "search", "title": "Поиск в интернете",
                    "text": query})
         try:
@@ -125,7 +150,7 @@ class OfflineTurn:
         if self.local_model is None:
             return "Офлайн-ответ недоступен."
         try:
-            return str(self.local_model([{"role": "user", "content": self.goal}]) or "").strip()
+            return str(self.local_model(self._messages()) or "").strip()
         except Exception as error:  # noqa: BLE001
             log.warning("local model failed: %s", type(error).__name__)
             return "Офлайн-ответ недоступен: локальная модель вернула ошибку."

@@ -39,7 +39,7 @@ from agenticseek.policy import clip  # noqa: F401  (обрезка текста 
 from agenticseek.core.prompt_paths import prompt_path  # noqa: F401 (документация/тесты)
 import prompt_registry
 import telemetry
-from agenticseek.engine import AgentEngine, EngineContext
+from agenticseek.engine import AGENT_MAX_TOKENS, AgentEngine, EngineContext
 from agenticseek.router import looks_complex  # noqa: F401 (реэкспорт для тестов)
 from agenticseek.state import RunState  # noqa: F401
 from agenticseek.tools import sandbox
@@ -285,10 +285,11 @@ def _looks_complete_answer(text):
         return True                     # ответ закончился знаком препинания
     words = re.findall(r"[A-Za-zА-Яа-яЁё]+", text)
     if words and words[-1].lower() in _TRUNCATED_WORDS:
-        # Служебное слово на конце подозрительно только тогда, когда в самом
-        # хвосте нет ни одного законченного предложения.
-        if not re.search(r"[.!?…]", text[-80:]):
-            return False
+        # Не заканчивается знаком предложения (проверка хвоста выше уже
+        # прошла мимо) и последнее слово — служебное: «… провайдера ИИ. и».
+        # Законченное предложение ПРЯМО перед висящим союзом не спасает —
+        # иначе длинный оборванный на лимите ответ проходил бы как готовый.
+        return False
     return True
 
 
@@ -437,6 +438,32 @@ def request_tools_allowed(data) -> bool:
         if key in (data or {}):
             return _bool_flag(data[key], default=True)
     return True
+
+
+def bind_client_chat(data) -> None:
+    """Привязывает сессию к чату, который открыт в интерфейсе.
+
+    Фронтенд шлёт ``chat_id`` каждого хода (агент, поиск, обычный чат):
+
+    * ключа нет (Telegram, curl, старые клиенты) — сессия не трогается;
+    * ``chat_id: null`` — «новый диалог»: сессионный чат сбрасывается,
+      следующий ход начинает чистую историю;
+    * валидный id — привязываемся: ходы из разных путей (агент, поиск,
+      /send) и из разных вкладок складываются в ОДИН диалог, а после
+      перезагрузки история восстанавливается из базы, а не из пустоты.
+    """
+    if not isinstance(data, dict) or "chat_id" not in data:
+        return
+    chat_id = str(data.get("chat_id") or "").strip()
+    if not chat_id:
+        session.pop("chat_id", None)
+        return
+    try:
+        from database import chat_allowed
+        if chat_allowed(chat_id):
+            session["chat_id"] = chat_id
+    except Exception:  # noqa: BLE001 — без базы работаем как раньше, через сессию
+        log.debug("client chat binding failed", exc_info=True)
 
 
 def strip_think(text):
@@ -606,16 +633,22 @@ def _turn_history(history_key, limit=10):
     Источник истины — SQLite: обычный чат и агент теперь пишут в одну историю,
     поэтому после перезагрузки страницы агент помнит разговор. Кеш в сессии
     остаётся запасным путём, если база недоступна.
+
+    Важно: кеш НЕ подмешивается, когда база работает, а чат просто новый
+    (после «Нового диалога» или chat_id: null) — иначе реплики прошлого
+    чата приклеивались к новому, и диалоги смешивались.
     """
     chat_id = None
     prior = []
+    db_ok = False
     try:
         import database
         chat_id = database.get_or_create_session_chat()
         prior = database.get_chat_history(chat_id, limit=limit)
+        db_ok = True
     except Exception:
         chat_id = None
-    if not prior:
+    if not db_ok:
         cached = _AGENT_HISTORY_CACHE.get(history_key, session.get("agent_history", []))
         prior = cached if isinstance(cached, list) else []
     clean = []
@@ -1085,6 +1118,11 @@ def _run_tool_scope(*, tools_allowed: bool, use_tools: bool, signed: bool,
                       "skill_create"])
     if admin:
         scope.extend(["mcp_call", "schedule"])
+    elif str(os.getenv("MCP_ALLOW_USER_READ", "0")).strip() == "1":
+        # Флаг MCP_ALLOW_USER_READ возвращает обычным ролям чтение через
+        # MCP (так же, как в простом чате): без этой строки он действовал
+        # только в /send, а агентный ход молча отбрасывал mcp_call.
+        scope.append("mcp_call")
     scope.extend(kind for kind, ready in (media_ready or {}).items() if ready)
     return sorted(set(scope))
 
@@ -1188,6 +1226,8 @@ def agent_stream():
         return jsonify({"error": "Пустое сообщение"}), 400
     if not is_enabled():
         return jsonify({"error": "Агентный режим выключен (AGENT_ENABLED=1)"}), 403
+    # Чат из интерфейса: следующий _turn_history читает и пишет ЕГО историю.
+    bind_client_chat(data)
 
     # 1. Ограждение входа: нормализация текста и отказ от инъекций.
     guard_in = guardrails.check_input(goal)
