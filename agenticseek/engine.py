@@ -966,8 +966,11 @@ class AgentEngine:
         if pattern not in PATTERNS:
             return False
         resolved = choose_pattern(ctx.goal) if pattern == "auto" else pattern
-        # Короткий разговорный запрос не требует нескольких ролей даже при
-        # включённом паттерне: цена важнее «красоты» схемы.
+        # Явный /multi или принудительный AGENT_PATTERN должен сработать даже
+        # для короткого вопроса. В auto несколько ролей запускаются только для
+        # действительно сложной задачи, чтобы не тратить free-tier квоты зря.
+        if pattern != "auto":
+            return resolved in ("sequential", "parallel", "critic", "router")
         return bool(looks_complex(ctx.goal)) or resolved == "critic"
 
     def _run_orchestrated(self) -> None:

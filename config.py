@@ -121,9 +121,9 @@ PROVIDERS = {
             "Content-Type": "application/json"
         },
         "models": [
-            {"id": "openai/gpt-oss-120b", "name": "GPT-OSS 120B"},
-            {"id": "openai/gpt-oss-20b", "name": "GPT-OSS 20B"},
-            {"id": "qwen/qwen3.8-27b", "name": "Qwen 3.8 27B"},
+            {"id": "openai/gpt-oss-120b", "name": "GPT-OSS 120B", "free": True},
+            {"id": "openai/gpt-oss-20b", "name": "GPT-OSS 20B", "free": True},
+            {"id": "qwen/qwen3.8-27b", "name": "Qwen 3.8 27B", "free": True},
         ]
     },
     "cerebras": {
@@ -134,9 +134,9 @@ PROVIDERS = {
             "Content-Type": "application/json"
         },
         "models": [
-            {"id": "qwen-3-235b-a22b-instruct-2507",    "name": "Qwen 3 235B"},
-            {"id": "zai-glm-4.7",                        "name": "Z.ai GLM 4.7"},
-            {"id": "deepseek-r1-distill-llama-70b",      "name": "DeepSeek R1 Distill 70B"},
+            {"id": "qwen-3-235b-a22b-instruct-2507", "name": "Qwen 3 235B", "free": True},
+            {"id": "zai-glm-4.7", "name": "Z.ai GLM 4.7", "free": True},
+            {"id": "deepseek-r1-distill-llama-70b", "name": "DeepSeek R1 Distill 70B", "free": True},
         ]
     },
     "openrouter": {
@@ -149,8 +149,8 @@ PROVIDERS = {
             "X-Title": "NovaMind AI",
         },
         "models": [
-            {"id": "google/gemini-2.0-flash-001",        "name": "Gemini 2.0 Flash (Free)"},
-            {"id": "deepseek/deepseek-chat-v3-0324",     "name": "DeepSeek R1 (Free)"},
+            {"id": "google/gemini-2.0-flash-exp:free", "name": "Gemini 2.0 Flash (Free)", "free": True},
+            {"id": "deepseek/deepseek-chat-v3-0324:free", "name": "DeepSeek Chat V3 (Free)", "free": True},
         ]
     },
     "google_ai_studio": {
@@ -160,10 +160,9 @@ PROVIDERS = {
             "Content-Type": "application/json"
         },
         "models": [
-            {"id": "gemini-2.0-flash",      "name": "Gemini 2.0 Flash"},
-            {"id": "gemini-2.0-flash-lite", "name": "Gemini 2.0 Flash Lite"},
-            {"id": "gemini-1.5-flash",      "name": "Gemini 1.5 Flash"},
-            {"id": "gemini-1.5-pro",        "name": "Gemini 1.5 Pro"},
+            {"id": "gemini-2.0-flash", "name": "Gemini 2.0 Flash (free tier)", "free": True},
+            {"id": "gemini-2.0-flash-lite", "name": "Gemini 2.0 Flash Lite (free tier)", "free": True},
+            {"id": "gemini-1.5-flash", "name": "Gemini 1.5 Flash (free tier)", "free": True},
         ]
     },
     "pollinations": {
@@ -198,7 +197,8 @@ PROVIDERS = {
         "url": "local://novamind/offline",
         "max_tokens": 4096,
         "headers": {},
-        "models": [{"id": "nova-local-1", "name": "Nova Local 1 (офлайн)", "context_length": 8192}],
+        "models": [{"id": "nova-local-1", "name": "Nova Local 1 (офлайн)",
+                    "context_length": 8192, "free": True}],
     },
 }
 

@@ -345,6 +345,17 @@ def strict_mcp_request(text: str) -> bool:
     return bool(explicit or named_service)
 
 
+_MULTIAGENT_HINT = re.compile(
+    r"(?i)(?:^\s*/multi\b|мультиагент\w*|нескольк\w*\s+(?:ии[- ]?)?агент\w*|"
+    r"спроси\s+нескольк\w*\s+агент\w*|команд\w*\s+агент\w*|multi[- ]?agent)"
+)
+
+
+def requested_multiagent_pattern(text: str) -> str:
+    """Explicit user request for several independent agents + synthesis."""
+    return "parallel" if _MULTIAGENT_HINT.search(str(text or "")) else ""
+
+
 def requested_media_kind(text: str):
     """Вид медиа, если пользователь ЯВНО просит сгенерировать картинку/видео/аудио.
 
@@ -1195,6 +1206,11 @@ def agent_stream():
         log.info("вход отклонён ограждением: %s", ",".join(guard_in.reasons))
         return _refusal_response(guard_in, goal)
     goal = guard_in.text
+    requested_pattern = requested_multiagent_pattern(goal)
+    if requested_pattern and re.match(r"(?i)^\s*/multi\b", goal):
+        goal = re.sub(r"(?i)^\s*/multi\b\s*", "", goal).strip()
+        if not goal:
+            return jsonify({"error": "После /multi укажите вопрос"}), 400
 
     import security
     signed = signed_in()
@@ -1260,7 +1276,7 @@ def agent_stream():
                                                role=role, tools=tool_scope)
 
     # 3. Трасса: один ход — одна трасса, со всеми шагами и решениями.
-    pattern = (os.getenv("AGENT_PATTERN") or "off").strip().lower()
+    pattern = requested_pattern or (os.getenv("AGENT_PATTERN") or "off").strip().lower()
     trace = telemetry.start_trace(
         "agent.turn", run_id=run_id, chat_id=chat_id or "", provider=provider,
         model=model, engine="agenticseek", role=role, tools=use_tools,
