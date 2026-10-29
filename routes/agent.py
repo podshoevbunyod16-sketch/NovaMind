@@ -84,7 +84,7 @@ AGENT_TIMEOUT = max(10.0, float(os.getenv("AGENT_TIMEOUT", "180")))
 STEP_TIMEOUT = float(os.getenv("AGENT_STEP_TIMEOUT", "12"))
 MAX_OBSERVATION = 6000
 MAX_SOURCES = 12
-
+AGENT_MAX_TOKENS = 4096  # или другое подходящее значение
 #: Имена, которые остались ради совместимости с прежним кодом.
 action_risk = policy.risk_of
 confirmation_needed = policy.needs_confirmation
@@ -1218,8 +1218,7 @@ def agent_stream():
     # Один ответ агента должен влезать в лимит провайдера, но не быть 1200
     # токенов: на таком потолке модель обрывалась на полуслове, а фильтр
     # полноты ответа отбрасывал весь текст (пользователь видел одну строку).
-    answer_tokens = max(1024, min(AGENT_MAX_TOKENS,
-                                   int(_cfg.get("max_tokens") or AGENT_MAX_TOKENS)))
+    answer_tokens = max(1024, min(AGENT_MAX_TOKENS, int(_cfg.get("max_tokens") or AGENT_MAX_TOKENS)))
     tools_allowed = request_tools_allowed(data)
     use_tools = tools_enabled() and tools_allowed
     strict_mcp = strict_mcp_request(goal) if tools_allowed else False
