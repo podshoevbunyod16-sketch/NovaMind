@@ -17,8 +17,45 @@ from __future__ import annotations
 import json
 import shlex
 
+from agenticseek.tools.tools import Tools
+
 MODULE = "novamind_cli"
 PYTHON_PROGRAMS = {"python", "python3"}
+
+
+class McpGatewayTerminal(Tools):
+    """Terminal facade for strict MCP mode; it cannot execute shell commands.
+
+    :class:`Agent` intercepts a valid ``novamind_cli mcp`` command before this
+    object runs and delegates it to ``mcp_call``. Any ordinary Bash/Python
+    command reaches :meth:`execute` and is refused, preserving strict MCP's
+    promise that no workspace or shell capability is available.
+    """
+
+    tag = "terminal"
+    aliases = ("bash",)
+    name = "MCP Python gateway"
+    description = (
+        "Только MCP через `python3 -m novamind_cli mcp tools` или "
+        "`python3 -m novamind_cli mcp call '<JSON>'`; shell-команды запрещены."
+    )
+    risk = "safe"
+    saved_path = ""
+    last_error_code = None
+
+    @staticmethod
+    def execute(_payload: str) -> str:
+        return ("[failure] Строгий режим MCP: обычные shell-команды запрещены. "
+                "Используй python3 -m novamind_cli mcp call '<JSON>'.")
+
+    @staticmethod
+    def execution_failure_check(output: str) -> bool:
+        return str(output or "").lstrip().startswith("[failure]")
+
+    @staticmethod
+    def interpreter_feedback(output: str) -> str:
+        return str(output or "")
+
 
 HELP = """Единый командный интерфейс (блок terminal).
 ВСЕ функции NovaMind (поиск, MCP, память, задачи, медиа и инструменты) вызывай
@@ -124,6 +161,41 @@ def parse_command(payload: str):
     raise ValueError("Некорректная nova-команда. Используйте Python gateway; один вызов на блок.")
 
 
+def _delegated_input(target: str, body: str) -> tuple[str, str | None]:
+    """Translate gateway JSON into the legacy payload expected by a tool.
+
+    AgenticSeek tools predate the JSON CLI: web tools expect a bare string and
+    ``file_write`` expects content plus a save path.  Without this adapter a
+    perfectly valid command searched literally for ``{\"query\": ...}`` and
+    file creation always failed.  Other tools already consume JSON directly.
+    """
+    data = json.loads(body)
+    if target == "web_search":
+        query = str(data.get("query") or data.get("q") or "").strip()
+        if not query:
+            raise ValueError("web_search: нужен query")
+        return query, None
+    if target == "web_open":
+        url = str(data.get("url") or data.get("href") or "").strip()
+        if not url:
+            raise ValueError("web_open: нужен url")
+        return url, None
+    if target in {"file_find", "file_finder"}:
+        name = str(data.get("name") or data.get("path") or data.get("file") or "").strip()
+        if not name:
+            raise ValueError("file_find: нужен name или path")
+        action = str(data.get("action") or "find").strip()
+        return f"action={action}\nname={name}", None
+    if target == "file_write":
+        path = str(data.get("path") or data.get("name") or data.get("file") or "").strip()
+        if not path:
+            raise ValueError("file_write: нужен path")
+        if "content" not in data:
+            raise ValueError("file_write: нужен content")
+        return str(data.get("content") or ""), path
+    return body, None
+
+
 def _catalog_step(agent, payload: str, feedback: str):
     """Show catalog lookup as an actually completed terminal step."""
     from agenticseek.timeline import tool_event
@@ -175,10 +247,23 @@ def dispatch(agent, payload: str):
     # The target still executes in its normal policy path.  This marker only
     # changes what the timeline displays: users see the exact generated Python
     # command rather than a synthetic JSON animation.
+    try:
+        if str(payload).lstrip().startswith(("python -m novamind_cli",
+                                            "python3 -m novamind_cli")):
+            delegated_body, save_path = _delegated_input(target, body)
+        else:  # legacy `nova call/web` payloads keep their historical format
+            delegated_body, save_path = body, None
+    except (ValueError, TypeError) as exc:
+        return False, (f"[failure] {exc}. Исправь JSON и вызови новую Python-команду; "
+                       "не повторяй неудачный запрос дословно.")
+
     previous = getattr(agent, "_gateway_command", "")
     agent._gateway_command = str(payload).strip()
     try:
-        ok, feedback = agent.run_tool(target, body)
+        if save_path is None:
+            ok, feedback = agent.run_tool(target, delegated_body)
+        else:
+            ok, feedback = agent.run_tool(target, delegated_body, save_path)
     finally:
         agent._gateway_command = previous
     if (not ok and str(feedback).lstrip().startswith("[failure]")

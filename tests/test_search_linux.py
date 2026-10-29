@@ -284,7 +284,11 @@ def test_search_button_goes_through_linux(google_client, sandbox, monkeypatch, w
     assert events[0]["type"] == "stage" and events[0]["scene"] == "search"
     tools = events_of(events, "tool")
     assert tools[0]["name"] == "web_search"
-    assert tools[0]["command"] == "nova search сколько стоит asyncio?"
+    assert tools[0]["command"] == (
+        "python3 -m novamind_cli call web_search "
+        "'{\"query\":\"сколько стоит asyncio\",\"limit\":5}'"
+    )
+    assert all("nova " not in tool["command"] for tool in tools)
     assert [tool["name"] for tool in tools[1:]] == ["web_open", "web_open", "web_open"]
     assert "sources" in kinds and kinds.index("sources") < kinds.index("token")
 

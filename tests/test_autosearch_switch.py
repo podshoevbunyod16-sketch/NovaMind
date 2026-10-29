@@ -198,7 +198,10 @@ def test_autosearch_on_runs_linux_command_steps(admin_client, sandbox, monkeypat
     }))
 
     tools = events_of(events, "tool")
-    assert [tool["name"] for tool in tools][:2] == ["terminal", "terminal"], tools
+    assert tools[0]["name"] == "web_search" and tools[0]["status"] == "error"
+    assert "python3 -m novamind_cli call web_search" in tools[0]["command"]
+    terminal_tools = [tool for tool in tools if tool["name"] == "terminal"]
+    assert len(terminal_tools) == 2, tools
     assert (sandbox / "from-agent.txt").read_text(encoding="utf-8").strip() == "linux"
     result = next(event for event in events if event["type"] == "result")
     assert result["tools"] and "terminal" in result["tools"]

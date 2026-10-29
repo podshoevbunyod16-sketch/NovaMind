@@ -38,6 +38,7 @@ import logging
 import os
 import re
 import queue as queue_mod
+import shlex
 import threading
 import time
 from dataclasses import dataclass, field
@@ -71,6 +72,13 @@ from agenticseek.tools.py_interpreter import PythonTool
 from agenticseek.tools.web_tools import WebOpenTool, WebSearchTool
 
 log = logging.getLogger("novamind.agenticseek")
+
+
+def python_tool_command(tool: str, arguments: dict) -> str:
+    """One shell-safe command used by both automatic and model-driven steps."""
+    payload = json.dumps(arguments, ensure_ascii=False, separators=(",", ":"))
+    return f"python3 -m novamind_cli call {shlex.quote(str(tool))} {shlex.quote(payload)}"
+
 
 MAX_STEPS = max(1, min(int(os.getenv("AGENT_MAX_STEPS", "20")), 60))
 
@@ -748,15 +756,18 @@ class AgentEngine:
         if ctx.strict_mcp:
             only = {tag: tool for tag, tool in shared.items() if tag == "mcp_call"}
             if only:
-                shared = only
-                # В строгом режиме реально доступен только mcp_call — список
-                # «вспомнил инструменты» должен быть честным.
-                self.recalled_tools = ["mcp_call"]
+                # Модель должна использовать тот же Python-command подход, но
+                # обычный Bash в строгом режиме давать нельзя. Ограниченный
+                # terminal пропускает только novamind_cli → mcp_call; любой
+                # другой ввод заканчивается [failure] без запуска subprocess.
+                from agenticseek.tools.terminal_commands import McpGatewayTerminal
+                shared = {**only, "terminal": McpGatewayTerminal()}
+                self.recalled_tools = ["mcp_call", "terminal"]
                 for agent in agents:
                     if agent.role != "talk":
                         agent.tools = dict(shared)
                 self._emit({"type": "step", "icon": "🔒",
-                            "text": "Строгий режим MCP: доступен только mcp_call"})
+                            "text": "Строгий режим MCP: доступен Python gateway к mcp_call; shell запрещён"})
             else:
                 self._emit({"type": "step", "icon": "⚠️",
                             "text": "MCP не подключён: строгий режим снят, работаю обычными "
@@ -936,7 +947,9 @@ class AgentEngine:
         if ctx.cancel is not None and ctx.cancel.is_set():
             self.state.status = "stopped"
         self.answer = str(answer or "").strip()
-        self.state.steps = self._budget.used
+        # Forced search/page reads are real tool steps too, even though they do
+        # not consume the model's action budget.  Never erase them with zero.
+        self.state.steps = max(self.state.steps, self._budget.used)
         self._emit({"type": "step", "icon": "🏁",
                     "text": f"Готово · шагов: {self.state.steps} · модель: {ctx.model or '?'}"})
 
@@ -1059,16 +1072,29 @@ class AgentEngine:
                     "text": "Ищу источники по запросу…"})
         if ctx.cancel is not None and ctx.cancel.is_set():
             return ""
+        query = _search_query(goal)
+        search_step = python_tool_command("web_search", {"query": query, "limit": 5})
+        self._emit(think_event("before", search_step))
         try:
-            results, _meta = ctx.search(_search_query(goal), 5)
+            results, _meta = ctx.search(query, 5)
         except Exception as error:  # noqa: BLE001 — the answer must still happen
             log.warning("forced search failed: %s", type(error).__name__)
+            output = f"[failure] {type(error).__name__}: {error}"
+            self._emit({"type": "tool", "name": "web_search", "command": search_step,
+                        "code": 1, "status": "error", "output": output, "error": output})
+            self.state.add_tool("web_search", False)
+            self._emit(think_event("after", search_step, done=True))
             self._emit({"type": "step", "icon": "⚠️",
                         "text": f"Поиск не удался: {type(error).__name__}"})
             return ""
         results = [item for item in (results or []) if isinstance(item, dict)]
         self._found = results
         if not results:
+            output = f"[failure] Поиск «{query}» ничего не нашёл"
+            self._emit({"type": "tool", "name": "web_search", "command": search_step,
+                        "code": 1, "status": "error", "output": output, "error": output})
+            self.state.add_tool("web_search", False)
+            self._emit(think_event("after", search_step, done=True))
             self._emit({"type": "step", "icon": "⚠️",
                         "text": f"Поиск «{goal}» ничего не дал"})
             return ("Результаты поиска: поиск ничего не нашёл. Отвечай по своим знаниям "
@@ -1084,10 +1110,9 @@ class AgentEngine:
         )
         self._emit({"type": "step", "icon": "🔎",
                     "text": f"Нашёл {len(results)} источников по запросу «{goal}»"})
-        search_step = f"nova search {goal}"
-        self._emit(think_event("before", search_step))
         self._emit({"type": "tool", "name": "web_search", "command": search_step,
-                    "code": 0, "output": lines, "results": results})
+                    "code": 0, "status": "ok", "output": lines, "results": results})
+        self.state.add_tool("web_search", True)
         self._emit(think_event("after", search_step, done=True))
 
         pages = []
@@ -1097,17 +1122,30 @@ class AgentEngine:
             url = str(item.get("url") or "")
             if ctx.read_page is None or not url.startswith(("http://", "https://")):
                 continue
-            # Думаем, что делать после чтения страницы, и осмысляем результат.
-            with self._thinking(f"nova read {url}"):
+            # Каждый URL проходит тем же Python-command интерфейсом, который
+            # видит модель. В таймлайне нет старых декоративных `nova read`.
+            page_step = python_tool_command("web_open", {"url": url, "max_chars": 8000})
+            with self._thinking(page_step):
                 try:
-                    text, _elapsed = ctx.read_page(url)
-                except Exception:  # noqa: BLE001 — a page error is not a run failure
+                    text, error = ctx.read_page(url)
+                except Exception as exc:  # noqa: BLE001 — one page must not fail the run
+                    output = f"[failure] {type(exc).__name__}: {exc}"
+                    self._emit({"type": "tool", "name": "web_open", "command": page_step,
+                                "code": 1, "status": "error", "output": output,
+                                "error": output})
+                    self.state.add_tool("web_open", False)
                     continue
                 if not text:
+                    output = f"[failure] {error or 'страница пустая'}"
+                    self._emit({"type": "tool", "name": "web_open", "command": page_step,
+                                "code": 1, "status": "error", "output": output,
+                                "error": output})
+                    self.state.add_tool("web_open", False)
                     continue
                 pages.append(f"--- {url} ---\n{clip(text, 2000)}")
-                self._emit({"type": "tool", "name": "web_open", "command": url, "code": 0,
-                            "output": clip(text, 1200)})
+                self._emit({"type": "tool", "name": "web_open", "command": page_step,
+                            "code": 0, "status": "ok", "output": clip(text, 1200)})
+                self.state.add_tool("web_open", True)
 
         if ctx.save_research is not None:
             body = (f"# {goal}\n\n_поиск {time.strftime('%Y-%m-%d %H:%M')}_\n\n{lines}\n\n"
