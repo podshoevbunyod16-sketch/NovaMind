@@ -17,6 +17,6 @@ class OrchestratorAgent(Agent):
 
     def __init__(self, name, prompt_path, provider, tools, max_turns=20):
         super().__init__(name, prompt_path, provider)
-        self.max_turns = max(1, min(int(max_turns), 60))
+        self.max_turns = max(1, min(int(max_turns), 500))
         for tag, tool in tools.items():
             self.register_tool(tag, tool)

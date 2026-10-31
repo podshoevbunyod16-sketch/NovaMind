@@ -69,16 +69,12 @@ class Memory:
         return sum(len(str(item.get("content") or "")) for item in self.messages)
 
     def trim(self) -> None:
-        """Drop the oldest exchanges until the character budget is respected."""
+        """Удаляем самые старые сообщения, но system и исходную цель оставляем."""
         if self.size() <= self.max_chars:
             return
-        while len(self.messages) > 1 + MIN_KEEP_MESSAGES and self.size() > self.max_chars:
-            # Remove the oldest non-system message, keeping the first user goal.
-            index = 1
-            if index < len(self.messages) - MIN_KEEP_MESSAGES:
-                self.messages.pop(index)
-            else:
-                break
+        head = 2 if len(self.messages) > 2 else 1     # system + цель пользователя
+        while len(self.messages) > head + MIN_KEEP_MESSAGES and self.size() > self.max_chars:
+            self.messages.pop(head)
 
     def snapshot(self) -> dict:
         """Serialisable view used by tests and the run record."""
