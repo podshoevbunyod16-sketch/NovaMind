@@ -56,11 +56,11 @@ SEARCH_TIMEOUT = float(os.getenv("SEARCH_TIMEOUT", "9"))
 READER_TIMEOUT = float(os.getenv("READER_TIMEOUT", "10"))
 # Сколько ждём модель после сбора источников. У reasoning-моделей первый токен
 # приходит долго, поэтому времени заметно больше, чем у обычного поиска.
-ANSWER_TIMEOUT = float(os.getenv("ANSWER_TIMEOUT", "180"))
+ANSWER_TIMEOUT = float(os.getenv("ANSWER_TIMEOUT", "1200"))
 # Сколько страниц успеваем прочитать перед ответом.
 MAX_PAGES = int(os.getenv("SEARCH_MAX_PAGES", "30"))
 # Таймаут служебных запросов (короткий поисковый запрос, «нужен ли поиск»).
-QUERY_TIMEOUT = float(os.getenv("SEARCH_QUERY_TIMEOUT", "10"))
+QUERY_TIMEOUT = float(os.getenv("SEARCH_QUERY_TIMEOUT", "60"))
 
 _QUERY_FIXES = (
     (r"\bпагода\b", "погода"),
