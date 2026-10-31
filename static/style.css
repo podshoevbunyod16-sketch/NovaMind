@@ -835,6 +835,22 @@ html[data-glass-theme="light"] .toolbar-btn.active { color: var(--accent); }
   .attach-dropdown .attach-mcp-count { display: inline-flex; justify-content: center; }
 }
 
+/* Подключённые MCP видны прямо в главном чате, а не только в настройках. */
+.mcp-active-bar {
+  display: flex; align-items: center; gap: 7px;
+  margin-bottom: 7px; padding: 7px 10px; min-width: 0;
+  border-radius: var(--r-pill); background: rgba(93, 214, 154, .09);
+  border: 1px solid rgba(93, 214, 154, .28); color: var(--text-2); font-size: 10.5px;
+}
+.mcp-active-icon { flex: 0 0 auto; }
+.mcp-active-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mcp-active-bar button {
+  flex: 0 0 auto; padding: 4px 8px; border-radius: var(--r-pill); cursor: pointer;
+  border: 1px solid var(--glass-border); background: var(--glass-fill); color: var(--text-2);
+  font: 700 9.5px/1 inherit;
+}
+.mcp-active-bar button:hover { color: var(--text-1); border-color: var(--accent); }
+
 /* Активный режим (Погода, Курс валют...): его видно и можно сразу выключить */
 .mode-active {
   display: flex; align-items: center; gap: 8px;

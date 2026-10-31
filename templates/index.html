@@ -215,6 +215,12 @@
         <button class="toolbar-btn" id="btn-calm" onclick="toggleCalmMotion()" title="Отключить фоновые анимации">✨ <span>Анимации</span></button>
       </div>
 
+      <div class="mcp-active-bar" id="mcpActiveBar" hidden>
+        <span class="mcp-active-icon" aria-hidden="true">🔌</span>
+        <span class="mcp-active-text" id="mcpActiveText">MCP-инструменты</span>
+        <button type="button" onclick="openMcpManager()">Серверы</button>
+      </div>
+
       <div class="mode-active" id="modeActiveBar" hidden>
         <span class="mode-active-dot"></span>
         <span class="mode-active-text" id="modeActiveText"></span>

@@ -139,7 +139,8 @@ def public_connections() -> list[dict[str, Any]]:
              "auth": value.get("auth", "none"), "connected": bool(value.get("connected")),
              "transport": "http", "last_error": value.get("last_error"),
              "updated_at": value.get("updated_at"),
-             "tools_count": value.get("tools_count")}
+             "tools_count": value.get("tools_count"),
+             "tool_names": list(value.get("tool_names") or [])[:12]}
             for key, value in _read().items()]
 
 
@@ -490,12 +491,31 @@ def test_connection(server_id: str) -> dict[str, Any]:
         except Exception:
             # Notification is not needed for stateless/simple local servers.
             pass
-        return {"connected": data[server_id]["connected"], "server": result.get("result", result)}
+
+        # initialize alone is not proof that NovaMind can actually use the
+        # server. Verify tools/list now, persist the real count, and reject an
+        # authenticated-but-unusable connection instead of showing “active · 0”.
+        tools = list_tools(server_id)
+        if not tools:
+            raise ValueError("MCP-сервер подключился, но не предоставил ни одного инструмента")
+        data = _read()
+        data[server_id]["connected"] = True
+        data[server_id]["last_error"] = None
+        data[server_id]["tools_count"] = len(tools)
+        data[server_id]["tool_names"] = [str(tool.get("name")) for tool in tools[:40]]
+        data[server_id]["updated_at"] = int(time.time())
+        _write(data)
+        return {"connected": True, "tools_count": len(tools),
+                "tools": data[server_id]["tool_names"],
+                "server": result.get("result", result)}
     except Exception as exc:
         status = getattr(exc, "status_code", None) or getattr(getattr(exc, "response", None), "status_code", None)
         log.error("MCP ошибка проверки подключения [%s] status=%s: %s",
                   server_id, status or "error", exc)
+        data = _read()
         data[server_id]["connected"] = False
+        data[server_id]["tools_count"] = 0
+        data[server_id]["tool_names"] = []
         data[server_id]["last_error"] = f"{exc.__class__.__name__}: {exc}"
         data[server_id]["updated_at"] = int(time.time())
         _write(data)

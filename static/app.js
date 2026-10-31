@@ -276,20 +276,24 @@ async function loadAttachMcp(force = false) {
     if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
     const connections = Array.isArray(data.connections) ? data.connections : [];
     attachMcpCatalog = Array.isArray(data.catalog) ? data.catalog : [];
-    attachMcpConnections = connections.filter((item) => item.connected);
-    const active = attachMcpConnections;
+    attachMcpConnections = [...connections].sort((a, b) => Number(b.connected) - Number(a.connected));
+    const active = attachMcpConnections.filter((item) => item.connected && Number(item.tools_count) > 0);
     document.getElementById('attachMcpCount').textContent = String(active.length);
-    connectedEl.innerHTML = active.length
-      ? active.map((item, index) => mcpCard(
+    connectedEl.innerHTML = attachMcpConnections.length
+      ? attachMcpConnections.map((item, index) => mcpCard(
           item.name,
-          `${item.tools_count ?? 0} инструментов · ${item.transport || 'HTTP'}`,
-          `<button type="button" onclick="removeAttachMcp(${index})" title="Отключить сервер">×</button>`,
-          true
+          item.connected
+            ? `${item.tools_count ?? 0} инструментов · ${item.transport || 'HTTP'}`
+            : (item.last_error || 'Соединение не проверено'),
+          `<button type="button" onclick="testAttachMcp(${index})">${item.connected ? 'Проверить' : 'Подключить'}</button>`
+            + `<button type="button" onclick="removeAttachMcp(${index})" title="Удалить сервер">×</button>`,
+          item.connected && Number(item.tools_count) > 0
         )).join('')
       : '<span class="attach-mcp-muted">Пока нет подключённых серверов.</span>';
+    renderMcpActiveBar(active);
     catalogEl.innerHTML = attachMcpCatalog.map((item, index) => mcpCard(
       item.name, item.description,
-      `<button type="button" onclick="selectAttachMcp(${index})">Добавить</button>`
+      `<button type="button" onclick="selectAttachMcp(${index})">Подключить</button>`
     )).join('');
     attachMcpLoaded = true;
     setAttachMcpStatus(active.length
@@ -303,6 +307,27 @@ async function loadAttachMcp(force = false) {
   }
 }
 
+function renderMcpActiveBar(active) {
+  const bar = document.getElementById('mcpActiveBar');
+  const text = document.getElementById('mcpActiveText');
+  if (!bar || !text) return;
+  const servers = Array.isArray(active) ? active : [];
+  bar.hidden = servers.length === 0;
+  if (!servers.length) return;
+  const tools = servers.reduce((sum, item) => sum + Number(item.tools_count || 0), 0);
+  text.textContent = `MCP: ${servers.map((item) => item.name).join(', ')} · ${tools} инструментов`;
+  text.title = servers.flatMap((item) => item.tool_names || []).join(', ');
+}
+
+function openMcpManager() {
+  const menu = document.getElementById('attachDropdown');
+  const panel = document.getElementById('attachMcpPanel');
+  menu?.classList.add('open');
+  if (panel) panel.hidden = false;
+  document.getElementById('attachMcpToggle')?.setAttribute('aria-expanded', 'true');
+  loadAttachMcp(true);
+}
+
 function toggleMcpPanel(event) {
   event?.stopPropagation();
   const panel = document.getElementById('attachMcpPanel');
@@ -311,6 +336,24 @@ function toggleMcpPanel(event) {
   panel.hidden = !opening;
   button?.setAttribute('aria-expanded', opening ? 'true' : 'false');
   if (opening) loadAttachMcp(true);
+}
+
+async function testAttachMcp(index) {
+  const serverId = attachMcpConnections[index]?.id;
+  if (!serverId) return;
+  setAttachMcpStatus('Проверяю initialize и реальный список tools/list…');
+  try {
+    const response = await fetch(`/api/settings/mcp/${encodeURIComponent(serverId)}/test`, { method: 'POST' });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || !data.connected) throw new Error(data.error || `HTTP ${response.status}`);
+    attachMcpLoaded = false;
+    await loadAttachMcp(true);
+    setAttachMcpStatus(`Подключено инструментов: ${data.tools_count || 0}. Агент может использовать их по умолчанию.`, 'ok');
+  } catch (error) {
+    attachMcpLoaded = false;
+    await loadAttachMcp(true);
+    setAttachMcpStatus(error.message || 'MCP-сервер не предоставил инструменты', 'error');
+  }
 }
 
 function selectAttachMcp(index) {
@@ -362,6 +405,8 @@ async function connectAttachMcp(event) {
     await loadAttachMcp(true);
     setAttachMcpStatus('Сервер подключён. Его инструменты уже доступны агенту.', 'ok');
   } catch (error) {
+    attachMcpLoaded = false;
+    await loadAttachMcp(true);
     setAttachMcpStatus(error.message || 'Не удалось подключить MCP-сервер', 'error');
   }
 }
@@ -381,6 +426,8 @@ async function removeAttachMcp(index) {
     setAttachMcpStatus(error.message || 'Не удалось отключить сервер', 'error');
   }
 }
+
+document.addEventListener('DOMContentLoaded', () => loadAttachMcp());
 
 async function analyzeAttachment(file, kind) {
   document.getElementById('attachDropdown').classList.remove('open');
@@ -2337,6 +2384,13 @@ async function loadSettingsAccess() {
     // Сервер не ответил — остаётся значение из localStorage (вход уже был).
   }
   applySettingsAccess();
+  // Первый запрос MCP мог уйти до восстановления серверной сессии. После
+  // подтверждения прав перечитываем подключения, чтобы панель в чате сразу
+  // появилась без повторного открытия меню.
+  if (serverAdmin) {
+    attachMcpLoaded = false;
+    loadAttachMcp(true);
+  }
   return serverAdmin;
 }
 

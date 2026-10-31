@@ -83,6 +83,7 @@ def test_chat_attachment_menu_contains_mcp_manager_and_catalog(admin_client):
     assert 'id="attachMcpPanel"' in page
     assert 'id="attachMcpConnected"' in page
     assert 'id="attachMcpCatalog"' in page
+    assert 'id="mcpActiveBar"' in page
 
     payload = admin_client.get("/api/settings/mcp").get_json()
     catalog_ids = {item["id"] for item in payload["catalog"]}
