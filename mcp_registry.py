@@ -82,7 +82,21 @@ def _retry_delay(attempt: int, retry_after: str | None = None) -> float:
     return min(base * (2 ** attempt), 10.0)
 
 CATALOG = [
-    {"id": "custom", "name": "Свой MCP-сервер", "description": "Любой Streamable HTTP MCP endpoint", "auth": ["api_key", "bearer", "basic", "oauth", "none"]},
+    {"id": "custom", "name": "Свой MCP-сервер",
+     "description": "Любой Streamable HTTP MCP endpoint", "url": "",
+     "auth": ["api_key", "bearer", "none"]},
+    {"id": "context7", "name": "Context7 — документация",
+     "description": "Актуальная документация библиотек и примеры кода",
+     "url": "https://mcp.context7.com/mcp", "auth": ["none", "api_key"]},
+    {"id": "github", "name": "GitHub",
+     "description": "Репозитории, issues, pull requests и код (нужен token)",
+     "url": "https://api.githubcopilot.com/mcp/", "auth": ["bearer"]},
+    {"id": "notion", "name": "Notion",
+     "description": "Страницы и базы знаний Notion (нужен access token)",
+     "url": "https://mcp.notion.com/mcp", "auth": ["bearer"]},
+    {"id": "sentry", "name": "Sentry",
+     "description": "Ошибки приложений, проекты и диагностика",
+     "url": "https://mcp.sentry.dev/mcp", "auth": ["bearer"]},
 ]
 
 

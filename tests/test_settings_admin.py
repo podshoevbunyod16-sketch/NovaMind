@@ -59,6 +59,26 @@ def test_admin_reads_settings_api(admin_client):
     assert admin_client.get("/api/settings/skills").status_code == 200
 
 
+def test_chat_attachment_menu_contains_mcp_manager_and_catalog(admin_client):
+    page = admin_client.get("/chat").get_data(as_text=True)
+    assert 'id="attachMcpPanel"' in page
+    assert 'id="attachMcpConnected"' in page
+    assert 'id="attachMcpCatalog"' in page
+
+    payload = admin_client.get("/api/settings/mcp").get_json()
+    catalog_ids = {item["id"] for item in payload["catalog"]}
+    assert {"custom", "context7", "github", "notion", "sentry"} <= catalog_ids
+
+
+def test_attachment_menu_opens_upward_on_mobile():
+    import pathlib
+
+    css = (pathlib.Path(__file__).resolve().parent.parent / "static" / "style.css").read_text(encoding="utf-8")
+    block = css.split(".attach-dropdown {", 1)[1].split("}", 1)[0]
+    assert "bottom:" in block
+    assert "top: auto" in block
+
+
 def test_settings_links_are_hidden_for_non_admins():
     """Кнопка в шапке скрыта, пока сервер не подтвердил права администратора."""
     import pathlib
