@@ -124,6 +124,35 @@ def _write(data: dict[str, dict[str, Any]]) -> None:
     tmp.replace(STORE)
 
 
+def _current_owner() -> str:
+    try:
+        import identity
+        return identity.chat_owner()
+    except Exception:
+        return ""
+
+
+def _visible(item: dict, owner: str | None = None) -> bool:
+    current = _current_owner() if owner is None else str(owner or "")
+    stored = str(item.get("owner") or "")
+    if not current:  # tests, scheduler maintenance and CLI compatibility
+        return True
+    if stored:
+        return stored == current
+    try:
+        import identity
+        return identity.is_admin_owner(current)  # legacy connections were administrator-owned
+    except Exception:
+        return False
+
+
+def _owned_item(data: dict[str, dict[str, Any]], server_id: str) -> dict[str, Any]:
+    item = data.get(server_id)
+    if not item or not _visible(item):
+        raise ValueError("MCP-сервер не найден")
+    return item
+
+
 def catalog() -> list[dict[str, Any]]:
     """Шаблоны подключения. Ничего не подключается самим фактом наличия в каталоге."""
     return [{**item, "transport": item.get("transport", "http")} for item in CATALOG]
@@ -138,7 +167,7 @@ def public_connections() -> list[dict[str, Any]]:
              "updated_at": value.get("updated_at"),
              "tools_count": value.get("tools_count"),
              "tool_names": list(value.get("tool_names") or [])[:12]}
-            for key, value in _read().items()]
+            for key, value in _read().items() if _visible(value)]
 
 
 def save_connection(payload: dict[str, Any]) -> dict[str, Any]:
@@ -157,9 +186,17 @@ def save_connection(payload: dict[str, Any]) -> dict[str, Any]:
     if auth not in {"none", "api_key", "bearer", "basic", "oauth", "google_oauth"}:
         raise ValueError("Неподдерживаемый способ авторизации")
     data = _read()
+    try:
+        from flask import has_request_context
+        owner = _current_owner() if has_request_context() else ""
+    except Exception:
+        owner = _current_owner()
+    if server_id in data and not _visible(data[server_id], owner):
+        import hashlib
+        server_id = f"{server_id}-{hashlib.sha256(owner.encode()).hexdigest()[:10]}"[:80]
     old = data.get(server_id, {})
     item = {"name": name, "url": url, "transport": transport, "auth": auth,
-            "connected": False, "updated_at": int(time.time()), "last_error": None}
+            "owner": owner, "connected": False, "updated_at": int(time.time()), "last_error": None}
     if transport == "stdio":
         args = payload.get("args") or []
         if isinstance(args, str):
@@ -196,8 +233,7 @@ def disconnect_connection(server_id: str) -> None:
     except Exception:
         pass
     data = _read()
-    if server_id not in data:
-        raise ValueError("MCP-сервер не найден")
+    _owned_item(data, server_id)
     data[server_id]["connected"] = False
     data[server_id]["initialized"] = False
     data[server_id].pop("session_id", None)
@@ -206,10 +242,9 @@ def disconnect_connection(server_id: str) -> None:
 
 
 def remove_connection(server_id: str) -> None:
-    try:
-        disconnect_connection(server_id)
-    except ValueError:
-        pass
+    data = _read()
+    _owned_item(data, server_id)
+    disconnect_connection(server_id)
     data = _read()
     data.pop(server_id, None)
     _write(data)
@@ -237,9 +272,7 @@ def _headers(item: dict[str, Any]) -> dict[str, str]:
 
 def request(server_id: str, method: str, params: dict[str, Any] | None = None, _retry_session: bool = True) -> dict[str, Any]:
     data = _read()
-    item = data.get(server_id)
-    if not item:
-        raise ValueError("MCP-сервер не найден")
+    item = _owned_item(data, server_id)
     transport = str(item.get("transport") or "http").lower()
     if transport in {"stdio", "sse"}:
         import mcp_transports
@@ -365,10 +398,25 @@ def list_tools(server_id: str) -> list[dict[str, Any]]:
 
 
 def connected_tools() -> list[dict[str, Any]]:
-    """Собирает инструменты всех подключённых MCP-серверов."""
+    """Discover live tools and boundedly recover previously failed sessions."""
     result = []
-    for server_id, item in _read().items():
-        if not item.get("connected"):
+    data = _read()
+    retry_after = max(10, int(os.getenv("MCP_HEALTH_RETRY_SECONDS", "30")))
+    auto_reconnect = os.getenv("MCP_AUTO_RECONNECT", "1").strip().lower() not in {"0", "false", "off"}
+    now = int(time.time())
+    if auto_reconnect:
+        for server_id, item in list(data.items()):
+            if (not _visible(item) or item.get("connected") or not item.get("last_error")
+                    or now - int(item.get("updated_at") or 0) < retry_after):
+                continue
+            try:
+                test_connection(server_id)
+            except Exception:
+                log.debug("MCP reconnect failed for %s", server_id, exc_info=True)
+        data = _read()
+    dirty = False
+    for server_id, item in data.items():
+        if not _visible(item) or not item.get("connected"):
             continue
         try:
             for tool in list_tools(server_id):
@@ -384,6 +432,18 @@ def connected_tools() -> list[dict[str, Any]]:
             log.warning("MCP не удалось получить список инструментов [%s] status=%s: %s",
                         server_id, status or "error", exc)
             item["last_error"] = f"{exc.__class__.__name__}: {exc}"
+            item["connected"] = False
+            item["tools_count"] = 0
+            item["tool_names"] = []
+            item["updated_at"] = int(time.time())
+            dirty = True
+            try:
+                import mcp_transports
+                mcp_transports.close_transport(server_id)
+            except Exception:
+                pass
+    if dirty:
+        _write(data)
     return [entry for entry in result if entry["name"]]
 
 
@@ -435,11 +495,11 @@ def resolve_server_id(server_id: str, tool_name: str = "",
                 return owners[0]
 
     data = _read()
-    if raw and raw in data:
+    if raw and raw in data and _visible(data[raw]):
         return raw
     if len(wanted) >= 2 and data:
         for sid, item in data.items():
-            if not item.get("connected"):
+            if not _visible(item) or not item.get("connected"):
                 continue
             sname = str(item.get("name") or "").lower()
             surl = str(item.get("url") or "").lower()
@@ -520,9 +580,7 @@ def call_tool(server_id: str, tool_name: str, arguments: dict[str, Any] | None =
 
 def test_connection(server_id: str) -> dict[str, Any]:
     data = _read()
-    item = data.get(server_id)
-    if not item:
-        raise ValueError("MCP-сервер не найден")
+    item = _owned_item(data, server_id)
     try:
         result = _initialize_session(server_id)
         data[server_id]["connected"] = "error" not in result

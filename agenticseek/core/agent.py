@@ -33,6 +33,7 @@ NovaMind adaptations:
 
 from __future__ import annotations
 
+import contextvars
 import hashlib
 import json
 import os
@@ -113,6 +114,7 @@ class Agent:
         self.confirm = None         # callable(tag, payload, risk) -> bool
         self.record = None          # callable(tag, payload, ok, output)
         self.state = None           # agenticseek.state.RunState
+        self.tool_registry = None   # request-scoped authoritative execution registry
         self.extra_context = ""     # memory/skills/MCP block from NovaMind
         self.stop = False
         self._signatures: dict[str, int] = {}
@@ -120,6 +122,7 @@ class Agent:
         # «nova tools» перевызывает run_tool изнутри: размышление показываем
         # только для внешнего шага, иначе строка «Думает…» двоилась бы.
         self._think_depth = 0
+        self._native_pending: list[dict] = []
 
     # ── prompt loading ────────────────────────────────────────────────────
     @staticmethod
@@ -135,7 +138,7 @@ class Agent:
 
     # ── runtime hooks ─────────────────────────────────────────────────────
     def attach(self, events=None, cancel=None, deadline=None, step_budget=None,
-               confirm=None, record=None, state=None) -> None:
+               confirm=None, record=None, state=None, tool_registry=None) -> None:
         """Attach the run-scoped hooks (idempotent: the planner recurses)."""
         if events is not None:
             self.events = events
@@ -151,10 +154,12 @@ class Agent:
             self.record = record
         if state is not None:
             self.state = state
+        if tool_registry is not None:
+            self.tool_registry = tool_registry
         for child in self.children():
             child.attach(events=events, cancel=cancel, deadline=deadline,
                          step_budget=step_budget, confirm=confirm, record=record,
-                         state=state)
+                         state=state, tool_registry=tool_registry)
 
     def children(self) -> list:
         """Sub-agents (only the planner has any)."""
@@ -367,7 +372,26 @@ class Agent:
         messages[0] = {"role": "system", "content": self.system_prompt()}
         started = time.monotonic()
         try:
-            answer = self.provider.respond(messages)
+            answer = ""
+            self._native_pending = []
+            if self.tools and callable(getattr(self.provider, "respond_tools", None)):
+                import tool_registry
+                tags = set(self.available_tools())
+                reverse = {target: action for action, target in tool_registry.ACTION_TO_TOOL.items()}
+                reverse.update({"terminal": "run", "python": "run"})
+                actions = {reverse.get(tag, tag) for tag in tags}
+                schemas = tool_registry.native_tool_schemas(workspace=True, only=actions)
+                answer, calls = self.provider.respond_tools(messages, schemas)
+                for call in calls:
+                    name = str(call.get("name") or "")
+                    canonical = tool_registry.ACTION_TO_TOOL.get(name, name)
+                    canonical = {"shell": "terminal"}.get(canonical, canonical)
+                    arguments = call.get("arguments") if isinstance(call.get("arguments"), dict) else {}
+                    self._native_pending.append({"id": call.get("id"), "tool": canonical,
+                                                 "arguments": arguments,
+                                                 "arguments_error": call.get("arguments_error") or ""})
+            else:
+                answer = self.provider.respond(messages)
         except AgenticSeekError:
             raise
         except Exception as error:  # noqa: BLE001 — provider layer is external
@@ -382,7 +406,7 @@ class Agent:
         # Сколько модель думала до этого шага. Показываем только если дальше
         # будет действие: у простого ответа «Думал 2 c» — лишний шум.
         self._thought = (time.monotonic() - started, plan_text(answer))
-        if not str(answer or "").strip():
+        if not str(answer or "").strip() and not self._native_pending:
             raise AgenticSeekError("Model returned an empty answer",
                                    "Модель вернула пустой ответ.")
         return answer
@@ -505,14 +529,24 @@ class Agent:
         # с app.run() занимал бы терминал до таймаута).
         tool.saved_path = saved
         try:
-            output = tool.execute(str(payload))
-            ok = not tool.execution_failure_check(output)
+            if self.tool_registry is None:
+                # Standalone AgenticSeek compatibility; NovaMind always injects
+                # RuntimeToolRegistry from AgentEngine.
+                output = tool.execute(str(payload))
+                ok = not tool.execution_failure_check(output)
+            else:
+                result = self.tool_registry.execute_legacy(tag, str(payload), saved)
+                ok = bool(result.get("ok"))
+                output = result.get("result")
+                if output is None:
+                    error = result.get("error") or {}
+                    output = f"[failure] {error.get('type', 'tool_error')}: {error.get('message', 'unknown error')}"
         except AgentStopped:
             raise
         except AgenticSeekError as error:
             ok, output = False, f"[failure] {error.summary()}"
-        except Exception as error:  # noqa: BLE001 — tool bug becomes feedback
-            self.logger.error(f"tool {tag} crashed: {type(error).__name__}")
+        except Exception as error:  # noqa: BLE001 — authority failure becomes feedback
+            self.logger.error(f"tool authority {tag} crashed: {type(error).__name__}")
             ok, output = False, f"[failure] {tag}: {type(error).__name__}: {error}"
         elapsed = int((time.monotonic() - started) * 1000)
 
@@ -530,6 +564,8 @@ class Agent:
         if self.state is not None:
             try:
                 self.state.add_tool(tag, ok)
+                self.state.add_observation(tag, ok, clip(output, 2000),
+                                           _describe(tag, payload, saved))
             except Exception:  # noqa: BLE001
                 pass
         if self.record is not None:
@@ -579,6 +615,57 @@ class Agent:
             if blocks:
                 return True
         return False
+
+    @staticmethod
+    def _native_payload(tool: str, arguments: dict) -> str:
+        scalar = {"web_search": "query", "web_open": "url", "terminal": "command",
+                  "python": "code"}.get(tool)
+        if scalar and scalar in arguments:
+            return str(arguments[scalar])
+        return json.dumps(arguments, ensure_ascii=False)
+
+    def execute_native_calls(self) -> tuple[str, int]:
+        calls, self._native_pending = self._native_pending, []
+        if not calls:
+            return "", 0
+        feedback = [""] * len(calls)
+
+        def run(index, call):
+            error_text = str(call.get("arguments_error") or "")
+            try:
+                import tool_registry
+                canonical = {"terminal": "shell"}.get(call.get("tool"), call.get("tool"))
+                spec = tool_registry.get_tool(canonical)
+                schema_errors = tool_registry.validate_arguments(spec.schema, call.get("arguments") or {}) if spec else []
+                if schema_errors:
+                    error_text = "; ".join(schema_errors)
+            except Exception:
+                schema_errors = []
+            if error_text:
+                message = f"[failure] Некорректные аргументы: {error_text}"
+                self.emit(tool_event(call.get("tool"), "", ok=False, output=message, code=1))
+                return index, message
+            payload = self._native_payload(call["tool"], call.get("arguments") or {})
+            _ok, result = self.run_tool(call["tool"], payload)
+            return index, result
+
+        # Multiple native calls in one response are independent candidates.
+        # Only read-only calls may overlap; writes remain ordered.
+        safe = all(getattr(self.all_tools().get(call.get("tool")), "risk", "write") == "safe"
+                   for call in calls)
+        if safe and len(calls) > 1:
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+            with ThreadPoolExecutor(max_workers=min(len(calls), 4)) as pool:
+                futures = []
+                for index, call in enumerate(calls):
+                    context = contextvars.copy_context()
+                    futures.append(pool.submit(lambda i=index, c=call, ctx=context: ctx.run(run, i, c)))
+                for future in as_completed(futures):
+                    index, result = future.result(); feedback[index] = result
+        else:
+            for index, call in enumerate(calls):
+                _index, result = run(index, call); feedback[index] = result
+        return "\n".join(feedback), len(calls)
 
     def execute_blocks(self, text: str):
         """Execute every block of an answer, stopping at the first failure.
@@ -641,11 +728,22 @@ class Agent:
             # приводим к протоколу, иначе команда не выполнится, а теги попадут
             # в ответ пользователю.
             answer = normalize_tool_json(normalize_answer(answer))
-            self.memory.push("assistant", answer)
+            self.memory.push("assistant", answer or "[native tool calls]")
             self.last_answer = answer
-            feedback, executed = self.execute_blocks(answer)
+            feedback, executed = self.execute_native_calls()
+            if not executed:
+                feedback, executed = self.execute_blocks(answer)
             if executed:
                 self.last_feedback = feedback
+                if "[failure]" in feedback:
+                    attempt = sum(self._signatures.values())
+                    if self.state is not None:
+                        self.state.add_recovery("tool", feedback[:500], attempt)
+                    self.emit({"type": "plan_revised", "reason": feedback[:500],
+                               "summary": "Шаг не удался — анализирую ошибку и меняю следующий вызов",
+                               "attempt": attempt})
+                else:
+                    self.emit({"type": "plan_updated", "summary": "Наблюдение получено; выбираю следующий шаг"})
                 self.memory.push("user", self._budget_hint(feedback))
                 continue
             cleaned = strip_unknown_blocks(answer, set(self.all_tools()))

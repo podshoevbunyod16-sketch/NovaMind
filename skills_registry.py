@@ -53,8 +53,8 @@ def _validate_markdown(text: str) -> dict[str, str]:
 def _write_skill(name: str, markdown: str, source_dir: Path | None = None) -> dict[str, Any]:
     name = _safe_name(name)
     meta = _validate_markdown(markdown)
-    SKILLS_DIR.mkdir(parents=True, exist_ok=True)
-    target = SKILLS_DIR / name
+    _skills_dir().mkdir(parents=True, exist_ok=True)
+    target = _skills_dir() / name
     if target.exists():
         shutil.rmtree(target)
     target.mkdir(parents=True)
@@ -76,8 +76,21 @@ def _write_skill(name: str, markdown: str, source_dir: Path | None = None) -> di
 DISABLED_FILE = ".disabled.json"
 
 
+def _skills_dir() -> Path:
+    """Per-user skill storage; administrator/maintenance keeps legacy location."""
+    try:
+        import hashlib
+        import identity
+        owner = identity.chat_owner()
+        if owner and not identity.is_admin_owner(owner):
+            return SKILLS_DIR / "users" / hashlib.sha256(owner.encode()).hexdigest()[:20]
+    except Exception:
+        pass
+    return SKILLS_DIR
+
+
 def _disabled() -> set[str]:
-    path = SKILLS_DIR / DISABLED_FILE
+    path = _skills_dir() / DISABLED_FILE
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -86,8 +99,8 @@ def _disabled() -> set[str]:
 
 
 def _write_disabled(values: set[str]) -> None:
-    SKILLS_DIR.mkdir(parents=True, exist_ok=True)
-    path = SKILLS_DIR / DISABLED_FILE
+    _skills_dir().mkdir(parents=True, exist_ok=True)
+    path = _skills_dir() / DISABLED_FILE
     path.write_text(json.dumps(sorted(values), ensure_ascii=False, indent=2), encoding="utf-8")
 
 
@@ -98,7 +111,7 @@ def is_enabled(skill_id: str) -> bool:
 def set_enabled(skill_id: str, enabled: bool) -> dict[str, Any]:
     """Включает или выключает навык. Возвращает обновлённую запись."""
     name = _safe_name(skill_id)
-    if not (SKILLS_DIR / name / "SKILL.md").is_file():
+    if not (_skills_dir() / name / "SKILL.md").is_file():
         raise FileNotFoundError("Skill не найден")
     disabled = _disabled()
     if enabled:
@@ -116,11 +129,11 @@ def _tools_of(meta: dict[str, str]) -> list[str]:
 
 
 def list_skills() -> list[dict[str, Any]]:
-    if not SKILLS_DIR.exists():
+    if not _skills_dir().exists():
         return []
     disabled = _disabled()
     items = []
-    for directory in sorted(SKILLS_DIR.iterdir()):
+    for directory in sorted(_skills_dir().iterdir()):
         skill_file = directory / "SKILL.md"
         if not directory.is_dir() or not skill_file.is_file():
             continue
@@ -142,7 +155,7 @@ def list_skills() -> list[dict[str, Any]]:
 
 def get_skill(skill_id: str) -> dict[str, Any]:
     name = _safe_name(skill_id)
-    path = SKILLS_DIR / name / "SKILL.md"
+    path = _skills_dir() / name / "SKILL.md"
     if not path.is_file():
         raise FileNotFoundError("Skill не найден")
     text = path.read_text(encoding="utf-8")
@@ -183,7 +196,7 @@ def import_zip(file_storage) -> dict[str, Any]:
 
 def delete_skill(skill_id: str) -> None:
     name = _safe_name(skill_id)
-    target = SKILLS_DIR / name
+    target = _skills_dir() / name
     if target.exists():
         shutil.rmtree(target)
     disabled = _disabled()

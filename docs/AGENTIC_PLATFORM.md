@@ -73,6 +73,25 @@ Legacy events remain unchanged. The stream additionally emits:
 The browser renders concise action summaries and expandable existing tool cards.
 Hidden model reasoning/chain-of-thought is never included in lifecycle events.
 
+## Persistence and stream recovery
+
+SQLite is migrated lazily and backward-compatibly. `agent_runs` gains `owner`
+and `verification`; `agent_run_events` stores bounded lifecycle payloads for
+inspection and interrupted-stream recovery. Existing rows are retained. Legacy
+ownerless rows remain visible only in administrator/maintenance contexts.
+
+The stable lifecycle envelope contains `event_id`, `task_id`, `timestamp`,
+`sequence`, `type`, and `payload`; legacy flat fields remain during migration.
+
+## Deployment
+
+No new runtime dependency or paid service is required. Existing local, Termux
+and Render commands remain valid. Optional settings:
+
+- `MCP_AUTO_RECONNECT` and `MCP_HEALTH_RETRY_SECONDS` control bounded recovery;
+- `AGENT_TOOL_RESULT_CHARS` bounds normalized tool results;
+- existing STDIO allow-list and retry variables remain unchanged.
+
 ## Safety and limits
 
 Existing guardrails, request-scoped capabilities, workspace isolation,

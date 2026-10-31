@@ -251,6 +251,7 @@ class EngineContext:
     force_role: str = ""
     chat_id: str = ""
     run_id: str = ""
+    owner: str = ""             # identity propagated explicitly into worker context
     profile: str = "default"      # ``default`` | ``coding`` (read-first project agent)
     media_kind: str = ""          # detected request for image/audio/video
     media_generate: Optional[Callable[..., tuple]] = None
@@ -291,6 +292,13 @@ class AgentEngine:
         # «вспоминаю инструменты». Пусто, пока инструменты не получены.
         self.recalled_tools: list[str] = []
         self._mcp_recalled = False
+        from core.events import EventBus
+        self.events = EventBus(lambda event: self.ctx.emit(event),
+                               task_id=ctx.run_id or "")
+        self.plan: list[dict] = []
+        self.verification: dict = {}
+        self.outcome_status = "running"
+        self.runtime_registry = None
 
     # ── public API ────────────────────────────────────────────────────────
     def stream(self):
@@ -312,6 +320,12 @@ class AgentEngine:
         self.ctx.emit = _tee(self.ctx.emit, emit)
 
         def work():
+            if self.ctx.owner:
+                try:
+                    import identity
+                    identity.bind_owner(self.ctx.owner)
+                except Exception:
+                    pass
             try:
                 self._execute()
             except BaseException as error:  # noqa: BLE001 — reported, then closed
@@ -364,17 +378,25 @@ class AgentEngine:
             self._recall_ready()          # «вспомнил», со списком подключённого
             try:
                 import tool_registry
-                catalog = tool_registry.unified_catalog(workspace=self.ctx.workspace)
+                catalog = (self.runtime_registry.catalog() if self.runtime_registry is not None
+                           else tool_registry.unified_catalog(workspace=self.ctx.workspace))
                 self._emit({"type": "tool_discovered", "count": len(catalog),
                             "tools": [{"id": item["id"], "name": item["name"],
                                        "source": item["source"], "available": item["available"]}
                                       for item in catalog[:80]]})
+                from core.planning import create_plan
+                self.plan = create_plan(self.ctx.goal, catalog, has_context=bool(self.ctx.history))
+                if self.record_id:
+                    database.update_agent_run(self.record_id, plan=self.plan)
+                self._emit({"type": "plan_created", "adaptive": True,
+                            "summary": "Составлен план по цели и доступным возможностям",
+                            "plan": self.plan})
             except Exception:
-                log.debug("unified tool discovery event failed", exc_info=True)
-            self._emit({"type": "plan_created", "adaptive": True,
-                        "summary": "План создан: выполнить нужные действия, анализировать наблюдения и проверить итог",
-                        "plan": ["Выбрать подходящие инструменты", "Выполнять следующие шаги по результатам предыдущих",
-                                 "Проверить конечный результат"]})
+                log.debug("unified discovery/planning failed", exc_info=True)
+                self.plan = [{"id": "resolve", "title": "Выполнить цель пользователя", "status": "pending"},
+                             {"id": "verify", "title": "Проверить результат", "status": "pending"}]
+                self._emit({"type": "plan_created", "adaptive": True,
+                            "summary": "Составлен резервный адаптивный план", "plan": self.plan})
             self._run_agent()
         except StepLimitReached as stop:
             self.state.status = "ok"
@@ -422,17 +444,28 @@ class AgentEngine:
             self.state.error = self.state.error or "Агент не вернул ответ"
             self.answer = ("Не удалось получить ответ. "
                            + (f"Причина: {self.state.error}." if self.state.error else ""))
-        verified = bool(self.answer.strip()) and self.state.status in {"ok", "stopped"}
-        self._emit({"type": "verification_completed", "ok": verified,
-                    "summary": ("Результат готов" if verified else
-                                (self.state.error or "Проверка обнаружила ошибку"))})
+        from core.verification import verify
+        verdict = verify(self.ctx.goal, self.answer, self.state,
+                         cancelled=self.state.status == "stopped")
+        self.verification = verdict.as_dict()
+        self.outcome_status = verdict.status
+        verify_step = next((item for item in self.plan if item.get("id") == "verify"), None)
+        if verify_step:
+            verify_step["status"] = "completed" if verdict.ok else "failed"
+            verify_step["verification_summary"] = verdict.summary
+            if self.record_id:
+                database.update_agent_run(self.record_id, plan=self.plan)
+        self._emit({"type": "verification_completed", **self.verification})
         if self.state.sources:
             self._emit({"type": "sources", "sources": list(self.state.sources)})
         for chunk in _chunks(self.answer):
             self._emit({"type": "token", "token": chunk})
         self._finish_run()
-        self._emit({"type": "task_completed", "status": self.state.status,
-                    "steps": self.state.steps, "verified": verified})
+        terminal_type = ("task_cancelled" if verdict.status == "cancelled" else
+                         "task_failed" if verdict.status == "failed" else "task_completed")
+        self._emit({"type": terminal_type, "status": verdict.status,
+                    "steps": self.state.steps, "verified": verdict.ok,
+                    "verification": self.verification})
 
     # ── шаг 1: понять запрос, шаг 2: вспомнить и получить инструменты ─────
     def _knowledge_stage(self) -> None:
@@ -628,7 +661,7 @@ class AgentEngine:
         for agent in agents:
             agent.attach(events=self._emit, cancel=ctx.cancel, deadline=deadline,
                          step_budget=budget, confirm=confirm, record=record,
-                         state=self.state)
+                         state=self.state, tool_registry=self.runtime_registry)
         self._budget = budget
         self.router = AgentRouter(agents, classify=self._classify,
                                   mode=os.getenv("AGENTICSEEK_ROUTER", "heuristic"))
@@ -730,7 +763,8 @@ class AgentEngine:
         agent.attach(events=self._emit, cancel=ctx.cancel,
                      deadline=ctx.deadline or (time.monotonic() + ctx.timeout),
                      step_budget=self._budget, confirm=self._confirm_hook(),
-                     record=self._record_hook(), state=self.state)
+                     record=self._record_hook(), state=self.state,
+                     tool_registry=self.runtime_registry)
         self.agents = {agent.type: agent}
         self.router = AgentRouter([agent])
 
@@ -739,10 +773,13 @@ class AgentEngine:
         agent = ProjectAgent(name, prompt_path("project_agent"), self.provider)
         self.agents = {agent.type: agent}
         self.recalled_tools = sorted(getattr(agent, "tools", {}) or {})
+        import tool_registry
+        self.runtime_registry = tool_registry.RuntimeToolRegistry(agent.tools, cancel=self.ctx.cancel)
         deadline = self.ctx.deadline or (time.monotonic() + self.ctx.timeout)
         agent.attach(events=self._emit, cancel=self.ctx.cancel, deadline=deadline,
                      step_budget=self._budget, confirm=self._confirm_hook(),
-                     record=self._record_hook(), state=self.state)
+                     record=self._record_hook(), state=self.state,
+                     tool_registry=self.runtime_registry)
         if self.ctx.memory_prompt:
             agent.extra_context = self.ctx.memory_prompt
         self.router = AgentRouter([agent])
@@ -781,6 +818,8 @@ class AgentEngine:
         # список для события «Вспомнил инструменты» (а не выдуманный анонс).
         self.recalled_tools = sorted({str(getattr(tool, "tag", tag) or tag)
                                       for tag, tool in tools.items()})
+        import tool_registry
+        self.runtime_registry = tool_registry.RuntimeToolRegistry(tools, cancel=ctx.cancel)
         return tools
 
 
@@ -816,6 +855,10 @@ class AgentEngine:
                 self._emit({"type": "step", "icon": "⚠️",
                             "text": "MCP не подключён: строгий режим снят, работаю обычными "
                                     "инструментами. Подключи сервер в Настройках → MCP"})
+        # The authority must reflect post-policy adapters (not the broader set
+        # assembled before strict MCP filtering).
+        import tool_registry
+        self.runtime_registry = tool_registry.RuntimeToolRegistry(shared, cancel=ctx.cancel)
         is_short_chat = len(str(ctx.goal or "").strip()) <= SHORT_MESSAGE_CHARS
         for agent in agents:
             if agent.role == "talk" and is_short_chat:
@@ -843,7 +886,25 @@ class AgentEngine:
     def _emit(self, event: dict) -> None:
         """Emit legacy UI events plus the stable agent-lifecycle protocol."""
         try:
-            self.ctx.emit(event)
+            kind = str(event.get("type") or "")
+            if kind in {"plan_updated", "plan_revised"} and self.plan:
+                if kind == "plan_updated":
+                    current = next((item for item in self.plan
+                                    if item.get("status") in {"pending", "in_progress"}
+                                    and item.get("id") != "verify"), None)
+                    if current:
+                        current["status"] = "completed"
+                else:
+                    current = next((item for item in self.plan if item.get("status") == "pending"), None)
+                    if current:
+                        current["status"] = "in_progress"
+                        current["revision_reason"] = clip(event.get("reason") or "", 500)
+                event = {**event, "plan": [dict(item) for item in self.plan]}
+                if self.record_id:
+                    database.update_agent_run(self.record_id, plan=self.plan)
+            emitted = self.events.emit(event)
+            if self.record_id:
+                database.add_agent_run_event(self.record_id, emitted)
             companion = None
             kind = str(event.get("type") or "")
             if kind == "plan":
@@ -858,10 +919,17 @@ class AgentEngine:
                     "observation": clip(event.get("output") or event.get("error") or "", 1200),
                 }
             if companion:
-                self.ctx.emit(companion)
+                emitted_companion = self.events.emit(companion)
+                if self.record_id:
+                    database.add_agent_run_event(self.record_id, emitted_companion)
                 if kind == "tool":
-                    self.ctx.emit({"type": "observation", "tool": companion.get("tool"),
-                                   "summary": companion.get("observation"), "ok": companion["status"] == "ok"})
+                    ok = companion["status"] == "ok"
+                    self.state.add_observation(companion.get("tool"), ok,
+                                               companion.get("observation"), companion.get("command"))
+                    observation = self.events.emit({"type": "observation", "tool": companion.get("tool"),
+                                                    "summary": companion.get("observation"), "ok": ok})
+                    if self.record_id:
+                        database.add_agent_run_event(self.record_id, observation)
         except Exception:  # noqa: BLE001 — a closed stream must not kill the run
             log.debug("event sink failed", exc_info=True)
 
@@ -875,6 +943,9 @@ class AgentEngine:
             if not policy.needs_confirmation(tool, payload):
                 return True
             record = policy.register_confirmation(tool, payload)
+            self._emit({"type": "permission_requested", "permission_id": record["id"],
+                        "tool": record["tool"], "description": record["description"],
+                        "risk": record["risk"], "timeout": policy.confirm_timeout()})
             self._emit({"type": "confirm", "id": record["id"], "tool": record["tool"],
                         "description": record["description"], "risk": record["risk"],
                         "command": record.get("command") or record["description"],
@@ -1713,8 +1784,9 @@ class AgentEngine:
         if not self.record_id:
             return
         try:
-            database.finish_agent_run(self.record_id, self.state.status, self.answer,
-                                      self.state.error, self.state.steps)
+            database.finish_agent_run(self.record_id, self.outcome_status or self.state.status,
+                                      self.answer, self.state.error, self.state.steps,
+                                      verification=self.verification)
         except Exception:  # noqa: BLE001
             log.warning("cannot finish the agent run record", exc_info=True)
 

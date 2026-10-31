@@ -25,6 +25,8 @@ class RunState:
         self.tool_ok: dict[str, int] = {}
         self.tool_fail: dict[str, int] = {}
         self.media: list = []
+        self.observations: list[dict] = []
+        self.recovery_attempts: list[dict] = []
         self.notes: list[str] = []
         self.steps = 0
         self.status = "ok"
@@ -51,6 +53,21 @@ class RunState:
             target[name] = target.get(name, 0) + 1
             self.steps += 1
 
+    def add_observation(self, tool: str, ok: bool, summary: str = "", command: str = "") -> None:
+        """Keep bounded, redacted execution evidence for verification/recovery."""
+        with self._lock:
+            self.observations.append({"tool": str(tool or "")[:100], "ok": bool(ok),
+                                      "summary": str(summary or "")[:2000],
+                                      "command": str(command or "")[:500]})
+            del self.observations[:-80]
+
+    def add_recovery(self, tool: str, reason: str, attempt: int) -> None:
+        with self._lock:
+            self.recovery_attempts.append({"tool": str(tool or "")[:100],
+                                           "reason": str(reason or "")[:500],
+                                           "attempt": int(attempt)})
+            del self.recovery_attempts[:-30]
+
     def add_media(self, result, model=None) -> None:
         """Record generated media (result + chosen model, as media_agent returns)."""
         if not result:
@@ -76,6 +93,8 @@ class RunState:
                 "sources": list(self.sources),
                 "tools": list(self.tools),
                 "media": [item.get("result") for item in self.media],
+                "observations": list(self.observations),
+                "recovery_attempts": list(self.recovery_attempts),
                 "steps": self.steps,
                 "status": self.status,
                 "error": self.error,

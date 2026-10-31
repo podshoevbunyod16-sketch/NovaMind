@@ -1313,7 +1313,6 @@ def agent_stream():
     # Агент и песочница работают в одной папке: иначе файлы агента не видны
     # в файловом менеджере, а команды выполняются в другом дереве.
     cap_owner = _identity.chat_owner()
-    _identity.bind_owner(cap_owner)                # поток агента узнает своего владельца
     _set_agent_workspace(workspace_dir())
     # Инструменты движка исполняют команды только через эту песочницу.
     # При выключенном автопоиске песочница вообще не подключается к запуску.
@@ -1416,7 +1415,7 @@ def agent_stream():
             repair_answer=lambda text: repair_truncated_answer(text, goal),
             max_tokens=answer_tokens,
             chat_id=chat_id or "",
-            run_id=run_id, force_role=("files" if media_kind else ""),
+            run_id=run_id, owner=cap_owner, force_role=("files" if media_kind else ""),
             media_kind=media_kind or "",
             media_generate=(tools_ctx.generate_media if media_kind else None),
             local_model=_local_model,
@@ -1462,6 +1461,8 @@ def agent_stream():
                       "output": [violation.event("output")["reasons"]
                                  for violation in output_guards]},
             "stopped": state.status == "stopped",
+            "task_status": engine.outcome_status,
+            "verification": engine.verification,
             "status": "stopped" if state.status == "stopped" else
                       ("error" if state.status == "error" else "ok"),
             "error": state.error, "seconds": round(time.time() - started, 1),
