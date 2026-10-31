@@ -41,6 +41,25 @@ def test_guest_keeps_the_ui_language_switch(client):
     assert response.status_code == 200 and response.get_json()["language"] == "ru"
 
 
+def test_env_can_grant_admin_features_to_every_signed_in_user(client, monkeypatch):
+    monkeypatch.setenv("ADMIN_ACCESS_FOR_ALL_USERS", "1")
+    with client.session_transaction() as sess:
+        sess["nova_signed_in"] = True
+        sess["nova_user_nick"] = "ordinary-user"
+
+    session_info = client.get("/api/session/check").get_json()
+    assert session_info["signed_in"] is True
+    assert session_info["admin"] is True
+    assert client.get("/api/settings/mcp").status_code == 200
+    assert client.get("/settings").status_code == 200
+
+
+def test_env_admin_features_still_reject_anonymous_guests(client, monkeypatch):
+    monkeypatch.setenv("ADMIN_ACCESS_FOR_ALL_USERS", "1")
+    assert client.get("/api/session/check").get_json()["admin"] is False
+    assert client.get("/api/settings/mcp").status_code == 403
+
+
 def test_guest_still_opens_the_chat(client):
     for path in ("/", "/chat"):
         assert client.get(path).status_code == 200, path
@@ -77,6 +96,7 @@ def test_attachment_menu_opens_upward_on_mobile():
     block = css.split(".attach-dropdown {", 1)[1].split("}", 1)[0]
     assert "bottom:" in block
     assert "top: auto" in block
+    assert ".attach-dropdown .toolbar-btn span { display: inline; }" in css
 
 
 def test_settings_links_are_hidden_for_non_admins():

@@ -168,8 +168,24 @@ def is_enabled():
     return os.getenv("TERMINAL_ENABLED", "0") == "1"
 
 
+def _session_signed_in():
+    return bool(session.get("admin_logged_in")
+                or session.get("nova_google_login")
+                or session.get("nova_signed_in")
+                or session.get("nova_user_nick")
+                or session.get("username"))
+
+
 def is_admin():
-    return bool(session.get("admin_logged_in"))
+    """Administrative feature access for this request.
+
+    ``ADMIN_ACCESS_FOR_ALL_USERS=1`` deliberately grants the settings/MCP and
+    administrative agent capabilities to every *signed-in* user. Anonymous
+    visitors remain non-admin, and user workspaces/data keep separate owners.
+    """
+    shared = (os.getenv("ADMIN_ACCESS_FOR_ALL_USERS", "0") or "").strip().lower()
+    return bool(session.get("admin_logged_in")
+                or (shared in {"1", "true", "yes", "on"} and _session_signed_in()))
 
 
 def signed_in():
@@ -179,11 +195,7 @@ def signed_in():
     синхронизируется через /api/session/login. Песочница — рабочее окружение,
     поэтому доступ есть у любого вошедшего, а не только у админа.
     """
-    return bool(session.get("admin_logged_in")
-                or session.get("nova_google_login")
-                or session.get("nova_signed_in")
-                or session.get("nova_user_nick")
-                or session.get("username"))
+    return _session_signed_in()
 
 
 def can_use_workspace():

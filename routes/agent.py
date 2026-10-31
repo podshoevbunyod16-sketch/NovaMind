@@ -928,7 +928,7 @@ def agent_status():
         "timeout": AGENT_TIMEOUT,
         "confirm_mode": policy.confirm_mode(),
         "user": signed_in(),
-        "admin": bool(session.get("admin_logged_in")),
+        "admin": bool(terminal_routes.is_admin()),
         "hint": ("" if enabled
                  else "Включите AGENT_ENABLED=1 в .env и перезапустите сервер"),
         "workspace_hint": ("" if workspace else
