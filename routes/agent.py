@@ -79,8 +79,8 @@ log = logging.getLogger("novamind.agent")
 #: Служебный чат-ключ → последние сообщения. Страховка, если база недоступна.
 _AGENT_HISTORY_CACHE = {}
 
-MAX_STEPS = max(1, min(int(os.getenv("AGENT_MAX_STEPS", "20")), 60))
-AGENT_TIMEOUT = max(10.0, float(os.getenv("AGENT_TIMEOUT", "180")))
+MAX_STEPS = max(1, min(int(os.getenv("AGENT_MAX_STEPS", "40")), 500))
+AGENT_TIMEOUT = max(10.0, float(os.getenv("AGENT_TIMEOUT", "900")))
 STEP_TIMEOUT = float(os.getenv("AGENT_STEP_TIMEOUT", "12"))
 MAX_OBSERVATION = 6000
 MAX_SOURCES = 12

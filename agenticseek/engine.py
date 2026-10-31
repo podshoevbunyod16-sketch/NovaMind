@@ -80,7 +80,7 @@ def python_tool_command(tool: str, arguments: dict) -> str:
     return f"python3 -m novamind_cli call {shlex.quote(str(tool))} {shlex.quote(payload)}"
 
 
-MAX_STEPS = max(1, min(int(os.getenv("AGENT_MAX_STEPS", "20")), 60))
+MAX_STEPS = max(1, min(int(os.getenv("AGENT_MAX_STEPS", "40")), 500))
 
 CLEAN_ANSWER_SYSTEM = (
     "Ты — NovaMind. Ответь пользователю только готовым ответом по-русски: "
@@ -346,6 +346,11 @@ class AgentEngine:
             self._build_agents()          # ← здесь инструменты реально грузятся
             self._recall_ready()          # «вспомнил», со списком подключённого
             self._run_agent()
+        except StepLimitReached as stop:
+            self.state.status = "ok"
+            self._emit({"type": "step", "icon": "🏁",
+                        "text": "Лимит шагов — собираю итог по найденному"})
+            self.answer = self._answer_after_limit(stop)
         except AgentStopped as stop:
             self.state.status = "stopped"
             self.answer = self._partial_answer(stop)
@@ -1299,6 +1304,29 @@ class AgentEngine:
             thread.join(timeout=0.05)
 
     # ── answers ───────────────────────────────────────────────────────────
+    def _answer_after_limit(self, stop) -> str:
+        """Шаги кончились: просим модель дать итог по собранному, без инструментов."""
+        agent = self.chosen or next(iter(self.agents.values()), None)
+        if agent is None:
+            return self._partial_answer(stop)
+        try:
+            agent.step_budget = None                      # итоговый вызов не тратит шаги
+            agent.deadline = time.monotonic() + 120       # отдельное время на итог
+            agent.memory.push(
+                "user",
+                "Лимит шагов исчерпан. НЕ вызывай инструменты и не пиши блоки "
+                "вызова. Дай готовый, законченный итоговый ответ на мою исходную "
+                "задачу по всему, что уже найдено и сделано. Если что-то не успел, "
+                "скажи что именно и предложи написать «продолжай».")
+            text = strip_unknown_blocks(agent.llm_request(), set())
+            if text.strip() and not _is_tool_only(text):
+                return text
+        except AgentStopped:
+            pass          # пользователь нажал «стоп» или вышло время итога
+        except Exception:  # noqa: BLE001
+            log.warning("final answer after step limit failed", exc_info=True)
+        return self._partial_answer(stop)
+
     def _partial_answer(self, stop: AgentStopped) -> str:
         """Keep what the agent already produced; add the honest stop reason."""
         partial = ""

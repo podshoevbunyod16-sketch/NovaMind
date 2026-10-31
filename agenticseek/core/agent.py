@@ -642,7 +642,7 @@ class Agent:
             feedback, executed = self.execute_blocks(answer)
             if executed:
                 self.last_feedback = feedback
-                self.memory.push("user", feedback)
+                self.memory.push("user", self._budget_hint(feedback))
                 continue
             cleaned = strip_unknown_blocks(answer, set(self.all_tools()))
             if cleaned == str(answer or "").strip() or unknown >= 1:
@@ -676,6 +676,18 @@ class Agent:
                 "file_agent": "Файловый агент", "browser_agent": "Веб-агент",
                 "casual_agent": "Собеседник",
                 "orchestrator_agent": "Оркестратор"}.get(self.type, "Агент")
+
+    def _budget_hint(self, feedback: str) -> str:
+        """На 80% бюджета шагов просим модель переходить к итоговому ответу."""
+        budget = self.step_budget
+        if budget is None or getattr(self, "_hinted", False):
+            return feedback
+        if budget.used >= int(budget.limit * 0.8):
+            self._hinted = True
+            left = max(0, budget.limit - budget.used)
+            return (feedback + f"\n\n[система] Осталось примерно {left} шагов. "
+                    "Когда данных достаточно, дай итоговый ответ без инструментов.")
+        return feedback
 
     def limit_answer(self) -> str:
         """Honest message when the agent ran out of turns."""
