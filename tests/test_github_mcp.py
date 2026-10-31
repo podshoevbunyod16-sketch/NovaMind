@@ -70,6 +70,36 @@ def test_github_mcp_rewrites_search_code_sets_minimal_output_and_calls_get_me_on
     assert calls[2][2].get("minimal_output") is True
 
 
+def test_connected_mcp_is_available_by_default_when_search_toggle_is_off(
+    admin_client, sandbox, monkeypatch
+):
+    """A verified MCP connection overrides the UI tools toggle by default."""
+    monkeypatch.setattr(mcp_registry, "connected_tools", lambda: [
+        {"server_id": "docs", "server_name": "Docs MCP", "name": "lookup",
+         "inputSchema": {"type": "object", "properties": {"query": {"type": "string"}}}},
+    ])
+    calls = []
+    monkeypatch.setattr(
+        mcp_registry, "call_tool",
+        lambda server_id, tool, arguments=None: calls.append(
+            (server_id, tool, dict(arguments or {}))) or {"content": [{"type": "text", "text": "result"}]},
+    )
+    monkeypatch.setenv("AGENT_CONFIRM", "off")
+    monkeypatch.setenv("MCP_TOOLS_BY_DEFAULT", "1")
+    script(monkeypatch, [
+        '```mcp_call\n{"server_id":"docs","tool":"lookup","arguments":{"query":"NovaMind"}}\n```',
+        "Ответ из подключённого сервера.",
+    ])
+
+    events = ndjson(admin_client.post("/api/agent/stream", json={
+        "message": "проверь документацию", "tools": False, "search": False,
+    }))
+
+    assert calls == [("docs", "lookup", {"query": "NovaMind"})]
+    assert events_of(events, "tool")[0]["name"] == "mcp_call"
+    assert answer_of(events) == "Ответ из подключённого сервера."
+
+
 def test_strict_mcp_uses_python_gateway_and_registry_connections(
     admin_client, sandbox, tmp_path, monkeypatch
 ):
@@ -167,6 +197,27 @@ def test_github_mcp_limits_search_calls_to_three_per_run(admin_client, sandbox, 
     assert tool_events[3]["status"] == "error"
     assert "не более 3" in tool_events[3]["output"]
     assert answer_of(events) == "Отвечаю по трём выполненным поискам."
+
+
+def test_connection_is_only_active_after_real_tools_list(tmp_path, monkeypatch):
+    store = tmp_path / "mcp_connections.json"
+    store.write_text(json.dumps({
+        "empty": {"name": "Empty MCP", "url": "https://mcp.example.test/mcp",
+                  "auth": "none", "connected": False}
+    }), encoding="utf-8")
+    monkeypatch.setattr(mcp_registry, "STORE", store)
+    monkeypatch.setattr(mcp_registry, "_initialize_session", lambda _sid: {
+        "jsonrpc": "2.0", "result": {"protocolVersion": "2025-06-18"}
+    })
+    monkeypatch.setattr(mcp_registry, "request", lambda *a, **k: {"result": {}})
+    monkeypatch.setattr(mcp_registry, "list_tools", lambda _sid: [])
+
+    result = mcp_registry.test_connection("empty")
+
+    assert result["connected"] is False
+    assert "ни одного инструмента" in result["error"]
+    public = mcp_registry.public_connections()[0]
+    assert public["connected"] is False and public["tools_count"] == 0
 
 
 def test_mcp_registry_retries_on_403_and_429(tmp_path, monkeypatch):
