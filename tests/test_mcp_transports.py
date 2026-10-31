@@ -8,6 +8,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import mcp_registry
 import mcp_transports
+import skills_registry
 from tests.agent_helpers import answer_of, events_of, ndjson, script as model_script
 
 
@@ -82,6 +83,62 @@ def test_real_stdio_agent_two_tools_observation_and_verification(
         assert events_of(events, "verification_completed")[-1]["ok"] is True
         assert events_of(events, "task_completed")[-1]["verified"] is True
         assert answer_of(events) == "Данные получены и проверены."
+    finally:
+        mcp_transports.close_all()
+
+
+def test_agent_combines_skill_mcp_filesystem_and_terminal(
+    admin_client, sandbox, tmp_path, monkeypatch
+):
+    store = tmp_path / "combined-connections.json"
+    server_script = tmp_path / "combined-server.py"
+    _stdio_server(server_script)
+    monkeypatch.setattr(mcp_registry, "STORE", store)
+    monkeypatch.setattr(skills_registry, "SKILLS_DIR", tmp_path / "skills")
+    monkeypatch.setenv("MCP_STDIO_ENABLED", "1")
+    monkeypatch.setenv("MCP_STDIO_COMMANDS", "python")
+    monkeypatch.setenv("AGENT_CONFIRM", "off")
+    skills_registry.save_text("mcp-file-workflow", """---
+name: MCP File Workflow
+description: Получить MCP данные и сохранить проверенный отчёт
+ tools: mcp_call, file_write, terminal
+---
+Сначала получи данные через MCP, затем сохрани их в отчёт и прочитай отчёт командой.
+""".replace("\n tools:", "\ntools:"))
+    server_id = mcp_registry.save_connection({
+        "name": "Combined STDIO", "transport": "stdio", "command": sys.executable,
+        "args": [str(server_script)], "auth": "none",
+    })
+    assert mcp_registry.test_connection(server_id)["connected"] is True
+
+    answers = iter([
+        f'```mcp_call\n{{"server_id":"{server_id}","tool":"echo","arguments":{{"text":"combined"}}}}\n```',
+        '```file_write:report.txt\nECHO:combined\n```',
+        '```terminal\ncat report.txt\n```',
+        "Отчёт создан и проверен: ECHO:combined",
+    ])
+    systems = []
+
+    def complete(_messages, system=None, **_kwargs):
+        systems.append(str(system or ""))
+        return next(answers), {"tool_calls": [], "native_tools": bool(_kwargs.get("tools"))}
+
+    import routes.agent as agent_routes
+    monkeypatch.setattr(agent_routes, "chat_completion", complete)
+    monkeypatch.setattr(agent_routes, "resolve_target",
+                        lambda provider=None, model=None: ("groq", "test-model", {"max_tokens": 4096}))
+    try:
+        events = ndjson(admin_client.post("/api/agent/stream", json={
+            "message": "Используй MCP File Workflow: получи данные и создай report.txt",
+            "tools": False, "search": False,
+        }))
+        tools = events_of(events, "tool")
+        assert [item["name"] for item in tools] == ["mcp_call", "file_write", "terminal"]
+        assert (sandbox / "report.txt").read_text(encoding="utf-8").strip() == "ECHO:combined"
+        assert "ECHO:combined" in tools[-1]["output"]
+        assert any("MCP File Workflow" in system for system in systems)
+        assert events_of(events, "verification_completed")[-1]["status"] == "completed"
+        assert answer_of(events).startswith("Отчёт создан и проверен")
     finally:
         mcp_transports.close_all()
 

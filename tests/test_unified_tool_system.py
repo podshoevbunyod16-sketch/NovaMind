@@ -24,6 +24,10 @@ def test_unified_catalog_discovers_builtin_mcp_and_skill(monkeypatch):
 
 
 def test_unified_mcp_executes_real_registry_interface(monkeypatch):
+    monkeypatch.setattr(mcp_registry, "connected_tools", lambda: [{
+        "server_id": "demo", "server_name": "Demo", "name": "lookup",
+        "description": "Lookup", "inputSchema": {"type": "object", "properties": {"q": {"type": "string"}}},
+    }])
     monkeypatch.setattr(mcp_registry, "call_tool",
                         lambda server_id, name, args: {"server": server_id, "name": name, "args": args})
     result = tool_registry.execute_unified("mcp:demo:lookup", {"q": "x"})

@@ -82,15 +82,30 @@ const CHAT_STREAM = [
 // ── Синтетический поток агента: те же события, что отдаёт /api/agent/stream
 const AGENT_STREAM = [
   { type: 'stage', scene: 'agent', title: 'Работаю в Linux', text: 'Иду к цели по шагам…' },
+  { type: 'task_started', event_id: 'e1', task_id: 'run-1', timestamp: 1, payload: {}, task: 'Проверить' },
+  { type: 'task_analysis', event_id: 'e2', task_id: 'run-1', timestamp: 2, payload: {}, status: 'completed', summary: 'Цель разобрана' },
+  { type: 'tool_discovered', event_id: 'e3', task_id: 'run-1', timestamp: 3, payload: {}, count: 3 },
+  { type: 'plan_created', event_id: 'e4', task_id: 'run-1', timestamp: 4, payload: {}, summary: 'План создан',
+    plan: [{ id: 'inspect', title: 'Осмотреть файлы', status: 'pending' }, { id: 'verify', title: 'Проверить', status: 'pending' }] },
   { type: 'plan', text: '1) посмотреть файлы\n2) запустить пример' },
   { type: 'task', task: { id: 'task-1', title: 'Проверить песочницу', status: 'doing', source: 'agent', steps: [] } },
   { type: 'step', icon: '📂', text: 'Смотрю файлы — ls -la' },
+  { type: 'tool_selected', event_id: 'e5', task_id: 'run-1', timestamp: 5, payload: {}, tool: 'terminal' },
+  { type: 'permission_requested', event_id: 'e6', task_id: 'run-1', timestamp: 6, payload: {}, tool: 'terminal', description: 'Разрешить безопасную команду' },
+  { type: 'tool_call_started', event_id: 'e7', task_id: 'run-1', timestamp: 7, payload: {}, tool: 'terminal' },
   { type: 'thought', seconds: 4.2, label: 'Думал 4 c',
     text: 'Сначала посмотрю, что лежит в папке, потом запущу пример.' },
   { type: 'tool', name: 'terminal', kind: 'command', label: 'Выполнил команду',
     detail: 'ls -la', command: 'ls -la', code: 0, status: 'ok',
     output: 'README.md  hello.py' },
+  { type: 'tool_call_completed', event_id: 'e8', task_id: 'run-1', timestamp: 8, payload: {}, tool: 'terminal' },
+  { type: 'observation', event_id: 'e9', task_id: 'run-1', timestamp: 9, payload: {}, tool: 'terminal', ok: true, summary: 'Найдены README.md и hello.py' },
+  { type: 'plan_updated', event_id: 'e10', task_id: 'run-1', timestamp: 10, payload: {}, summary: 'Осмотр завершён',
+    plan: [{ id: 'inspect', title: 'Осмотреть файлы', status: 'completed' }, { id: 'verify', title: 'Проверить', status: 'pending' }] },
+  { type: 'plan_revised', event_id: 'e11', task_id: 'run-1', timestamp: 11, payload: {}, summary: 'Уточнил проверку',
+    plan: [{ id: 'inspect', title: 'Осмотреть файлы', status: 'completed' }, { id: 'verify', title: 'Проверить запуск', status: 'in_progress' }] },
   { type: 'step', icon: '✅', text: '$ python3 hello.py — код 0' },
+  { type: 'tool_call_failed', event_id: 'e12', task_id: 'run-1', timestamp: 12, payload: {}, tool: 'file_read', observation: 'Первая попытка: путь уточнён' },
   { type: 'tool', name: 'file_read', kind: 'read', label: 'Прочитал файл',
     detail: 'hello.py', command: 'hello.py', code: 0, status: 'ok',
     output: "print('Привет из рабочей папки NovaMind')" },
@@ -99,8 +114,11 @@ const AGENT_STREAM = [
     output: 'Привет из рабочей папки NovaMind' },
   { type: 'task', task: { id: 'task-1', title: 'Проверить песочницу', status: 'done', source: 'agent',
                            steps: [{ title: '$ python3 hello.py', status: 'done', log: 'ок' }] } },
+  { type: 'verification_started', event_id: 'e13', task_id: 'run-1', timestamp: 13, payload: {}, summary: 'Запускаю проверку' },
+  { type: 'verification_completed', event_id: 'e14', task_id: 'run-1', timestamp: 14, payload: {}, ok: true, summary: 'Проверка подтверждена' },
   { type: 'token', token: 'Скрипт отработал: ' },
   { type: 'token', token: '**привет из папки**.' },
+  { type: 'task_completed', event_id: 'e15', task_id: 'run-1', timestamp: 15, payload: {}, status: 'completed', verified: true },
   { type: 'result', reply: 'Скрипт отработал: привет из папки.', steps: 2, task_id: 'task-1', model: 'mock-model' },
   { type: 'done' },
 ];
@@ -1319,7 +1337,18 @@ await window.sendMessage();
 await settle();
 const agentBubble = lastAi();
 check('задача ушла в Linux', mock.agentRequests.length === 2);
-check('ИИ показывает план', agentBubble.querySelector('.stage-plan')?.textContent.includes('посмотреть файлы') === true);
+check('ИИ показывает и обновляет структурированный план',
+  agentBubble.querySelector('.stage-plan')?.textContent.includes('Осмотреть файлы') === true
+  && agentBubble.querySelector('.stage-plan')?.textContent.includes('Проверить запуск') === true);
+check('обработчик содержит все terminal lifecycle outcomes',
+  ["plan_updated", "plan_revised", "tool_call_failed", "task_completed", "task_failed", "task_cancelled"]
+    .every((name) => linuxJs.includes(`case '${name}'`)));
+check('полный lifecycle отображает выбор, разрешение, observation и verification', (() => {
+  const text = agentBubble.textContent || '';
+  return text.includes('Выбран terminal') && text.includes('Разрешить безопасную команду')
+    && text.includes('Найдены README.md') && text.includes('Проверка подтверждена')
+    && text.includes('Задача выполнена');
+})(), agentBubble.textContent || '');
 check('шаги видны в блоке «Работа в Linux»',
   agentBubble.querySelector('.agent-term-title')?.textContent === 'Работа в Linux'
   && agentBubble.querySelectorAll('.agent-term-row').length === 3
