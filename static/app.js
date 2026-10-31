@@ -237,9 +237,149 @@ function autoSearchEnabled() {
   return !!webSearchOn;
 }
 
-// ========== ПРИКРЕПИТЬ ==========
+// ========== ПРИКРЕПИТЬ / MCP ==========
+let attachMcpCatalog = [];
+let attachMcpConnections = [];
+let attachMcpLoaded = false;
+
 function toggleAttachMenu() {
-  document.getElementById('attachDropdown').classList.toggle('open');
+  const menu = document.getElementById('attachDropdown');
+  const opening = !menu.classList.contains('open');
+  menu.classList.toggle('open', opening);
+  if (opening) loadAttachMcp();
+}
+
+function setAttachMcpStatus(text, kind = '') {
+  const status = document.getElementById('attachMcpStatus');
+  if (!status) return;
+  status.textContent = text || '';
+  status.className = 'attach-mcp-status' + (kind ? ` is-${kind}` : '');
+}
+
+function mcpCard(name, description, actionHtml = '', connected = false) {
+  return `<div class="attach-mcp-card"><div class="attach-mcp-card-main">`
+    + `<span class="attach-mcp-card-name">${escapeHtml(name || 'MCP-сервер')}</span>`
+    + `<span class="attach-mcp-card-desc">${escapeHtml(description || '')}</span></div>`
+    + (connected ? '<span class="attach-mcp-badge">● активен</span>' : '')
+    + actionHtml + '</div>';
+}
+
+async function loadAttachMcp(force = false) {
+  if (attachMcpLoaded && !force) return;
+  const connectedEl = document.getElementById('attachMcpConnected');
+  const catalogEl = document.getElementById('attachMcpCatalog');
+  if (!connectedEl || !catalogEl) return;
+  connectedEl.innerHTML = '<span class="attach-mcp-muted">Загрузка…</span>';
+  try {
+    const response = await fetch('/api/settings/mcp');
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+    const connections = Array.isArray(data.connections) ? data.connections : [];
+    attachMcpCatalog = Array.isArray(data.catalog) ? data.catalog : [];
+    attachMcpConnections = connections.filter((item) => item.connected);
+    const active = attachMcpConnections;
+    document.getElementById('attachMcpCount').textContent = String(active.length);
+    connectedEl.innerHTML = active.length
+      ? active.map((item, index) => mcpCard(
+          item.name,
+          `${item.tools_count ?? 0} инструментов · ${item.transport || 'HTTP'}`,
+          `<button type="button" onclick="removeAttachMcp(${index})" title="Отключить сервер">×</button>`,
+          true
+        )).join('')
+      : '<span class="attach-mcp-muted">Пока нет подключённых серверов.</span>';
+    catalogEl.innerHTML = attachMcpCatalog.map((item, index) => mcpCard(
+      item.name, item.description,
+      `<button type="button" onclick="selectAttachMcp(${index})">Добавить</button>`
+    )).join('');
+    attachMcpLoaded = true;
+    setAttachMcpStatus(active.length
+      ? `Все ${active.length} сервер(а) доступны агенту одновременно вместе со встроенными инструментами.`
+      : 'Добавьте сервер — после проверки его инструменты сразу станут доступны агенту.');
+  } catch (error) {
+    connectedEl.innerHTML = '<span class="attach-mcp-muted">Список недоступен.</span>';
+    catalogEl.innerHTML = '';
+    document.getElementById('attachMcpCount').textContent = '—';
+    setAttachMcpStatus(error.message || 'Не удалось загрузить MCP. Войдите как администратор.', 'error');
+  }
+}
+
+function toggleMcpPanel(event) {
+  event?.stopPropagation();
+  const panel = document.getElementById('attachMcpPanel');
+  const button = document.getElementById('attachMcpToggle');
+  const opening = panel.hidden;
+  panel.hidden = !opening;
+  button?.setAttribute('aria-expanded', opening ? 'true' : 'false');
+  if (opening) loadAttachMcp(true);
+}
+
+function selectAttachMcp(index) {
+  const item = attachMcpCatalog[index] || {};
+  const form = document.getElementById('attachMcpForm');
+  form.hidden = false;
+  document.getElementById('attachMcpName').value = item.id === 'custom' ? '' : (item.name || '');
+  document.getElementById('attachMcpUrl').value = item.url || '';
+  const auth = Array.isArray(item.auth) ? item.auth[0] : 'none';
+  document.getElementById('attachMcpAuth').value = ['none', 'bearer', 'api_key'].includes(auth) ? auth : 'none';
+  document.getElementById('attachMcpSecret').value = '';
+  updateAttachMcpSecret();
+  form.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+}
+
+function updateAttachMcpSecret() {
+  const auth = document.getElementById('attachMcpAuth').value;
+  const secret = document.getElementById('attachMcpSecret');
+  secret.hidden = auth === 'none';
+  secret.required = auth !== 'none';
+  secret.placeholder = auth === 'api_key' ? 'API key (хранится на сервере)' : 'Bearer token (хранится на сервере)';
+}
+
+function closeAttachMcpForm() {
+  document.getElementById('attachMcpForm').hidden = true;
+  setAttachMcpStatus('');
+}
+
+async function connectAttachMcp(event) {
+  event.preventDefault();
+  const auth = document.getElementById('attachMcpAuth').value;
+  const secret = document.getElementById('attachMcpSecret').value.trim();
+  const payload = {
+    name: document.getElementById('attachMcpName').value.trim(),
+    url: document.getElementById('attachMcpUrl').value.trim(),
+    auth,
+  };
+  if (auth === 'api_key') payload.api_key = secret;
+  if (auth === 'bearer') payload.token = secret;
+  setAttachMcpStatus('Подключаю и запрашиваю список инструментов…');
+  try {
+    const response = await fetch('/api/settings/mcp/connect', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || !data.connected) throw new Error(data.error || `HTTP ${response.status}`);
+    closeAttachMcpForm();
+    attachMcpLoaded = false;
+    await loadAttachMcp(true);
+    setAttachMcpStatus('Сервер подключён. Его инструменты уже доступны агенту.', 'ok');
+  } catch (error) {
+    setAttachMcpStatus(error.message || 'Не удалось подключить MCP-сервер', 'error');
+  }
+}
+
+async function removeAttachMcp(index) {
+  const serverId = attachMcpConnections[index]?.id;
+  if (!serverId) return;
+  setAttachMcpStatus('Отключаю сервер…');
+  try {
+    const response = await fetch(`/api/settings/mcp/${encodeURIComponent(serverId)}`, { method: 'DELETE' });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+    attachMcpLoaded = false;
+    await loadAttachMcp(true);
+    setAttachMcpStatus('Сервер отключён.', 'ok');
+  } catch (error) {
+    setAttachMcpStatus(error.message || 'Не удалось отключить сервер', 'error');
+  }
 }
 
 async function analyzeAttachment(file, kind) {
