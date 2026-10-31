@@ -905,7 +905,10 @@ class NovaToolsContext:
     def save_skill(self, name: str, content: str):
         import skills_registry
         item = skills_registry.save_text(name, content)
-        self.emit({"type": "skill", "skill": item})
+        validation = skills_registry.validate_skill(item["id"])
+        item["validation"] = validation
+        self.emit({"type": "skill", "skill": item, "validated": validation["ok"],
+                   "missing_tools": validation["missing_tools"]})
         return item
 
     def add_source(self, url: str, title: str = "") -> None:
@@ -1389,7 +1392,7 @@ def agent_stream():
         if tools_allowed:
             try:
                 import skills_registry
-                skill_block = skills_registry.prompt_context() or ""
+                skill_block = skills_registry.prompt_context(goal) or ""
             except Exception:  # noqa: BLE001
                 log.debug("skills block failed", exc_info=True)
 

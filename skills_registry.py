@@ -192,19 +192,67 @@ def delete_skill(skill_id: str) -> None:
         _write_disabled(disabled)
 
 
-def prompt_context(max_chars: int = 18_000) -> str:
-    blocks = []
-    remaining = max_chars
+def _available_tool_names() -> set[str]:
+    """Live unified names used to validate skill requirements."""
+    names: set[str] = set()
+    try:
+        import tool_registry
+        names.update(spec.name for spec in tool_registry.list_tools())
+        names.update(tool_registry.ACTION_TO_TOOL)
+    except Exception:
+        pass
+    try:
+        import mcp_registry
+        for item in mcp_registry.connected_tools():
+            names.add(str(item.get("name") or ""))
+            names.add("mcp_call")
+    except Exception:
+        pass
+    return {name for name in names if name}
+
+
+def validate_skill(skill_id: str) -> dict[str, Any]:
+    """Validate markdown and report unavailable declared tools without executing it."""
+    skill = get_skill(skill_id)
+    available = _available_tool_names()
+    missing = [name for name in skill.get("tools", []) if name not in available]
+    return {"ok": not missing, "skill": skill_id, "missing_tools": missing,
+            "available_tools": sorted(available)}
+
+
+def prompt_context(query: str = "", max_chars: int = 18_000, limit: int = 6) -> str:
+    """Load only relevant enabled skills into the temporary task context.
+
+    Skills remain persisted globally, but unrelated instructions are not mixed
+    into every request.  Declared unavailable tools are shown as a warning so
+    the model does not hallucinate their execution.
+    """
+    words = {w for w in re.findall(r"[a-zA-Zа-яА-ЯёЁ0-9_-]{3,}", str(query).lower())}
+    ranked = []
     for item in list_skills():
         if item.get("invalid") or not item.get("enabled", True):
             continue
+        haystack = f"{item.get('id','')} {item.get('name','')} {item.get('description','')}".lower()
+        score = sum(3 if word in haystack else 0 for word in words)
+        # Explicitly named skills always win; with an empty query preserve the
+        # old behaviour (up to the bounded limit).
+        if not words or score or str(item.get("id")) in str(query).lower():
+            ranked.append((score, float(item.get("updated") or 0), item))
+    ranked.sort(key=lambda row: (row[0], row[1]), reverse=True)
+    blocks = []
+    remaining = max_chars
+    available = _available_tool_names()
+    for _score, _updated, item in ranked[:max(1, min(int(limit), 20))]:
         try:
             skill = get_skill(item["id"])
         except Exception:
             continue
-        block = f"\n## Skill: {skill['name']} ({skill['id']})\n{skill['description']}\n{skill['content']}\n"
+        missing = [name for name in skill.get("tools", []) if name not in available]
+        warning = ("\nНедоступные инструменты (не вызывать): " + ", ".join(missing)) if missing else ""
+        block = (f"\n## Skill: {skill['name']} ({skill['id']})\n{skill['description']}"
+                 f"{warning}\n{skill['content']}\n")
         if len(block) > remaining:
-            break
+            continue
         blocks.append(block)
         remaining -= len(block)
     return "\n".join(blocks)

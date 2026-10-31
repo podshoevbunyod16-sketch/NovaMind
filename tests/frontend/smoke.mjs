@@ -1084,6 +1084,15 @@ check('MCP: проверка connection не теряет карточку',
   Boolean(sdoc.querySelector('[data-mcp-card="docs"]')));
 check('MCP: секрет вводится только в скрытое поле',
   sdoc.getElementById('mcpSecret').type === 'password');
+check('MCP: настройки поддерживают HTTP, SSE и STDIO',
+  [...sdoc.getElementById('mcpTransport').options].map((o) => o.value).join(',') === 'http,sse,stdio');
+sdoc.getElementById('mcpTransport').value = 'stdio';
+sdoc.getElementById('mcpTransport').dispatchEvent(new settingsDom.window.Event('change', { bubbles: true }));
+check('MCP: STDIO переключает URL на command/args',
+  sdoc.getElementById('mcpUrl').hidden && !sdoc.getElementById('mcpCommand').hidden
+  && !sdoc.getElementById('mcpArgs').hidden);
+check('MCP: главный чат содержит постоянную панель управления',
+  Boolean(document.getElementById('mcpActiveBar')) && typeof window.openMcpManager === 'function');
 
 // ── 8д) Скиллы ──────────────────────────────────────────────────────────
 console.log('\n8д) Скиллы: отдельная категория, включение и выключение');

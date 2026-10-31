@@ -2,6 +2,7 @@
 from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import logging, time
 
 log = logging.getLogger("novamind.agent")
@@ -20,10 +21,23 @@ class ToolSpec:
     # risk: safe — только чтение; write — меняет данные; danger — необратимые
     # или внешние действия (публикация, отправка, установка пакетов).
     risk: str = "safe"
+    source: str = "builtin"
+    availability: Callable[[], bool] | None = None
+    conflict_key: str = ""
+
+    def available(self) -> bool:
+        try:
+            return True if self.availability is None else bool(self.availability())
+        except Exception:
+            return False
 
     def call(self, **kwargs) -> dict:
         started = time.monotonic()
         try:
+            if not self.available():
+                return {"ok": False, "tool": self.name,
+                        "error": {"type": "unavailable", "message": "Tool is currently unavailable",
+                                  "retryable": True}}
             result = self.execute(**kwargs)
             if not isinstance(result, dict):
                 result = {"ok": True, "result": result}
@@ -243,6 +257,101 @@ def call_tool(name: str, **kwargs) -> dict:
     except Exception:                         # noqa: BLE001
         log.warning("capability check failed", exc_info=True)
     return spec.call(**kwargs)
+
+
+def unified_catalog(workspace: bool | None = None, include_unavailable: bool = False) -> list[dict[str, Any]]:
+    """Live normalized catalog across built-ins, MCP and Skills.
+
+    It is rebuilt on every discovery request, so a newly connected MCP server
+    or newly created skill appears without a process restart.
+    """
+    bootstrap_default_tools()
+    items: list[dict[str, Any]] = []
+    for spec in list_tools():
+        if workspace is False and spec.name in WORKSPACE_TOOLS:
+            continue
+        available = spec.available()
+        if available or include_unavailable:
+            items.append({"id": spec.name, "name": spec.name, "source": spec.source,
+                          "description": spec.description, "schema": dict(spec.schema),
+                          "risk": spec.risk, "available": available,
+                          "parallel_safe": spec.risk == "safe",
+                          "conflict_key": spec.conflict_key or spec.name})
+    try:
+        import mcp_registry
+        for tool in mcp_registry.connected_tools():
+            sid, name = str(tool.get("server_id") or ""), str(tool.get("name") or "")
+            if not sid or not name:
+                continue
+            items.append({"id": f"mcp:{sid}:{name}", "name": name, "source": "mcp",
+                          "server_id": sid, "server_name": tool.get("server_name", sid),
+                          "description": str(tool.get("description") or ""),
+                          "schema": tool.get("inputSchema") or {"type": "object"},
+                          "risk": "write", "available": True, "parallel_safe": False,
+                          "conflict_key": f"mcp:{sid}"})
+    except Exception:
+        log.debug("MCP discovery failed", exc_info=True)
+    try:
+        import skills_registry
+        for skill in skills_registry.list_skills():
+            if skill.get("invalid") or not skill.get("enabled", True):
+                continue
+            items.append({"id": f"skill:{skill['id']}", "name": skill.get("name", skill["id"]),
+                          "source": "skill", "description": skill.get("description", ""),
+                          "schema": {}, "risk": "safe", "available": True,
+                          "parallel_safe": True, "conflict_key": "",
+                          "requires": list(skill.get("tools") or [])})
+    except Exception:
+        log.debug("Skill discovery failed", exc_info=True)
+    return items
+
+
+def execute_unified(tool_id: str, arguments: dict[str, Any] | None = None) -> dict[str, Any]:
+    """One execution interface for built-ins and dynamically discovered MCP."""
+    arguments = dict(arguments or {})
+    if str(tool_id).startswith("mcp:"):
+        _prefix, server_id, name = str(tool_id).split(":", 2)
+        import mcp_registry
+        try:
+            return {"ok": True, "tool": tool_id,
+                    "result": mcp_registry.call_tool(server_id, name, arguments)}
+        except Exception as exc:
+            return {"ok": False, "tool": tool_id,
+                    "error": {"type": type(exc).__name__, "message": str(exc),
+                              "retryable": isinstance(exc, (TimeoutError, ConnectionError))}}
+    if str(tool_id).startswith("skill:"):
+        return {"ok": False, "tool": tool_id,
+                "error": {"type": "instruction_only",
+                          "message": "Skill supplies instructions and is not directly executable",
+                          "retryable": False}}
+    return call_tool(str(tool_id), **arguments)
+
+
+def execute_parallel(calls: list[dict[str, Any]], max_workers: int = 4) -> list[dict[str, Any]]:
+    """Run independent safe calls concurrently; serialize writes/conflicts."""
+    catalog = {item["id"]: item for item in unified_catalog(include_unavailable=True)}
+    results: list[dict[str, Any] | None] = [None] * len(calls)
+    safe = []
+    serial = []
+    occupied: set[str] = set()
+    for index, call in enumerate(calls):
+        tool_id = str(call.get("tool") or call.get("id") or "")
+        meta = catalog.get(tool_id, {})
+        key = str(meta.get("conflict_key") or tool_id)
+        if meta.get("parallel_safe") and key not in occupied:
+            safe.append((index, tool_id, call.get("arguments") or {})); occupied.add(key)
+        else:
+            serial.append((index, tool_id, call.get("arguments") or {}))
+    with ThreadPoolExecutor(max_workers=max(1, min(max_workers, 8))) as pool:
+        futures = {pool.submit(execute_unified, tool_id, args): index
+                   for index, tool_id, args in safe}
+        for future in as_completed(futures):
+            results[futures[future]] = future.result()
+    for index, tool_id, args in serial:
+        results[index] = execute_unified(tool_id, args)
+    return [result or {"ok": False, "error": {"type": "internal", "message": "No result"}}
+            for result in results]
+
 
 def bootstrap_default_tools():
     _register_agent_tools()
@@ -530,7 +639,10 @@ def _register_agent_tools():
             except ValueError as exc:
                 return {"ok": False, "error": {"type": "invalid_skill", "message": str(exc),
                                                "retryable": False}}
-            return {"ok": True, "skill": item}
+            validation = skills_registry.validate_skill(item["id"])
+            item["validation"] = validation
+            return {"ok": True, "skill": item, "validated": validation["ok"],
+                    "missing_tools": validation["missing_tools"]}
         register_tool(ToolSpec(
             "skill_create", "Создать skill (SKILL.md) из готового текста.",
             {"type": "object",

@@ -495,6 +495,10 @@ class Agent:
                                     f"Не удалось сохранить файл {save_path}: {error}")
 
         self.take_step()
+        action_summary = policy.redact(_describe(tag, payload, saved))[:500]
+        self.emit({"type": "tool_selected", "tool": tag, "summary": action_summary,
+                   "risk": risk})
+        self.emit({"type": "tool_call_started", "tool": tag, "summary": action_summary})
         started = time.monotonic()
         # Инструмент должен знать, что блок уже записан в файл: блок
         # ```python:app.py``` — это запись файла, а не запуск (иначе Flask-сервер

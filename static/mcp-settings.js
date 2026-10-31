@@ -31,7 +31,7 @@
         <span class="model-id">${esc(transportLabel(item.transport))}</span>
       </div>
       <h3>${esc(item.name || item.id)}</h3>
-      <p><code>${esc(item.url || '')}</code></p>
+      <p><code>${esc(item.transport === 'stdio' ? item.command : (item.url || ''))}</code></p>
       <div class="model-stats">
         <span>Авторизация <b>${esc(authLabel(item.auth))}</b></span>
         <span>Статус <b>${connected ? t('подключён') : t('не подключён')}</b></span>
@@ -43,7 +43,8 @@
       <div class="mcp-actions">
         <button class="select-model" type="button" data-mcp-test="${id}">${t('Проверить')}</button>
         <button class="select-model" type="button" data-mcp-tools="${id}">${t('Инструменты')}</button>
-        <button class="select-model danger" type="button" data-mcp-disconnect="${id}">${t('Отключить')}</button>
+        <button class="select-model" type="button" data-mcp-disconnect="${id}">${t('Отключить')}</button>
+        <button class="select-model danger" type="button" data-mcp-delete="${id}">${t('Удалить')}</button>
       </div>
     </article>`;
   }
@@ -128,19 +129,26 @@
 
     grid.querySelectorAll('[data-mcp-disconnect]').forEach((button) => button.addEventListener('click', async () => {
       const id = button.dataset.mcpDisconnect;
-      if (!window.confirm(t('Отключить MCP-сервер? Секреты подключения будут удалены.'))) return;
+      button.disabled = true;
+      try {
+        const response = await fetch(`/api/settings/mcp/${encodeURIComponent(id)}/disconnect`, { method: 'POST' });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        toast(t('MCP-сервер отключён; конфигурация сохранена'));
+        await loadMcp();
+      } catch (error) { toast(error.message, 'error'); button.disabled = false; }
+    }));
+
+    grid.querySelectorAll('[data-mcp-delete]').forEach((button) => button.addEventListener('click', async () => {
+      const id = button.dataset.mcpDelete;
+      if (!window.confirm(t('Удалить MCP-сервер и сохранённые секреты?'))) return;
       button.disabled = true;
       try {
         const response = await fetch(`/api/settings/mcp/${encodeURIComponent(id)}`, { method: 'DELETE' });
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
-        delete state.tools[id];
-        delete state.errors[id];
-        toast(t('MCP-сервер отключён'));
+        delete state.tools[id]; delete state.errors[id];
+        toast(t('MCP-сервер удалён'));
         await loadMcp();
-      } catch (error) {
-        toast(error.message, 'error');
-        button.disabled = false;
-      }
+      } catch (error) { toast(error.message, 'error'); button.disabled = false; }
     }));
 
     grid.querySelectorAll('[data-mcp-fill]').forEach((button) => button.addEventListener('click', () => {
@@ -158,14 +166,29 @@
     return data;
   }
 
+  function updateTransport() {
+    const stdio = $('mcpTransport')?.value === 'stdio';
+    if ($('mcpUrl')) { $('mcpUrl').hidden = stdio; $('mcpUrl').required = !stdio; }
+    if ($('mcpCommand')) { $('mcpCommand').hidden = !stdio; $('mcpCommand').required = stdio; }
+    if ($('mcpArgs')) $('mcpArgs').hidden = !stdio;
+    if ($('mcpAuth')) $('mcpAuth').disabled = stdio;
+    if ($('mcpSecret')) $('mcpSecret').hidden = stdio;
+  }
+
   function init() {
     if (!$('mcpGrid')) return;
+    $('mcpTransport')?.addEventListener('change', updateTransport);
+    updateTransport();
     $('refreshMcp')?.addEventListener('click', () => loadMcp().catch((error) => toast(error.message, 'error')));
     $('connectMcp')?.addEventListener('click', async () => {
+      const transport = $('mcpTransport')?.value || 'http';
       const url = $('mcpUrl').value.trim();
-      if (!url) return toast(t('Укажите URL MCP-сервера'), 'error');
-      const auth = $('mcpAuth').value;
-      const payload = { name: $('mcpName').value.trim() || 'MCP server', url, auth };
+      const command = $('mcpCommand')?.value.trim() || '';
+      if (transport !== 'stdio' && !url) return toast(t('Укажите URL MCP-сервера'), 'error');
+      if (transport === 'stdio' && !command) return toast(t('Укажите STDIO command'), 'error');
+      const auth = transport === 'stdio' ? 'none' : $('mcpAuth').value;
+      const payload = { name: $('mcpName').value.trim() || 'MCP server', transport,
+                        url, command, args: $('mcpArgs')?.value.trim() || '', auth };
       if (auth === 'api_key') payload.api_key = $('mcpSecret').value;
       else if (auth === 'basic') { payload.username = $('mcpName').value.trim(); payload.password = $('mcpSecret').value; }
       else if (auth !== 'none') payload.token = $('mcpSecret').value;

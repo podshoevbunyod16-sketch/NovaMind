@@ -290,6 +290,7 @@ async function loadAttachMcp(force = false) {
             ? `${item.tools_count ?? 0} инструментов · ${item.transport || 'HTTP'}`
             : (item.last_error || 'Соединение не проверено'),
           `<button type="button" onclick="testAttachMcp(${index})">${item.connected ? 'Проверить' : 'Подключить'}</button>`
+            + (item.connected ? `<button type="button" onclick="disconnectAttachMcp(${index})">Отключить</button>` : '')
             + `<button type="button" onclick="removeAttachMcp(${index})" title="Удалить сервер">×</button>`,
           item.connected && Number(item.tools_count) > 0
         )).join('')
@@ -365,12 +366,28 @@ function selectAttachMcp(index) {
   const form = document.getElementById('attachMcpForm');
   form.hidden = false;
   document.getElementById('attachMcpName').value = item.id === 'custom' ? '' : (item.name || '');
+  document.getElementById('attachMcpTransport').value = item.transport || 'http';
   document.getElementById('attachMcpUrl').value = item.url || '';
+  document.getElementById('attachMcpCommand').value = '';
+  document.getElementById('attachMcpArgs').value = '';
+  updateAttachMcpTransport();
   const auth = Array.isArray(item.auth) ? item.auth[0] : 'none';
   document.getElementById('attachMcpAuth').value = ['none', 'bearer', 'api_key'].includes(auth) ? auth : 'none';
   document.getElementById('attachMcpSecret').value = '';
   updateAttachMcpSecret();
   form.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+}
+
+function updateAttachMcpTransport() {
+  const transport = document.getElementById('attachMcpTransport').value;
+  const url = document.getElementById('attachMcpUrl');
+  const command = document.getElementById('attachMcpCommand');
+  const args = document.getElementById('attachMcpArgs');
+  const stdio = transport === 'stdio';
+  url.hidden = stdio; url.required = !stdio;
+  command.hidden = !stdio; command.required = stdio;
+  args.hidden = !stdio;
+  document.getElementById('attachMcpAuth').disabled = stdio;
 }
 
 function updateAttachMcpSecret() {
@@ -390,10 +407,14 @@ async function connectAttachMcp(event) {
   event.preventDefault();
   const auth = document.getElementById('attachMcpAuth').value;
   const secret = document.getElementById('attachMcpSecret').value.trim();
+  const transport = document.getElementById('attachMcpTransport').value;
   const payload = {
     name: document.getElementById('attachMcpName').value.trim(),
+    transport,
     url: document.getElementById('attachMcpUrl').value.trim(),
-    auth,
+    command: document.getElementById('attachMcpCommand').value.trim(),
+    args: document.getElementById('attachMcpArgs').value.trim(),
+    auth: transport === 'stdio' ? 'none' : auth,
   };
   if (auth === 'api_key') payload.api_key = secret;
   if (auth === 'bearer') payload.token = secret;
@@ -413,6 +434,19 @@ async function connectAttachMcp(event) {
     await loadAttachMcp(true);
     setAttachMcpStatus(error.message || 'Не удалось подключить MCP-сервер', 'error');
   }
+}
+
+async function disconnectAttachMcp(index) {
+  const serverId = attachMcpConnections[index]?.id;
+  if (!serverId) return;
+  setAttachMcpStatus('Отключаю runtime-сессию…');
+  try {
+    const response = await fetch(`/api/settings/mcp/${encodeURIComponent(serverId)}/disconnect`, { method: 'POST' });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+    attachMcpLoaded = false; await loadAttachMcp(true);
+    setAttachMcpStatus('Сервер отключён; конфигурация сохранена.', 'ok');
+  } catch (error) { setAttachMcpStatus(error.message, 'error'); }
 }
 
 async function removeAttachMcp(index) {
