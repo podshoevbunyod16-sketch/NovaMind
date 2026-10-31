@@ -178,22 +178,22 @@ def session_login():
                 nick, request.remote_addr,
             )
 
+    from routes.terminal import is_admin
     return jsonify({
         'success': True,
         'nick': nick,
-        'admin': bool(session.get('admin_logged_in')),
+        'admin': bool(is_admin()),
     })
 
 
 @admin_bp.route('/api/session/check')
 def session_check():
     """Кто вошёл — интерфейсу нужно знать, открывать ли рабочую папку."""
+    from routes.terminal import is_admin, signed_in
     return jsonify({
-        'signed_in': bool(session.get('admin_logged_in') or session.get('nova_google_login')
-                          or session.get('nova_signed_in') or session.get('nova_user_nick')
-                          or session.get('username')),
+        'signed_in': bool(signed_in()),
         'nick': session.get('admin_username') or session.get('nova_user_nick') or '',
-        'admin': bool(session.get('admin_logged_in')),
+        'admin': bool(is_admin()),
     })
 
 
@@ -211,8 +211,10 @@ def admin_logout():
 
 @admin_bp.route('/api/admin/check')
 def admin_check():
-    if session.get('admin_logged_in'):
-        return jsonify({'logged_in': True, 'username': session.get('admin_username', 'admin')})
+    from routes.terminal import is_admin
+    if is_admin():
+        return jsonify({'logged_in': True,
+                        'username': session.get('admin_username') or session.get('nova_user_nick') or 'admin'})
     return jsonify({'logged_in': False})
 
 # ========== АДМИН API ==========
