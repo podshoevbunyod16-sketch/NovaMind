@@ -37,6 +37,11 @@ def isolated_env(tmp_path, monkeypatch):
     # Подтверждение опасных действий в тестах не ждёт 120 секунд:
     # тест, которому нужен таймаут, выставляет своё значение сам.
     monkeypatch.setenv("AGENT_CONFIRM_TIMEOUT", "0.05")
+    # Поиск по раундам вызывает модель-«судью» полноты; в тестах со скриптом ответов
+    # она бы съедала чужие реплики, поэтому по умолчанию — один раунд.
+    # Тесты адаптивного поиска (tests/test_adaptive_search.py) включают раунды сами.
+    import agenticseek.engine as _engine
+    monkeypatch.setattr(_engine, "SEARCH_ROUNDS", 1)
 
     import media_generation as mg
     media_dir = tmp_path / "generated_media"
