@@ -518,6 +518,9 @@ check('один раз подсказали, почему ИИ пока без L
 
 console.log('\n2) Без окружения: поиск старым путём (сцена → шаги → источники → ответ)');
 window.document.getElementById('chat-input').value = 'сколько стоит?';
+// Главный чат теперь включает инструменты по умолчанию. Тест начинает с
+// известного выключенного состояния и проверяет именно действие кнопки.
+window.setWebSearch(false, true);
 window.toggleWebSearch();
 check('кнопка поиска активна', document.getElementById('btn-web-search').classList.contains('active'));
 check('старое имя toggleAutoSearch управляет той же кнопкой автопоиска', (() => {

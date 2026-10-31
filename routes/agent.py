@@ -794,6 +794,9 @@ class NovaToolsContext:
         self.tasks_available = True
         self.schedule_available = bool(owner)
         self.skills_available = True
+        # Run-wide MCP budget lives on the request context, not on a tool
+        # instance: adaptive rounds may rebuild McpBridgeTool several times.
+        self._mcp_search_calls = 0
         for kind in ("image", "audio", "video"):
             setattr(self, f"media_{kind}_available", self._media_ready(kind))
 
@@ -838,6 +841,13 @@ class NovaToolsContext:
     # ── действия ─────────────────────────────────────────────────────────
     def call_mcp(self, server_id: str, tool: str, arguments: dict):
         import mcp_registry
+        if "search" in str(tool or "").lower():
+            limit = max(1, min(int(os.getenv("MCP_MAX_SEARCH_CALLS", "3")), 10))
+            if self._mcp_search_calls >= limit:
+                raise mcp_registry.McpError(
+                    f"Достигнут лимит поисковых вызовов MCP за запуск (не более {limit})"
+                )
+            self._mcp_search_calls += 1
         return mcp_registry.call_tool(server_id, tool, arguments)
 
     def generate_media(self, kind: str, prompt: str, params: dict):

@@ -156,16 +156,30 @@ class McpBridgeTool(BridgeTool):
         return tool in _GITHUB_SEARCH_TOOLS and (not names or "get_me" in names)
 
     def _get_me_set(self) -> set[str]:
-        done = getattr(self.ctx, "_mcp_get_me_done", None)
+        # Adaptive orchestration may rebuild tool instances between rounds.
+        # RunState survives those rebuilds, so keep run-wide MCP guards there.
+        done = getattr(self.state, "_mcp_get_me_done", None) if self.state is not None else None
+        if not isinstance(done, set):
+            done = getattr(self.ctx, "_mcp_get_me_done", None)
         if isinstance(done, set):
+            if self.state is not None:
+                try:
+                    self.state._mcp_get_me_done = done
+                except Exception:  # noqa: BLE001
+                    pass
             return done
+        done = self._local_get_me_done
         try:
-            self.ctx._mcp_get_me_done = self._local_get_me_done
-            return self.ctx._mcp_get_me_done
+            self.ctx._mcp_get_me_done = done
+            if self.state is not None:
+                self.state._mcp_get_me_done = done
         except Exception:  # noqa: BLE001
-            return self._local_get_me_done
+            pass
+        return done
 
     def _search_count(self) -> int:
+        if self.state is not None and hasattr(self.state, "_mcp_search_count"):
+            return int(getattr(self.state, "_mcp_search_count") or 0)
         return int(getattr(self.ctx, "_mcp_search_count", self._local_search_count) or 0)
 
     def _inc_search_count(self) -> int:
@@ -173,6 +187,8 @@ class McpBridgeTool(BridgeTool):
         self._local_search_count = nxt
         try:
             self.ctx._mcp_search_count = nxt
+            if self.state is not None:
+                self.state._mcp_search_count = nxt
         except Exception:  # noqa: BLE001
             pass
         return nxt
