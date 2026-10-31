@@ -307,7 +307,9 @@ def test_agent_respects_step_limit(admin_client, monkeypatch, sandbox):
     assert result["steps"] == 2
     assert len(events_of(events, "tool")) == 2
     assert any("лимит шагов" in event["text"].lower() for event in events_of(events, "step"))
-    assert result["status"] == "stopped"
+    # После лимита агент не бросает пользователя: просит модель собрать итог по найденному.
+    assert result["status"] == "ok"
+    assert "хватит, вот итог" in answer_of(events)
 
 
 def test_agent_failed_command_goes_back_to_model(admin_client, monkeypatch, sandbox):

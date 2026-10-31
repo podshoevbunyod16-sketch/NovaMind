@@ -174,7 +174,11 @@ def _delegated_input(target: str, body: str) -> tuple[str, str | None]:
         query = str(data.get("query") or data.get("q") or "").strip()
         if not query:
             raise ValueError("web_search: нужен query")
-        return query, None
+        try:
+            limit = int(data.get("limit") or 0)
+        except (TypeError, ValueError):
+            limit = 0
+        return (f"{query}\nlimit={limit}" if limit > 0 else query), None
     if target == "web_open":
         url = str(data.get("url") or data.get("href") or "").strip()
         if not url:

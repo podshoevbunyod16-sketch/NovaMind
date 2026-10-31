@@ -177,7 +177,12 @@ def _owner_digest(owner: str) -> str:
 
 
 def scopes_for_role(role: str) -> frozenset[str]:
-    return ROLE_SCOPES.get(str(role or "guest"), ROLE_SCOPES["guest"])
+    scope = set(ROLE_SCOPES.get(str(role or "guest"), ROLE_SCOPES["guest"]))
+    # MCP_ALLOW_USER_READ=1 — явное разрешение владельца сервера: чтение
+    # через MCP доступно и не-админам (то же правило, что в mcp_chat).
+    if str(role or "guest") != "admin" and os.getenv("MCP_ALLOW_USER_READ", "0") == "1":
+        scope.add("mcp_call")
+    return frozenset(scope)
 
 
 def mint(owner: str, run_id: str, role: str = "guest",

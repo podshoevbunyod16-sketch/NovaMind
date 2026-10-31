@@ -13,7 +13,11 @@
 let isRecording    = false;
 let recognition    = null;
 let isTyping       = false;
-let webSearchOn    = localStorage.getItem('nova_web_search') === '1';
+// Автопоиск ВКЛЮЧЁН по умолчанию: это и есть «агент с инструментами» —
+// MCP-серверы, скиллы, поиск, терминал. Явно сохранённый '0' уважается,
+// но пустое хранилище больше не отключает инструменты молча: раньше
+// свежий браузер ходил в обход MCP и скиллов, и агент «не использовал» их.
+let webSearchOn    = localStorage.getItem('nova_web_search') !== '0';
 let reasoningOn    = localStorage.getItem('nova_reasoning') === '1';
 // webSearchOn — это и есть кнопка «Автопоиск» (#btn-web-search). Один флаг на
 // всё: включён → агент может работать инструментами (в т.ч. терминалом Linux),
@@ -743,6 +747,11 @@ const TOOL_ICONS = {
 
 function createAssistantTurn(options = {}) {
   const name = options.name || 'NovaMind';
+  // Чат, в котором ход НАЧАЛСЯ: ответ сохраняется именно сюда, даже если
+  // пользователь переключился или нажал «Новый диалог» посреди генерации —
+  // иначе разговор разъезжался по двум записям истории («расщеплялся»).
+  let turnChatId = null;
+  try { turnChatId = historyLoad().activeId; } catch (e) { turnChatId = null; }
   hideWelcome();
 
   const wrap = document.createElement('div');
@@ -1538,7 +1547,7 @@ function createAssistantTurn(options = {}) {
             cost_known: meta.usage.cost_known,
           } : undefined,
           server_chat_id: meta.serverChatId || null,
-        });
+        }, turnChatId);
       }
       scrollToBottom();
     },
@@ -1784,7 +1793,8 @@ async function streamMessage(message, turn) {
   const response = await fetch('/send_stream', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ message, reasoning: reasoningOn, tools: autoSearchEnabled() }),
+    body: JSON.stringify({ message, reasoning: reasoningOn, tools: autoSearchEnabled(),
+                           ...serverChatRequest() }),
     signal: controller.signal,
   });
 
@@ -1813,7 +1823,8 @@ async function streamMessage(message, turn) {
 
   if (failure && !turn.text) throw new Error(failure);
   if (!turn.text) throw new Error('AI не вернул текст ответа');
-  turn.finish({ model: meta.model, provider: meta.provider, offline: meta.offline });
+  turn.finish({ model: meta.model, provider: meta.provider, offline: meta.offline,
+                serverChatId: meta.chat_id });
   return turn.text;
 }
 
@@ -1824,14 +1835,15 @@ async function sendOnce(message, turn) {
   const response = await fetch('/send', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ message, reasoning: reasoningOn, tools: autoSearchEnabled() }),
+    body: JSON.stringify({ message, reasoning: reasoningOn, tools: autoSearchEnabled(),
+                           ...serverChatRequest() }),
     signal: controller.signal,
   });
   const data = await response.json().catch(() => ({}));
   if (!response.ok || data.error) throw new Error(data.error || ('HTTP ' + response.status));
   turn.collapseStage();
   turn.appendText(data.reply || '');
-  turn.finish({ model: data.model });
+  turn.finish({ model: data.model, serverChatId: data.chat_id });
   activeAbort = null;
   return data.reply;
 }
@@ -1846,7 +1858,8 @@ async function runSearchTurn(message, turn) {
   const response = await fetch('/api/auto_search_stream', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ message, force: true, reasoning: reasoningOn }),
+    body: JSON.stringify({ message, force: true, reasoning: reasoningOn,
+                           ...serverChatRequest() }),
     signal: controller.signal,
   });
 
@@ -1913,6 +1926,7 @@ async function runSearchTurn(message, turn) {
     provider: aiStatus?.provider,
     offline: result.offline,
     searched: result.searched,
+    serverChatId: result.chat_id,
   });
   return turn.text;
 }
@@ -2606,7 +2620,11 @@ function newChat() {
   if (window.NovaSpeech) window.NovaSpeech.onChatChanged();
   const store = historyLoad();
   store.activeId = null;
+  store.resetServer = true;
   historySave(store);
+  // Серверная половина диалога тоже начинается заново: без этого следующий
+  // ход приклеивался к прошлому чату сессии, и «новый» диалог помнил чужой
+  // контекст (вторая половина «расщепившегося» разговора).
   // Новый чат — чистый лист: никаких активных режимов.
   clearInputMode(true);
   historyReplay = true;
@@ -2677,9 +2695,12 @@ function historyLoad() {
         updatedAt: Number(chat.updatedAt) || Number(chat.createdAt) || Date.now(),
       })) : [];
     const activeId = chats.some((chat) => chat.id === parsed.activeId) ? parsed.activeId : null;
-    return { chats, activeId };
+    // resetServer: «новый диалог» (или удаление открытого) должен начать
+    // чисто и на сервере — флаг хранится в самом сторе, чтобы пережить
+    // перезагрузку страницы между нажатием и первым сообщением.
+    return { chats, activeId, resetServer: parsed.resetServer === true };
   } catch (e) {
-    return { chats: [], activeId: null };
+    return { chats: [], activeId: null, resetServer: false };
   }
 }
 
@@ -2691,11 +2712,41 @@ function historySave(store) {
   }
 }
 
-function historyAddMessage(role, content, meta = null) {
+/**
+ * Пара {chat_id} для тела запроса — чтобы сервер писал ходы в ТОТ же чат,
+ * что открыт в интерфейсе (агент / поиск / обычный чат — одна история).
+ * • у открытого чата есть serverId → привязываемся к нему (после
+ *   перезагрузки история восстанавливается из базы, а не начинается заново);
+ * • серверного id нет и стор просит сброс (resetServer) → chat_id: null —
+ *   сервер начинает чистую историю;
+ * • серверного id нет без сброса (старый чат) → ключ не шлём, сессия
+ *   сервера продолжает себя сама — как раньше, без потери контекста.
+ */
+function serverChatRequest() {
+  try {
+    const store = historyLoad();
+    const chat = (store.chats || []).find((c) => c.id === store.activeId);
+    if (chat && chat.serverId) {
+      if (store.resetServer) { store.resetServer = false; historySave(store); }
+      return { chat_id: chat.serverId };
+    }
+    if (store.resetServer) return { chat_id: null };
+  } catch (e) { /* без истории работаем как раньше */ }
+  return {};
+}
+
+function historyAddMessage(role, content, meta = null, chatId = null) {
   if (historyReplay || !content) return;
 
   const store = historyLoad();
-  let chat = store.chats.find((c) => c.id === store.activeId);
+  let chat = null;
+  // Ход привязан к чату, в котором он НАЧНАЛСЯ: смена активного чата
+  // посреди генерации не должна растаскивать ответ по другим диалогам
+  // (именно так разговор «разделялся на две» записи).
+  if (chatId) chat = store.chats.find((c) => c.id === chatId);
+  else chat = store.chats.find((c) => c.id === store.activeId);
+
+  if (chatId && !chat) return;   // чат удалили во время генерации — не воскрешаем осиротевший ответ
 
   if (!chat) {
     const title = content.slice(0, 55) + (content.length > 55 ? '…' : '');
@@ -2709,6 +2760,9 @@ function historyAddMessage(role, content, meta = null) {
 
   chat.messages.push(meta ? { role, content, meta } : { role, content });
   chat.updatedAt = Date.now();
+  // Флаг сброса (resetServer) здесь НЕ трогаем: ответ мог прийти в
+  // неактивный чат (генерация шла, пока пользователь уже открыл другой
+  // диалог) — сбрасывает флаг только serverChatRequest() по активному чату.
   if (meta && meta.server_chat_id) chat.serverId = meta.server_chat_id;
 
   if (role === 'user' && chat.messages.filter((m) => m.role === 'user').length === 1) {
@@ -2799,7 +2853,11 @@ function loadChat(chatId) {
   if (!chat) return;
 
   store.activeId = chatId;
+  store.resetServer = false;
   historySave(store);
+  // Пользователь явно выбрал этот диалог — запрос сброса «нового чата»
+  // больше не нужен: сервер либо привяжётся к serverId, либо продолжит
+  // свою сессию (для старых чатов без serverId).
 
   // Новый диалог — другая озвучка: старый голос и очередь сбрасываются.
   if (window.NovaSpeech) window.NovaSpeech.onChatChanged();
@@ -2902,7 +2960,12 @@ async function attachServerTraces(chat) {
 function deleteChat(chatId) {
   const store = historyLoad();
   store.chats = (store.chats || []).filter((c) => c.id !== chatId);
-  if (store.activeId === chatId) store.activeId = null;
+  if (store.activeId === chatId) {
+    store.activeId = null;
+    // Удалили открытый чат — серверная сессия не должна продолжать его
+    // историю под видом нового диалога.
+    store.resetServer = true;
+  }
   historySave(store);
   renderChatList();
 }

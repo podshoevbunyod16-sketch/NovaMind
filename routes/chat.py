@@ -164,7 +164,7 @@ def _media_stream_response(model, prompt, confirm, options, chat_id):
             "model": mg.selection_payload(model),
             "elapsed_ms": result.get("elapsed_ms") or int((time.time() - started) * 1000),
         })
-        yield emit({"done": True})
+        yield emit({"done": True, "chat_id": chat_id})
 
     return Response(
         generate(),
@@ -180,7 +180,14 @@ def send():
     data = request.get_json()
     message = data.get('message', '').strip()
     reasoning = data.get('reasoning', False)
-    chat_id = data.get('chat_id') or get_or_create_session_chat()
+    # chat_id из интерфейса: null = новый диалог, иначе — привязка к открытому.
+    # Невалидный id до этого уже отсёк before_request (_chat_ownership_guard).
+    try:
+        from routes.agent import bind_client_chat
+        bind_client_chat(data)
+    except Exception:  # noqa: BLE001 — старый чат не должен падать без агента
+        pass
+    chat_id = get_or_create_session_chat()
 
     if not message:
         return jsonify({'error': 'Пустое сообщение'})
@@ -284,6 +291,14 @@ def send_stream():
             logging.getLogger(__name__).warning("agent fallback недоступен", exc_info=True)
 
     # FIX: загружаем историю из БД для send_stream тоже
+    # Привязка к чату интерфейса — до чтения истории: иначе реплики из
+    # разных путей (агент / поиск / обычный чат) разъезжаются по двум
+    # диалогам, и после перезагрузки контекст теряется.
+    try:
+        from routes.agent import bind_client_chat
+        bind_client_chat(data)
+    except Exception:  # noqa: BLE001 — старый чат не должен падать без агента
+        pass
     _chat_id_stream = get_or_create_session_chat()
     _history_stream = get_chat_history(_chat_id_stream, limit=50)
     add_message(_chat_id_stream, "user", message)
@@ -335,7 +350,8 @@ def send_stream():
                     del contents[:-20]
                 yield emit({"done": True, "model": model, "provider": provider,
                             "offline": provider == "local_demo", "has_reply": True,
-                            "mcp": True, "reasoning_chars": 0})
+                            "mcp": True, "reasoning_chars": 0,
+                            "chat_id": _chat_id_stream})
                 return
 
             for kind, chunk in chat_stream(
@@ -392,6 +408,7 @@ def send_stream():
                 "offline": provider == "local_demo",
                 "has_reply": bool(full_reply),
                 "reasoning_chars": len(reasoning_text),
+                "chat_id": _chat_id_stream,
             })
         except GeneratorExit:
             raise

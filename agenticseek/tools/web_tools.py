@@ -69,7 +69,13 @@ class WebSearchTool(Tools):
         self.limit = limit
 
     def execute(self, payload: str) -> str:
-        query = str(payload or "").strip().splitlines()[0][:300] if str(payload or "").strip() else ""
+        parts = str(payload or "").strip().splitlines()
+        query = parts[0][:300] if parts else ""
+        limit = self.limit
+        for extra in parts[1:]:                       # необязательная строка «limit=N»
+            found = re.match(r"\s*limit\s*=\s*(\d+)\s*$", extra)
+            if found:
+                limit = max(1, min(int(found.group(1)), 20))
         if not query:
             return "[failure] Пустой поисковый запрос."
         if query.strip(" \"'«»`").lower() in {"query", "запрос", "search query",
@@ -79,7 +85,7 @@ class WebSearchTool(Tools):
         if self.backend is None:
             return "[failure] Поиск недоступен: не настроен ни один бэкенд."
         try:
-            results, meta = self.backend(query, self.limit)
+            results, meta = self.backend(query, limit)
         except Exception as error:  # noqa: BLE001 — report, do not crash the run
             return f"[failure] Поиск «{query}» не удался: {type(error).__name__}: {error}"
         results = list(results or [])
@@ -88,7 +94,7 @@ class WebSearchTool(Tools):
             hint = f" (бэкенд: {backend})" if backend else ""
             return f"[failure] Поиск «{query}» ничего не нашёл{hint}."
         lines = []
-        for index, item in enumerate(results[: self.limit], 1):
+        for index, item in enumerate(results[:limit], 1):
             title = str(item.get("title") or "").strip() or "без названия"
             url = str(item.get("url") or "").strip()
             snippet = clip(str(item.get("snippet") or item.get("description") or "").strip(), 300)

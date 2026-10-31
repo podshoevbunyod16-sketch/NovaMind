@@ -56,11 +56,11 @@ SEARCH_TIMEOUT = float(os.getenv("SEARCH_TIMEOUT", "9"))
 READER_TIMEOUT = float(os.getenv("READER_TIMEOUT", "10"))
 # Сколько ждём модель после сбора источников. У reasoning-моделей первый токен
 # приходит долго, поэтому времени заметно больше, чем у обычного поиска.
-ANSWER_TIMEOUT = float(os.getenv("ANSWER_TIMEOUT", "180"))
+ANSWER_TIMEOUT = float(os.getenv("ANSWER_TIMEOUT", "1200"))
 # Сколько страниц успеваем прочитать перед ответом.
 MAX_PAGES = int(os.getenv("SEARCH_MAX_PAGES", "30"))
 # Таймаут служебных запросов (короткий поисковый запрос, «нужен ли поиск»).
-QUERY_TIMEOUT = float(os.getenv("SEARCH_QUERY_TIMEOUT", "10"))
+QUERY_TIMEOUT = float(os.getenv("SEARCH_QUERY_TIMEOUT", "60"))
 
 _QUERY_FIXES = (
     (r"\bпагода\b", "погода"),
@@ -861,14 +861,30 @@ def needs_web_search(user_message):
     return "SEARCH" in verdict or "DIRECT" not in verdict
 
 
-def build_search_query(user_message):
+def _history_block(history, limit=6, clip=600):
+    """«Недавний разговор» для промпта: ответы на уточнения без контекста
+    («а сколько он весит?») были некорректными — модель не знала, о чём речь.
+    """
+    items = [item for item in (history or [])
+             if isinstance(item, dict) and str(item.get("content") or "").strip()]
+    if not items:
+        return ""
+    recent = "\n".join(f"{item.get('role')}: {str(item.get('content'))[:clip]}"
+                       for item in items[-limit:])
+    return f"Недавний разговор (контекст):\n{recent}"
+
+
+def build_search_query(user_message, history=None):
     """Короткий поисковый запрос из вопроса пользователя."""
     provider, model, _ = resolve_target()
+    context = _history_block(history, limit=4, clip=300)
+    prompt = (f"Контекст разговора:\n{context}\n\n" if context else "") + (
+        f'Сделай из вопроса короткий поисковый запрос (до 8 слов, без кавычек и пояснений).\n'
+        f'Пиши запрос на том же языке, что и вопрос. Не переводи на английский.\n'
+        f'Если вопрос — уточнение к предыдущей реплике, включи в запрос и суть контекста.\n'
+        f'Вопрос: "{user_message}"')
     answer, error = chat_completion(
-        [{"role": "user", "content":
-            f'Сделай из вопроса короткий поисковый запрос (до 8 слов, без кавычек и пояснений).\n'
-            f'Пиши запрос на том же языке, что и вопрос. Не переводи на английский.\n'
-            f'Вопрос: "{user_message}"'}],
+        [{"role": "user", "content": prompt}],
         provider=provider, model=model, temperature=0, max_tokens=40, timeout=QUERY_TIMEOUT,
     )
     if error:
@@ -879,12 +895,17 @@ def build_search_query(user_message):
     return normalize_search_query(user_message)
 
 
-def search_pipeline(user_message, force_search=True, reasoning=False, max_pages=None):
+def search_pipeline(user_message, force_search=True, reasoning=False, max_pages=None,
+                    history=None):
     """
     Генератор событий поиска + ответа. Все события — словари для NDJSON.
 
     Сценарий (как в интерфейсе):
       stage(search) → шаги → sources → stage(write) → токены ответа → result → done
+
+    ``history`` — предыдущие реплики диалога: и ответы, и поисковый запрос
+    строятся с учётом разговора, иначе уточнения («а его размер?») уходят
+    в интернет без контекста и ответ получается ни о чём.
     """
     started = time.time()
     max_pages = MAX_PAGES if max_pages is None else max_pages
@@ -905,7 +926,7 @@ def search_pipeline(user_message, force_search=True, reasoning=False, max_pages=
                        text="Свежие данные не нужны — отвечаю по знаниям модели")
             answer, note = yield from _pump(
                 _answer_with_context(user_message, "", [], provider, model, reasoning,
-                                     system=DIRECT_SYSTEM_PROMPT,
+                                     system=DIRECT_SYSTEM_PROMPT, history=history,
                                      note="Интернет не нужен, отвечаю по базе знаний модели."),
                 emit,
             )
@@ -916,7 +937,7 @@ def search_pipeline(user_message, force_search=True, reasoning=False, max_pages=
             yield emit(type="done", searched=False)
             return
 
-    query = build_search_query(user_message)
+    query = build_search_query(user_message, history)
     yield emit(type="step", icon="🔎", text=f"Поисковый запрос: {query[:90]}")
 
     results, trace = yield from _parallel_search(query, emit)
@@ -938,6 +959,7 @@ def search_pipeline(user_message, force_search=True, reasoning=False, max_pages=
                    text="Отвечаю из базы знаний модели")
         answer, note = yield from _pump(
             _answer_with_context(user_message, "", [], provider, model, reasoning,
+                                 history=history,
                                  note="Поиск в интернете не дал результатов. Отвечай из своих "
                                       "знаний с пометкой (из базы знаний) и предупреди, что "
                                       "данные могут быть устаревшими."),
@@ -974,7 +996,8 @@ def search_pipeline(user_message, force_search=True, reasoning=False, max_pages=
                text=f"Обрабатываю {len(scraped)} источника")
 
     answer, note = yield from _pump(
-        _answer_with_context(user_message, context, sources, provider, model, reasoning),
+        _answer_with_context(user_message, context, sources, provider, model, reasoning,
+                             history=history),
         emit,
     )
     if note:
@@ -1070,7 +1093,8 @@ def _fallback_answer(user_message, sources, reason=""):
 
 
 def _answer_with_context(user_message, context, sources, provider, model,
-                         reasoning=False, system=SEARCH_SYSTEM_PROMPT, note=""):
+                         reasoning=False, system=SEARCH_SYSTEM_PROMPT, note="",
+                         history=None):
     """Ответ модели по найденным данным — с тремя ступенями страховки.
 
     1. потоковый ответ;
@@ -1079,8 +1103,16 @@ def _answer_with_context(user_message, context, sources, provider, model,
 
     Так найденные ссылки всегда доезжают до пользователя, даже когда
     генератор молчит или рвётся на середине.
+
+    ``history`` — предыдущие реплики диалога: без них уточнение вида
+    «а сколько он весит?» уходит в модель вслепую и ответ получается
+    ни о чём (давай Луна → ответ про кота).
     """
-    body = f"Вопрос: {user_message}\n\nДанные из интернета:\n{context}"
+    body = ""
+    prior = _history_block(history)
+    if prior:
+        body += prior + "\n\n"
+    body += f"Вопрос: {user_message}\n\nДанные из интернета:\n{context}"
     if note:
         body += f"\n\n[Примечание: {note}]"
 
@@ -1109,7 +1141,12 @@ def _answer_with_context(user_message, context, sources, provider, model,
 
 @search_bp.route("/api/auto_search_stream", methods=["POST"])
 def auto_search_stream():
-    """Живой поток поиска: сцена → шаги → источники → печатающийся ответ."""
+    """Живой поток поиска: сцена → шаги → источники → печатающийся ответ.
+
+    Ходы поиска живут в той же истории чата, что и агент: диалог получает
+    предыдущие реплики, а ответ сохраняется в базу — иначе путь поиска
+    оказывался «памятью без прошлого», и каждый второй вопрос был ни о чём.
+    """
     data = request.get_json(silent=True) or {}
     user_message = (data.get("message") or "").strip()
     if not user_message:
@@ -1118,11 +1155,28 @@ def auto_search_stream():
     force_search = bool(data.get("force", True))
     reasoning = bool(data.get("reasoning", False))
 
+    from routes.agent import bind_client_chat
+    bind_client_chat(data)
+    chat_id, prior = "", []
+    try:
+        import database
+        chat_id = database.get_or_create_session_chat()
+        prior = database.get_chat_history(chat_id, limit=10)
+    except Exception:  # noqa: BLE001 — без базы поиск работает, просто без памяти
+        chat_id, prior = "", []
+
     @stream_with_context
     def generate():
+        saved = False
         try:
             for event in search_pipeline(user_message, force_search=force_search,
-                                         reasoning=reasoning):
+                                         reasoning=reasoning, history=prior):
+                if event.get("type") == "result":
+                    if not saved:
+                        saved = True
+                        _persist_search_turn(chat_id, user_message, event.get("reply"))
+                    if chat_id:
+                        event = dict(event, chat_id=chat_id)
                 yield _ndjson(event)
         except GeneratorExit:
             raise
@@ -1136,6 +1190,22 @@ def auto_search_stream():
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no",
                  "Connection": "keep-alive"},
     )
+
+
+def _persist_search_turn(chat_id, user_message, reply):
+    """Кладёт ход поиска в общую историю чата (как агентский ``_save_turn``)."""
+    answer = str(reply or "").strip()
+    if not chat_id or not answer:
+        return
+    try:
+        import database
+        database.add_message(chat_id, "user", user_message)
+        database.add_message(chat_id, "assistant", answer)
+        database.trim_messages(chat_id, max_messages=200)
+    except Exception:  # noqa: BLE001 — история не должна ронять поток поиска
+        import logging
+        logging.getLogger(__name__).warning(
+            "Не удалось сохранить ход поиска в историю", exc_info=True)
 
 
 # ══════════════════════════════════════════════════════════════════

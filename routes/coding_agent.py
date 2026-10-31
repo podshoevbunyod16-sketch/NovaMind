@@ -72,8 +72,20 @@ def coding_stream():
     def generate():
         # Тот же выключатель автопоиска, что и в главном чате: без инструментов
         # запрос уходит прямо в модель (не в агента чтения исходников).
-        from routes.agent import repair_truncated_answer, request_tools_allowed
+        from routes.agent import (bind_client_chat, repair_truncated_answer,
+                                  request_tools_allowed)
         tools_allowed = request_tools_allowed(data)
+        # Тот же диалог, что и в главном чате: разбор кода видит предыдущие
+        # реплики и сам сохраняется в историю — иначе ходы «почему не работает»
+        # терялись после перезагрузки страницы.
+        bind_client_chat(data)
+        history_key = session.get("agent_memory_key")
+        if not history_key:
+            import secrets
+            history_key = secrets.token_hex(12)
+            session["agent_memory_key"] = history_key
+        from routes.agent import _save_turn, _turn_history
+        chat_id, prior = _turn_history(history_key)
         # Тот же бюджет ответа, что и в главном чате: иначе длинный разбор
         # исходников обрывался на полуслове (см. AGENT_MAX_TOKENS).
         answer_tokens = max(1024, min(AGENT_MAX_TOKENS,
@@ -81,6 +93,7 @@ def coding_stream():
         engine = AgentEngine(EngineContext(
             goal=goal, complete=chat_completion, emit=lambda event: None,
             provider=provider, model=model, profile="coding",
+            history=prior,
             workspace=False, timeout=TIMEOUT, tools_allowed=tools_allowed,
             max_tokens=answer_tokens,
             repair_answer=lambda text: repair_truncated_answer(text, goal)))
@@ -93,6 +106,7 @@ def coding_stream():
         finally:
             pass
         answer = engine.answer
+        _save_turn(chat_id, history_key, goal, answer)
         if proposals:
             extra = []
             for item in proposals:
@@ -105,7 +119,7 @@ def coding_stream():
         yield _event({"type": "result", "steps": engine.state.steps, "linux": False,
                       "coding": True, "provider": provider, "model": model,
                       "status": "ok" if engine.state.status == "ok" else engine.state.status,
-                      "engine": "agenticseek"})
+                      "chat_id": chat_id, "engine": "agenticseek"})
         yield _event({"type": "done"})
 
     return Response(generate(), mimetype="application/x-ndjson",

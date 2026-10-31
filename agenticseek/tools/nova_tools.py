@@ -35,7 +35,7 @@ from agenticseek.tools.tools import Tools
 mcp_log = logging.getLogger("novamind.mcp")
 
 MAX_PAYLOAD = 20000
-MAX_MCP_SEARCH_CALLS = 3
+MAX_MCP_SEARCH_CALLS = 30
 
 #: MCP tool names that change state on the remote service: always confirmed.
 _MCP_WRITE_HINTS = ("delete", "remove", "create", "update", "post", "send", "write",

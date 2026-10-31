@@ -80,7 +80,16 @@ def python_tool_command(tool: str, arguments: dict) -> str:
     return f"python3 -m novamind_cli call {shlex.quote(str(tool))} {shlex.quote(payload)}"
 
 
-MAX_STEPS = max(1, min(int(os.getenv("AGENT_MAX_STEPS", "20")), 60))
+MAX_STEPS = max(1, min(int(os.getenv("AGENT_MAX_STEPS", "40")), 500))
+
+# Поиск: сколько результатов за раунд, сколько раундов и сколько страниц читать.
+# Агент сам решает, хватает ли данных, и продолжает искать, пока не наберёт достаточно.
+SEARCH_LIMIT = max(3, min(int(os.getenv("FORCED_SEARCH_LIMIT", "10")), 20))
+SEARCH_ROUNDS = max(1, min(int(os.getenv("SEARCH_MAX_ROUNDS", "4")), 10))
+SEARCH_PAGES_PER_ROUND = max(0, min(int(os.getenv("SEARCH_PAGES_PER_ROUND", "3")), 8))
+SEARCH_BUDGET_SEC = max(15.0, float(os.getenv("SEARCH_BUDGET_SEC", "90")))
+SEARCH_PAGES_CHARS = max(2000, int(os.getenv("SEARCH_PAGES_CHARS", "14000")))
+AGENT_SEARCH_LIMIT = max(3, min(int(os.getenv("AGENT_SEARCH_LIMIT", "10")), 20))
 
 CLEAN_ANSWER_SYSTEM = (
     "Ты — NovaMind. Ответь пользователю только готовым ответом по-русски: "
@@ -346,6 +355,11 @@ class AgentEngine:
             self._build_agents()          # ← здесь инструменты реально грузятся
             self._recall_ready()          # «вспомнил», со списком подключённого
             self._run_agent()
+        except StepLimitReached as stop:
+            self.state.status = "ok"
+            self._emit({"type": "step", "icon": "🏁",
+                        "text": "Лимит шагов — собираю итог по найденному"})
+            self.answer = self._answer_after_limit(stop)
         except AgentStopped as stop:
             self.state.status = "stopped"
             self.answer = self._partial_answer(stop)
@@ -719,7 +733,8 @@ class AgentEngine:
             return {}
         tools: dict = {}
         if ctx.search is not None:
-            tools["web_search"] = WebSearchTool(ctx.search, state=self.state)
+            tools["web_search"] = WebSearchTool(ctx.search, state=self.state,
+                                               limit=AGENT_SEARCH_LIMIT)
         if ctx.read_page is not None:
             tools["web_open"] = WebOpenTool(ctx.read_page, state=self.state)
         if ctx.workspace:
@@ -1058,11 +1073,12 @@ class AgentEngine:
     def _run_forced_search(self) -> str:
         """Search because the user pressed «Поиск», not because the model asked.
 
-        The button used to add a hint to the prompt only: when the model decided
-        to answer from memory, no search happened and the button did nothing.
-        Here the search is unconditional — results, page reads, a note in the
-        workspace — and the observation is put into the goal, so the answer is
-        built on fresh facts.
+        The search is unconditional, but it is no longer a single shot: the
+        agent searches in rounds.  After each round a short model call decides
+        whether the collected data answers the question; if not, it proposes a
+        sharper query and the search continues (up to ``SEARCH_MAX_ROUNDS``
+        rounds or ``SEARCH_BUDGET_SEC`` seconds).  Then the observation is put
+        into the goal, so the answer is built on fresh facts.
 
         Returns:
             The observation block for the model (empty when search is impossible).
@@ -1075,11 +1091,84 @@ class AgentEngine:
                     "text": "Ищу источники по запросу…"})
         if ctx.cancel is not None and ctx.cancel.is_set():
             return ""
+        started = time.monotonic()
         query = _search_query(goal)
-        search_step = python_tool_command("web_search", {"query": query, "limit": 5})
+        found: list = []          # все уникальные результаты за все раунды
+        seen: set = set()
+        pages: list = []          # прочитанные страницы
+        tried: list = []          # уже использованные запросы
+        enough = False
+        for number in range(1, SEARCH_ROUNDS + 1):
+            if ctx.cancel is not None and ctx.cancel.is_set():
+                break
+            tried.append(query)
+            fresh = self._search_round(query, SEARCH_LIMIT, number, found, seen)
+            if fresh is None and number == 1:
+                return ""                       # поиск сломан — как раньше, отвечаем без него
+            if not found and number == 1:
+                return ("Результаты поиска: поиск ничего не нашёл. Отвечай по своим знаниям "
+                        "и честно скажи, что свежих данных получить не удалось.")
+            if fresh:
+                pages.extend(self._read_round_pages(fresh))
+            if number >= SEARCH_ROUNDS or time.monotonic() - started > SEARCH_BUDGET_SEC:
+                break
+            enough, next_query = self._judge_enough(goal, found, pages, tried)
+            if enough:
+                break
+            if not next_query:
+                break
+            self._emit({"type": "step", "icon": "🔁",
+                        "text": f"Данных пока мало — уточняю запрос: «{next_query}»"})
+            query = next_query
+        self._found = found
+
+        if ctx.save_research is not None:
+            lines = self._result_lines(found, 1)
+            body = (f"# {goal}\n\n_поиск {time.strftime('%Y-%m-%d %H:%M')}_\n\n{lines}\n\n"
+                    + "\n\n".join(pages))
+            try:
+                saved = ctx.save_research(goal, body, "search")
+            except Exception as error:  # noqa: BLE001
+                log.warning("research note not saved: %s", type(error).__name__)
+            else:
+                if saved:
+                    self._emit({"type": "step", "icon": "💾", "text": f"Сохранил {saved}"})
+
+        pages_text = clip("\n\n".join(pages), SEARCH_PAGES_CHARS)
+        tail = ("ВАЖНО: данных достаточно. " if enough
+                else "ВАЖНО: поиск завершён. Если данных всё же мало, честно скажи, "
+                     "чего именно не хватило. ")
+        return ("Результаты поиска (доверяй им больше, чем памяти модели):\n\n"
+                + self._result_lines(found, 1)
+                + ("\n\nПрочитанные страницы:\n\n" + pages_text if pages_text else "")
+                + "\n\n" + tail + "Ответь пользователю сейчас обычным "
+                  "текстом по-русски, со ссылками на номера источников [1], [2]. "
+                  "Ответ должен быть полным и законченным: опиши найденное, "
+                  "добавь вывод, заверши последнее предложение. "
+                  "НЕ вызывай web_search и web_open, не пиши теги и блоки.")
+
+    @staticmethod
+    def _result_lines(results: list, start: int) -> str:
+        """Нумерованный список результатов (нумерация сквозная между раундами)."""
+        return "\n".join(
+            f"[{index}] {item.get('title') or item.get('host') or item.get('url')}\n"
+            f"    {item.get('url', '')}\n    {clip(str(item.get('snippet') or ''), 240)}"
+            for index, item in enumerate(results, start)
+        )
+
+    def _search_round(self, query: str, limit: int, number: int,
+                      found: list, seen: set):
+        """Один поисковый раунд. Новые (без повторов) результаты дописываются в ``found``.
+
+        Returns:
+            Список новых результатов (может быть пустым) или ``None``, если поиск упал.
+        """
+        ctx = self.ctx
+        goal = ctx.goal
+        search_step = python_tool_command("web_search", {"query": query, "limit": limit})
         self._emit(think_event("before", search_step))
         try:
-            results, _meta = ctx.search(query, 5)
+            results, _meta = ctx.search(query, limit)
         except Exception as error:  # noqa: BLE001 — the answer must still happen
             log.warning("forced search failed: %s", type(error).__name__)
             output = f"[failure] {type(error).__name__}: {error}"
@@ -1089,37 +1178,48 @@ class AgentEngine:
             self._emit(think_event("after", search_step, done=True))
             self._emit({"type": "step", "icon": "⚠️",
                         "text": f"Поиск не удался: {type(error).__name__}"})
-            return ""
-        results = [item for item in (results or []) if isinstance(item, dict)]
-        self._found = results
-        if not results:
-            output = f"[failure] Поиск «{query}» ничего не нашёл"
+            return None
+        fresh = []
+        for item in (results or []):
+            if not isinstance(item, dict):
+                continue
+            key = str(item.get("url") or item.get("title") or "")
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            fresh.append(item)
+        if not fresh:
+            output = (f"[failure] Поиск «{query}» ничего не нашёл" if number == 1
+                      else f"[failure] Поиск «{query}» не дал новых источников")
             self._emit({"type": "tool", "name": "web_search", "command": search_step,
                         "code": 1, "status": "error", "output": output, "error": output})
             self.state.add_tool("web_search", False)
             self._emit(think_event("after", search_step, done=True))
             self._emit({"type": "step", "icon": "⚠️",
-                        "text": f"Поиск «{goal}» ничего не дал"})
-            return ("Результаты поиска: поиск ничего не нашёл. Отвечай по своим знаниям "
-                    "и честно скажи, что свежих данных получить не удалось.")
-        for item in results:
+                        "text": (f"Поиск «{goal}» ничего не дал" if number == 1
+                                 else f"По запросу «{query}» новых источников нет")})
+            return []
+        start = len(found) + 1
+        found.extend(fresh)
+        for item in fresh:
             url = str(item.get("url") or "")
             if url:
                 self.state.add_source(url, str(item.get("title") or url))
-        lines = "\n".join(
-            f"[{index}] {item.get('title') or item.get('host') or item.get('url')}\n"
-            f"    {item.get('url', '')}\n    {clip(str(item.get('snippet') or ''), 240)}"
-            for index, item in enumerate(results, 1)
-        )
-        self._emit({"type": "step", "icon": "🔎",
-                    "text": f"Нашёл {len(results)} источников по запросу «{goal}»"})
+        lines = self._result_lines(fresh, start)
+        text = (f"Нашёл {len(fresh)} источников по запросу «{goal}»" if number == 1
+                else f"Нашёл ещё {len(fresh)} источников (всего {len(found)}) по запросу «{query}»")
+        self._emit({"type": "step", "icon": "🔎", "text": text})
         self._emit({"type": "tool", "name": "web_search", "command": search_step,
-                    "code": 0, "status": "ok", "output": lines, "results": results})
+                    "code": 0, "status": "ok", "output": lines, "results": fresh})
         self.state.add_tool("web_search", True)
         self._emit(think_event("after", search_step, done=True))
+        return fresh
 
+    def _read_round_pages(self, fresh: list) -> list:
+        """Читает первые страницы свежих результатов; возвращает тексты страниц."""
+        ctx = self.ctx
         pages = []
-        for item in results[:3]:
+        for item in fresh[:SEARCH_PAGES_PER_ROUND]:
             if ctx.cancel is not None and ctx.cancel.is_set():
                 break
             url = str(item.get("url") or "")
@@ -1149,25 +1249,53 @@ class AgentEngine:
                 self._emit({"type": "tool", "name": "web_open", "command": page_step,
                             "code": 0, "status": "ok", "output": clip(text, 1200)})
                 self.state.add_tool("web_open", True)
+        return pages
 
-        if ctx.save_research is not None:
-            body = (f"# {goal}\n\n_поиск {time.strftime('%Y-%m-%d %H:%M')}_\n\n{lines}\n\n"
-                    + "\n\n".join(pages))
-            try:
-                saved = ctx.save_research(goal, body, "search")
-            except Exception as error:  # noqa: BLE001
-                log.warning("research note not saved: %s", type(error).__name__)
-            else:
-                if saved:
-                    self._emit({"type": "step", "icon": "💾", "text": f"Сохранил {saved}"})
+    def _judge_enough(self, goal: str, found: list, pages: list, tried: list):
+        """Короткий вызов модели: хватает ли собранных данных для ответа.
 
-        return ("Результаты поиска (доверяй им больше, чем памяти модели):\n\n" + lines
-                + ("\n\nПрочитанные страницы:\n\n" + "\n\n".join(pages) if pages else "")
-                + "\n\nВАЖНО: данных достаточно. Ответь пользователю сейчас обычным "
-                  "текстом по-русски, со ссылками на номера источников [1], [2]. "
-                  "Ответ должен быть полным и законченным: опиши найденное, "
-                  "добавь вывод, заверши последнее предложение. "
-                  "НЕ вызывай web_search и web_open, не пиши теги и блоки.")
+        Returns:
+            ``(enough, next_query)``. При любой ошибке модели возвращает
+            ``(True, "")``: лучше ответить по найденному, чем крутить поиск вслепую.
+        """
+        ctx = self.ctx
+        if getattr(ctx, "complete", None) is None:
+            return True, ""
+        digest = "\n".join(
+            f"- {clip(str(i.get('title') or ''), 90)} :: {clip(str(i.get('snippet') or ''), 160)}"
+            for i in found[:30])
+        excerpts = "\n".join(clip(p, 400) for p in pages[-4:])
+        prompt = (
+            f"Вопрос пользователя: «{clip(str(goal), 400)}»\n\n"
+            f"Уже искали: {'; '.join(tried)}\n\n"
+            f"Найденные источники:\n{digest}\n\n"
+            f"Фрагменты страниц:\n{excerpts or '(страницы не читались)'}\n\n"
+            "Хватает ли этих данных, чтобы дать полный и точный ответ на вопрос? "
+            'Ответь ТОЛЬКО JSON без пояснений: {"enough": true} если хватает, либо '
+            '{"enough": false, "query": "новый короткий запрос"}, если нужно искать '
+            "дальше. Новый запрос должен отличаться от прежних и закрывать то, чего не хватает.")
+        try:
+            text, _meta = ctx.complete(
+                [{"role": "user", "content": prompt}],
+                system="Ты — контролёр полноты исследования. Отвечай только JSON.",
+                temperature=0.0, max_tokens=60, timeout=25)
+        except Exception:  # noqa: BLE001 — judge failure must not break the answer
+            log.debug("search judge failed", exc_info=True)
+            return True, ""
+        raw = str(text or "")
+        match = re.search(r"\{.*\}", raw, re.S)
+        if not match:
+            return True, ""
+        try:
+            data = json.loads(match.group(0))
+        except ValueError:
+            return True, ""
+        if not isinstance(data, dict) or data.get("enough") is not False:
+            return True, ""
+        next_query = str(data.get("query") or "").strip().strip("\"'«»")[:120]
+        if not next_query or next_query.lower() in {q.lower() for q in tried}:
+            return True, ""
+        return False, next_query
 
     def _run_offline_terminal(self) -> None:
         """Demo mode (no LLM key): still perform real steps in the Linux sandbox.
@@ -1215,7 +1343,8 @@ class AgentEngine:
                     "text": "Языковой модели нет — работаю без неё"})
         turn = OfflineTurn(ctx.goal, search=ctx.search, media=ctx.media_generate,
                            media_kind=ctx.media_kind, local_model=ctx.local_model,
-                           emit=self._emit, state=self.state, force_search=ctx.force_search)
+                           emit=self._emit, state=self.state, force_search=ctx.force_search,
+                           history=ctx.history)
         self.answer = turn.run()
         self.state.steps = 1
         self._emit({"type": "step", "icon": "ℹ️",
@@ -1298,6 +1427,41 @@ class AgentEngine:
             thread.join(timeout=0.05)
 
     # ── answers ───────────────────────────────────────────────────────────
+    def _answer_after_limit(self, stop) -> str:
+        """Шаги кончились: просим модель дать итог по собранному, без инструментов.
+
+        Если модель всё равно пишет блок инструмента, один раз повторяем просьбу
+        строже; только после этого показываем то, что успели.
+        """
+        agent = self.chosen or next(iter(self.agents.values()), None)
+        if agent is None:
+            return self._partial_answer(stop)
+        try:
+            agent.step_budget = None                      # итоговый вызов не тратит шаги
+            agent.deadline = time.monotonic() + 120       # отдельное время на итог
+            agent.memory.push(
+                "user",
+                "Лимит шагов исчерпан. НЕ вызывай инструменты и не пиши блоки "
+                "вызова. Дай готовый, законченный итоговый ответ на мою исходную "
+                "задачу по всему, что уже найдено и сделано. Если что-то не успел, "
+                "скажи что именно и предложи написать «продолжай».")
+            for attempt in range(2):
+                raw = agent.llm_request()
+                text = strip_unknown_blocks(raw, set())
+                if text.strip() and not _is_tool_call_answer(raw):
+                    return text
+                if attempt == 0:
+                    agent.memory.push("assistant", str(raw))
+                    agent.memory.push(
+                        "user",
+                        "Инструменты отключены, блок не выполнится. Напиши итоговый "
+                        "ответ обычным текстом, без блоков и тегов.")
+        except AgentStopped:
+            pass          # пользователь нажал «стоп» или вышло время итога
+        except Exception:  # noqa: BLE001
+            log.warning("final answer after step limit failed", exc_info=True)
+        return self._partial_answer(stop)
+
     def _partial_answer(self, stop: AgentStopped) -> str:
         """Keep what the agent already produced; add the honest stop reason."""
         partial = ""

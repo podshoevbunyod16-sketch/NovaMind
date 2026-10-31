@@ -23,7 +23,7 @@ import requests
 import httpx
 from bs4 import BeautifulSoup
 
-TIMEOUT = float(os.getenv("SITES_SEARCH_TIMEOUT", "12"))
+TIMEOUT = float(os.getenv("SITES_SEARCH_TIMEOUT", "60"))
 
 _HEADERS = {
     "User-Agent": ("Mozilla/5.0 (Linux; Android 12; Pixel 6) AppleWebKit/537.36 "
