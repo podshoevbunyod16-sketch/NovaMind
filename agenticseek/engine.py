@@ -348,12 +348,33 @@ class AgentEngine:
         заранее, а динамически, когда он решил, что они нужны.
         """
         self.record_id = self._start_run()
+        # Legacy UI contract: the first event remains `stage`; lifecycle events
+        # follow immediately and are additive/backward-compatible.
         self._understanding_stage()
+        self._emit({"type": "task_started", "task": clip(self.ctx.goal, 240),
+                    "run_id": self.ctx.run_id})
+        self._emit({"type": "task_analysis", "status": "started",
+                    "summary": "Определяю цель, ограничения и критерии готовности"})
+        self._emit({"type": "task_analysis", "status": "completed",
+                    "summary": "Задача разобрана; собираю контекст и доступные возможности"})
         self._knowledge_stage()
         try:
             self._recall_start()          # анимация «вспоминаю …»
             self._build_agents()          # ← здесь инструменты реально грузятся
             self._recall_ready()          # «вспомнил», со списком подключённого
+            try:
+                import tool_registry
+                catalog = tool_registry.unified_catalog(workspace=self.ctx.workspace)
+                self._emit({"type": "tool_discovered", "count": len(catalog),
+                            "tools": [{"id": item["id"], "name": item["name"],
+                                       "source": item["source"], "available": item["available"]}
+                                      for item in catalog[:80]]})
+            except Exception:
+                log.debug("unified tool discovery event failed", exc_info=True)
+            self._emit({"type": "plan_created", "adaptive": True,
+                        "summary": "План создан: выполнить нужные действия, анализировать наблюдения и проверить итог",
+                        "plan": ["Выбрать подходящие инструменты", "Выполнять следующие шаги по результатам предыдущих",
+                                 "Проверить конечный результат"]})
             self._run_agent()
         except StepLimitReached as stop:
             self.state.status = "ok"
@@ -380,6 +401,8 @@ class AgentEngine:
             set_output_sink(None)
             self._shutdown()
 
+        self._emit({"type": "verification_started",
+                    "summary": "Проверяю результат, ошибки инструментов и полноту ответа"})
         self._raw_answer = str(self.answer or "")
         # Ответ упёрся в лимит токенов: сначала дописываем его до конца,
         # и только потом применяем фильтры чистоты ответа.
@@ -399,11 +422,17 @@ class AgentEngine:
             self.state.error = self.state.error or "Агент не вернул ответ"
             self.answer = ("Не удалось получить ответ. "
                            + (f"Причина: {self.state.error}." if self.state.error else ""))
+        verified = bool(self.answer.strip()) and self.state.status in {"ok", "stopped"}
+        self._emit({"type": "verification_completed", "ok": verified,
+                    "summary": ("Результат готов" if verified else
+                                (self.state.error or "Проверка обнаружила ошибку"))})
         if self.state.sources:
             self._emit({"type": "sources", "sources": list(self.state.sources)})
         for chunk in _chunks(self.answer):
             self._emit({"type": "token", "token": chunk})
         self._finish_run()
+        self._emit({"type": "task_completed", "status": self.state.status,
+                    "steps": self.state.steps, "verified": verified})
 
     # ── шаг 1: понять запрос, шаг 2: вспомнить и получить инструменты ─────
     def _knowledge_stage(self) -> None:
@@ -812,8 +841,27 @@ class AgentEngine:
 
     # ── hooks ─────────────────────────────────────────────────────────────
     def _emit(self, event: dict) -> None:
+        """Emit legacy UI events plus the stable agent-lifecycle protocol."""
         try:
             self.ctx.emit(event)
+            companion = None
+            kind = str(event.get("type") or "")
+            if kind == "plan":
+                companion = {"type": "plan_created", "plan": event.get("steps") or event.get("plan") or [],
+                             "summary": event.get("text") or "План создан"}
+            elif kind == "tool":
+                ok = event.get("status") not in {"error", "failed"} and event.get("ok", True) is not False
+                companion = {
+                    "type": "tool_call_completed" if ok else "tool_call_failed",
+                    "tool": event.get("name"), "command": clip(event.get("command") or "", 500),
+                    "status": "ok" if ok else "error",
+                    "observation": clip(event.get("output") or event.get("error") or "", 1200),
+                }
+            if companion:
+                self.ctx.emit(companion)
+                if kind == "tool":
+                    self.ctx.emit({"type": "observation", "tool": companion.get("tool"),
+                                   "summary": companion.get("observation"), "ok": companion["status"] == "ok"})
         except Exception:  # noqa: BLE001 — a closed stream must not kill the run
             log.debug("event sink failed", exc_info=True)
 
@@ -1166,6 +1214,8 @@ class AgentEngine:
         ctx = self.ctx
         goal = ctx.goal
         search_step = python_tool_command("web_search", {"query": query, "limit": limit})
+        self._emit({"type": "tool_selected", "tool": "web_search", "summary": search_step, "risk": "safe"})
+        self._emit({"type": "tool_call_started", "tool": "web_search", "summary": search_step})
         self._emit(think_event("before", search_step))
         try:
             results, _meta = ctx.search(query, limit)
@@ -1228,6 +1278,8 @@ class AgentEngine:
             # Каждый URL проходит тем же Python-command интерфейсом, который
             # видит модель. В таймлайне нет старых декоративных `nova read`.
             page_step = python_tool_command("web_open", {"url": url, "max_chars": 8000})
+            self._emit({"type": "tool_selected", "tool": "web_open", "summary": page_step, "risk": "safe"})
+            self._emit({"type": "tool_call_started", "tool": "web_open", "summary": page_step})
             with self._thinking(page_step):
                 try:
                     text, error = ctx.read_page(url)

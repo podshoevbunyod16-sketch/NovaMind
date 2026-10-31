@@ -783,19 +783,73 @@ html[data-glass-theme="light"] .input-area {
 html[data-glass-theme="light"] .toolbar-btn.active { color: var(--accent); }
 
 .attach-dropdown {
-  display: none; position: absolute; top: 100%; left: 0; margin-top: 6px;
-  flex-direction: column; gap: 3px; padding: 6px; z-index: 60;
-  min-width: 190px;
+  /* Меню раскрывается ВВЕРХ от панели ввода и не уходит под нижнюю кромку
+     экрана, как на мобильных браузерах с динамической адресной строкой. */
+  display: none; position: absolute; bottom: calc(100% + 7px); top: auto; left: 0;
+  flex-direction: column; gap: 5px; padding: 7px; z-index: 60;
+  width: min(360px, calc(100vw - 28px)); max-height: min(70vh, 560px); overflow-y: auto;
   background: linear-gradient(160deg, var(--glass-fill-strong), var(--glass-fill));
   -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(180%);
   backdrop-filter: blur(var(--glass-blur)) saturate(180%);
   border: 1px solid var(--glass-border); border-radius: var(--r-sm);
   box-shadow: var(--glass-shadow-lg), var(--glass-inset);
-  animation: pop-in .28s var(--ease-spring) both;
+  animation: attach-pop-in .28s var(--ease-spring) both;
+  overscroll-behavior: contain;
 }
-@keyframes pop-in { from { opacity: 0; transform: translateY(-6px) scale(.96);} to { opacity: 1; transform: none;} }
+@keyframes attach-pop-in { from { opacity: 0; transform: translateY(8px) scale(.96);} to { opacity: 1; transform: none;} }
 .attach-dropdown.open { display: flex; }
 .attach-dropdown .toolbar-btn { width: 100%; border-radius: var(--r-xs); justify-content: flex-start; }
+.attach-file-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; }
+.attach-mcp-toggle { margin-top: 2px; border-top-color: var(--glass-border); }
+.attach-mcp-count { margin-left: auto; min-width: 20px; padding: 2px 6px; text-align: center; border-radius: var(--r-pill); background: var(--accent-soft); color: var(--text-2); font-size: 10px; }
+.attach-mcp-panel { display: flex; flex-direction: column; gap: 6px; padding-top: 5px; border-top: 1px solid var(--glass-border-soft); }
+.attach-mcp-heading { display: flex; align-items: center; justify-content: space-between; color: var(--text-2); font-size: 11px; }
+.attach-mcp-heading button { border: 0; background: transparent; color: inherit; cursor: pointer; font-size: 16px; }
+.attach-mcp-list { display: flex; flex-direction: column; gap: 4px; }
+.attach-mcp-card { display: flex; align-items: center; gap: 8px; padding: 7px 8px; border: 1px solid var(--glass-border-soft); border-radius: var(--r-xs); background: rgba(255,255,255,.035); font-size: 11px; }
+.attach-mcp-card-main { min-width: 0; flex: 1; }
+.attach-mcp-card-name { display: block; color: var(--text-1); font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.attach-mcp-card-desc { display: block; margin-top: 2px; color: var(--text-4); font-size: 9.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.attach-mcp-badge { flex: 0 0 auto; color: #5dd69a; font-size: 9.5px; }
+.attach-mcp-card button, .attach-mcp-form button { flex: 0 0 auto; border: 1px solid var(--glass-border); border-radius: var(--r-pill); background: var(--accent-soft); color: var(--text-2); padding: 5px 8px; cursor: pointer; font: 700 10px/1 inherit; }
+.attach-mcp-card button:hover, .attach-mcp-form button:hover { color: var(--text-1); border-color: var(--accent); }
+.attach-mcp-muted, .attach-mcp-status { color: var(--text-4); font-size: 10px; line-height: 1.4; }
+.attach-mcp-status.is-error { color: var(--err); }
+.attach-mcp-status.is-ok { color: #5dd69a; }
+.attach-mcp-form { display: grid; gap: 5px; padding: 7px; border: 1px solid var(--glass-border); border-radius: var(--r-xs); }
+.attach-mcp-form input, .attach-mcp-form select { width: 100%; min-width: 0; padding: 7px 8px; border: 1px solid var(--glass-border-soft); border-radius: 8px; background: rgba(5,7,20,.58); color: var(--text-1); font: 11px/1.2 inherit; }
+.attach-mcp-form-actions { display: flex; gap: 5px; }
+@media (max-width: 480px) {
+  .attach-dropdown {
+    position: fixed; left: 34px; right: 34px;
+    bottom: calc(116px + env(safe-area-inset-bottom));
+    width: auto; max-height: min(58dvh, 460px);
+    background: linear-gradient(160deg, rgba(35, 31, 68, .98), rgba(13, 15, 37, .98));
+  }
+  html[data-glass-theme="light"] .attach-dropdown {
+    background: linear-gradient(160deg, rgba(252, 252, 255, .98), rgba(232, 236, 250, .98));
+  }
+  /* Общее мобильное правило скрывает подписи toolbar-кнопок, но внутри
+     раскрытого меню они обязательны — иначе MCP выглядел пустой полосой. */
+  .attach-dropdown .toolbar-btn span { display: inline; }
+  .attach-dropdown .attach-mcp-count { display: inline-flex; justify-content: center; }
+}
+
+/* Подключённые MCP видны прямо в главном чате, а не только в настройках. */
+.mcp-active-bar {
+  display: flex; align-items: center; gap: 7px;
+  margin-bottom: 7px; padding: 7px 10px; min-width: 0;
+  border-radius: var(--r-pill); background: rgba(93, 214, 154, .09);
+  border: 1px solid rgba(93, 214, 154, .28); color: var(--text-2); font-size: 10.5px;
+}
+.mcp-active-icon { flex: 0 0 auto; }
+.mcp-active-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mcp-active-bar button {
+  flex: 0 0 auto; padding: 4px 8px; border-radius: var(--r-pill); cursor: pointer;
+  border: 1px solid var(--glass-border); background: var(--glass-fill); color: var(--text-2);
+  font: 700 9.5px/1 inherit;
+}
+.mcp-active-bar button:hover { color: var(--text-1); border-color: var(--accent); }
 
 /* Активный режим (Погода, Курс валют...): его видно и можно сразу выключить */
 .mode-active {

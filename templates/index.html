@@ -174,20 +174,58 @@
           <span>Прикрепить файл</span>
         </button>
 
-        <div class="attach-dropdown" id="attachDropdown">
-          <button class="toolbar-btn" onclick="attachImage()">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
-            Изображение
+        <div class="attach-dropdown" id="attachDropdown" aria-label="Вложения и MCP-инструменты">
+          <div class="attach-file-actions">
+            <button class="toolbar-btn" onclick="attachImage()">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
+              Изображение
+            </button>
+            <button class="toolbar-btn" onclick="attachDocument()">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+              Файл
+            </button>
+            <button class="toolbar-btn" onclick="attachAudio()">🎧 Аудио</button>
+            <button class="toolbar-btn" onclick="attachVideo()">🎬 Видео</button>
+          </div>
+          <button class="toolbar-btn attach-mcp-toggle" id="attachMcpToggle" onclick="toggleMcpPanel(event)" aria-expanded="false">
+            <span aria-hidden="true">🔌</span>
+            <span>MCP-серверы</span>
+            <span class="attach-mcp-count" id="attachMcpCount">…</span>
           </button>
-          <button class="toolbar-btn" onclick="attachDocument()">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
-            Файл
-          </button>
-          <button class="toolbar-btn" onclick="attachAudio()">🎧 Аудио</button>
-          <button class="toolbar-btn" onclick="attachVideo()">🎬 Видео</button>
+          <section class="attach-mcp-panel" id="attachMcpPanel" hidden>
+            <div class="attach-mcp-heading"><strong>Подключённые инструменты</strong><button type="button" onclick="loadAttachMcp(true)" title="Обновить">↻</button></div>
+            <div id="attachMcpConnected" class="attach-mcp-list"><span class="attach-mcp-muted">Загрузка…</span></div>
+            <div class="attach-mcp-heading"><strong>Каталог серверов</strong></div>
+            <div id="attachMcpCatalog" class="attach-mcp-list"></div>
+            <form id="attachMcpForm" class="attach-mcp-form" onsubmit="connectAttachMcp(event)" hidden>
+              <input id="attachMcpName" maxlength="80" placeholder="Название сервера" required>
+              <select id="attachMcpTransport" onchange="updateAttachMcpTransport()" aria-label="Транспорт MCP">
+                <option value="http">Streamable HTTP</option>
+                <option value="sse">SSE</option>
+                <option value="stdio">STDIO</option>
+              </select>
+              <input id="attachMcpUrl" type="url" placeholder="https://server.example/mcp" required>
+              <input id="attachMcpCommand" placeholder="Команда STDIO, например npx" hidden>
+              <input id="attachMcpArgs" placeholder="Аргументы, например -y @modelcontextprotocol/server-filesystem /workspace" hidden>
+              <select id="attachMcpAuth" onchange="updateAttachMcpSecret()" aria-label="Авторизация MCP">
+                <option value="none">Без авторизации</option>
+                <option value="bearer">Bearer token</option>
+                <option value="api_key">API key</option>
+              </select>
+              <input id="attachMcpSecret" type="password" placeholder="Токен хранится только на сервере" autocomplete="off" hidden>
+              <div class="attach-mcp-form-actions"><button type="submit">Подключить</button><button type="button" onclick="closeAttachMcpForm()">Отмена</button></div>
+            </form>
+            <div id="attachMcpStatus" class="attach-mcp-status" aria-live="polite"></div>
+          </section>
         </div>
 
         <button class="toolbar-btn" id="btn-calm" onclick="toggleCalmMotion()" title="Отключить фоновые анимации">✨ <span>Анимации</span></button>
+      </div>
+
+      <div class="mcp-active-bar" id="mcpActiveBar" hidden>
+        <span class="mcp-active-icon" aria-hidden="true">🔌</span>
+        <span class="mcp-active-text" id="mcpActiveText">MCP-инструменты</span>
+        <button type="button" onclick="openMcpManager()">Серверы</button>
       </div>
 
       <div class="mode-active" id="modeActiveBar" hidden>

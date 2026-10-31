@@ -82,7 +82,22 @@ def _retry_delay(attempt: int, retry_after: str | None = None) -> float:
     return min(base * (2 ** attempt), 10.0)
 
 CATALOG = [
-    {"id": "custom", "name": "Свой MCP-сервер", "description": "Любой Streamable HTTP MCP endpoint", "auth": ["api_key", "bearer", "basic", "oauth", "none"]},
+    {"id": "custom", "name": "Свой MCP-сервер",
+     "description": "Streamable HTTP, legacy SSE или локальный STDIO",
+     "url": "", "transport": "http", "transports": ["http", "sse", "stdio"],
+     "auth": ["api_key", "bearer", "none"]},
+    {"id": "context7", "name": "Context7 — документация",
+     "description": "Актуальная документация библиотек и примеры кода",
+     "url": "https://mcp.context7.com/mcp", "auth": ["none", "api_key"]},
+    {"id": "github", "name": "GitHub",
+     "description": "Репозитории, issues, pull requests и код (нужен token)",
+     "url": "https://api.githubcopilot.com/mcp/", "auth": ["bearer"]},
+    {"id": "notion", "name": "Notion",
+     "description": "Страницы и базы знаний Notion (нужен access token)",
+     "url": "https://mcp.notion.com/mcp", "auth": ["bearer"]},
+    {"id": "sentry", "name": "Sentry",
+     "description": "Ошибки приложений, проекты и диагностика",
+     "url": "https://mcp.sentry.dev/mcp", "auth": ["bearer"]},
 ]
 
 
@@ -111,49 +126,90 @@ def _write(data: dict[str, dict[str, Any]]) -> None:
 
 def catalog() -> list[dict[str, Any]]:
     """Шаблоны подключения. Ничего не подключается самим фактом наличия в каталоге."""
-    return [{**item, "transport": "http"} for item in CATALOG]
+    return [{**item, "transport": item.get("transport", "http")} for item in CATALOG]
 
 
 def public_connections() -> list[dict[str, Any]]:
-    """Метаданные подключений без секретов.
-
-    ``transport`` — реальный транспорт клиента: NovaMind говорит с сервером по
-    Streamable HTTP (JSON-RPC поверх POST + SSE-ответы). STDIO-серверы не
-    поддерживаются, и интерфейс не должен делать вид, что они есть.
-    """
+    """Метаданные подключений без секретов и STDIO environment."""
     return [{"id": key, "name": value.get("name", key), "url": value.get("url", ""),
+             "command": value.get("command", "") if value.get("transport") == "stdio" else "",
              "auth": value.get("auth", "none"), "connected": bool(value.get("connected")),
-             "transport": "http", "last_error": value.get("last_error"),
+             "transport": value.get("transport", "http"), "last_error": value.get("last_error"),
              "updated_at": value.get("updated_at"),
-             "tools_count": value.get("tools_count")}
+             "tools_count": value.get("tools_count"),
+             "tool_names": list(value.get("tool_names") or [])[:12]}
             for key, value in _read().items()]
 
 
 def save_connection(payload: dict[str, Any]) -> dict[str, Any]:
     name = str(payload.get("name") or payload.get("id") or "custom").strip()[:80]
     server_id = str(payload.get("id") or secrets.token_urlsafe(8)).strip()[:80]
+    transport = str(payload.get("transport") or "http").strip().lower()
+    if transport not in {"http", "sse", "stdio"}:
+        raise ValueError("MCP transport должен быть http, sse или stdio")
     url = str(payload.get("url") or "").strip()
+    command = str(payload.get("command") or "").strip()
     auth = str(payload.get("auth") or "none").strip().lower()
-    if not url.startswith(("http://", "https://")):
+    if transport in {"http", "sse"} and not url.startswith(("http://", "https://")):
         raise ValueError("URL MCP-сервера должен начинаться с http:// или https://")
+    if transport == "stdio" and not command:
+        raise ValueError("Для STDIO MCP укажите command")
     if auth not in {"none", "api_key", "bearer", "basic", "oauth", "google_oauth"}:
         raise ValueError("Неподдерживаемый способ авторизации")
     data = _read()
     old = data.get(server_id, {})
-    item = {"name": name, "url": url, "auth": auth, "connected": False,
-            "updated_at": int(time.time()), "last_error": None}
+    item = {"name": name, "url": url, "transport": transport, "auth": auth,
+            "connected": False, "updated_at": int(time.time()), "last_error": None}
+    if transport == "stdio":
+        args = payload.get("args") or []
+        if isinstance(args, str):
+            import shlex
+            args = shlex.split(args)
+        if not isinstance(args, list) or len(args) > 30:
+            raise ValueError("STDIO args должны быть списком не более 30 элементов")
+        item.update({"command": command, "args": [str(x)[:500] for x in args]})
+        env = payload.get("env") or {}
+        if isinstance(env, dict):
+            item["env"] = {str(k)[:80]: str(v)[:4000] for k, v in env.items()}
     # Preserve credentials when the UI only edits metadata.
     for key in ("api_key", "token", "username", "password", "access_token", "refresh_token"):
         if payload.get(key):
             item[key] = str(payload[key])
         elif old.get(key):
             item[key] = old[key]
+    # Close an old live process/session before replacing its configuration.
+    try:
+        import mcp_transports
+        mcp_transports.close_transport(server_id)
+    except Exception:
+        pass
     data[server_id] = item
     _write(data)
     return server_id
 
 
+def disconnect_connection(server_id: str) -> None:
+    """Stop runtime transport but preserve configuration and credentials."""
+    try:
+        import mcp_transports
+        mcp_transports.close_transport(server_id)
+    except Exception:
+        pass
+    data = _read()
+    if server_id not in data:
+        raise ValueError("MCP-сервер не найден")
+    data[server_id]["connected"] = False
+    data[server_id]["initialized"] = False
+    data[server_id].pop("session_id", None)
+    data[server_id]["updated_at"] = int(time.time())
+    _write(data)
+
+
 def remove_connection(server_id: str) -> None:
+    try:
+        disconnect_connection(server_id)
+    except ValueError:
+        pass
     data = _read()
     data.pop(server_id, None)
     _write(data)
@@ -184,9 +240,16 @@ def request(server_id: str, method: str, params: dict[str, Any] | None = None, _
     item = data.get(server_id)
     if not item:
         raise ValueError("MCP-сервер не найден")
+    transport = str(item.get("transport") or "http").lower()
+    if transport in {"stdio", "sse"}:
+        import mcp_transports
+        return mcp_transports.request_transport(
+            server_id, item, method, params, _headers, TIMEOUT)
     if urlparse(item["url"]).hostname in {"localhost", "127.0.0.1", "::1"} or item["url"].startswith(("https://", "http://")):
         pass
-    payload = {"jsonrpc": "2.0", "id": int(time.time() * 1000) % 1000000000, "method": method, "params": params or {}}
+    payload = {"jsonrpc": "2.0", "method": method, "params": params or {}}
+    if not method.startswith("notifications/"):
+        payload["id"] = int(time.time() * 1000) % 1000000000
     max_retries = max(0, min(int(os.getenv("MCP_MAX_RETRIES", str(MAX_RETRIES))), 5))
     response = None
     for attempt in range(max_retries + 1):
@@ -476,12 +539,31 @@ def test_connection(server_id: str) -> dict[str, Any]:
         except Exception:
             # Notification is not needed for stateless/simple local servers.
             pass
-        return {"connected": data[server_id]["connected"], "server": result.get("result", result)}
+
+        # initialize alone is not proof that NovaMind can actually use the
+        # server. Verify tools/list now, persist the real count, and reject an
+        # authenticated-but-unusable connection instead of showing “active · 0”.
+        tools = list_tools(server_id)
+        if not tools:
+            raise ValueError("MCP-сервер подключился, но не предоставил ни одного инструмента")
+        data = _read()
+        data[server_id]["connected"] = True
+        data[server_id]["last_error"] = None
+        data[server_id]["tools_count"] = len(tools)
+        data[server_id]["tool_names"] = [str(tool.get("name")) for tool in tools[:40]]
+        data[server_id]["updated_at"] = int(time.time())
+        _write(data)
+        return {"connected": True, "tools_count": len(tools),
+                "tools": data[server_id]["tool_names"],
+                "server": result.get("result", result)}
     except Exception as exc:
         status = getattr(exc, "status_code", None) or getattr(getattr(exc, "response", None), "status_code", None)
         log.error("MCP ошибка проверки подключения [%s] status=%s: %s",
                   server_id, status or "error", exc)
+        data = _read()
         data[server_id]["connected"] = False
+        data[server_id]["tools_count"] = 0
+        data[server_id]["tool_names"] = []
         data[server_id]["last_error"] = f"{exc.__class__.__name__}: {exc}"
         data[server_id]["updated_at"] = int(time.time())
         _write(data)

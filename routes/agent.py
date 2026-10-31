@@ -794,6 +794,9 @@ class NovaToolsContext:
         self.tasks_available = True
         self.schedule_available = bool(owner)
         self.skills_available = True
+        # Run-wide MCP budget lives on the request context, not on a tool
+        # instance: adaptive rounds may rebuild McpBridgeTool several times.
+        self._mcp_search_calls = 0
         for kind in ("image", "audio", "video"):
             setattr(self, f"media_{kind}_available", self._media_ready(kind))
 
@@ -838,6 +841,13 @@ class NovaToolsContext:
     # ── действия ─────────────────────────────────────────────────────────
     def call_mcp(self, server_id: str, tool: str, arguments: dict):
         import mcp_registry
+        if "search" in str(tool or "").lower():
+            limit = max(1, min(int(os.getenv("MCP_MAX_SEARCH_CALLS", "3")), 10))
+            if self._mcp_search_calls >= limit:
+                raise mcp_registry.McpError(
+                    f"Достигнут лимит поисковых вызовов MCP за запуск (не более {limit})"
+                )
+            self._mcp_search_calls += 1
         return mcp_registry.call_tool(server_id, tool, arguments)
 
     def generate_media(self, kind: str, prompt: str, params: dict):
@@ -895,7 +905,10 @@ class NovaToolsContext:
     def save_skill(self, name: str, content: str):
         import skills_registry
         item = skills_registry.save_text(name, content)
-        self.emit({"type": "skill", "skill": item})
+        validation = skills_registry.validate_skill(item["id"])
+        item["validation"] = validation
+        self.emit({"type": "skill", "skill": item, "validated": validation["ok"],
+                   "missing_tools": validation["missing_tools"]})
         return item
 
     def add_source(self, url: str, title: str = "") -> None:
@@ -961,7 +974,7 @@ def agent_status():
         "timeout": AGENT_TIMEOUT,
         "confirm_mode": policy.confirm_mode(),
         "user": signed_in(),
-        "admin": bool(session.get("admin_logged_in")),
+        "admin": bool(terminal_routes.is_admin()),
         "hint": ("" if enabled
                  else "Включите AGENT_ENABLED=1 в .env и перезапустите сервер"),
         "workspace_hint": ("" if workspace else
@@ -1275,7 +1288,19 @@ def agent_stream():
     # токенов: на таком потолке модель обрывалась на полуслове, а фильтр
     # полноты ответа отбрасывал весь текст (пользователь видел одну строку).
     answer_tokens = max(1024, min(AGENT_MAX_TOKENS, int(_cfg.get("max_tokens") or AGENT_MAX_TOKENS)))
-    tools_allowed = request_tools_allowed(data)
+    admin_flag = bool(terminal_routes.is_admin())
+    mcp_default = False
+    if admin_flag and str(os.getenv("MCP_TOOLS_BY_DEFAULT", "1")).strip().lower() not in {"0", "false", "off", "no"}:
+        try:
+            import mcp_registry
+            mcp_default = bool(mcp_registry.connected_tools())
+        except Exception:  # noqa: BLE001 — недоступный MCP не ломает чат
+            log.debug("default MCP discovery failed", exc_info=True)
+    # После реального подключения хотя бы одного MCP-инструмента агент получает
+    # MCP и встроенные инструменты автоматически. Кнопка поиска больше не нужна
+    # для каждого отдельного MCP-запроса; MCP_TOOLS_BY_DEFAULT=0 возвращает
+    # прежнее строго ручное поведение.
+    tools_allowed = request_tools_allowed(data) or mcp_default
     use_tools = tools_enabled() and tools_allowed
     strict_mcp = strict_mcp_request(goal) if tools_allowed else False
     history_key = session.get("agent_memory_key")
@@ -1298,8 +1323,6 @@ def agent_stream():
     run_id, cancel = register_run()
     media_kind = requested_media_kind(goal) if tools_allowed else ""
     owner = _owner_name()
-    from routes.terminal import is_admin as _is_admin
-    admin_flag = bool(_is_admin())
     memory_key = ""
     try:
         import memory as memory_module
@@ -1369,7 +1392,7 @@ def agent_stream():
         if tools_allowed:
             try:
                 import skills_registry
-                skill_block = skills_registry.prompt_context() or ""
+                skill_block = skills_registry.prompt_context(goal) or ""
             except Exception:  # noqa: BLE001
                 log.debug("skills block failed", exc_info=True)
 

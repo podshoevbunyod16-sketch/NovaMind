@@ -41,6 +41,25 @@ def test_guest_keeps_the_ui_language_switch(client):
     assert response.status_code == 200 and response.get_json()["language"] == "ru"
 
 
+def test_env_can_grant_admin_features_to_every_signed_in_user(client, monkeypatch):
+    monkeypatch.setenv("ADMIN_ACCESS_FOR_ALL_USERS", "1")
+    with client.session_transaction() as sess:
+        sess["nova_signed_in"] = True
+        sess["nova_user_nick"] = "ordinary-user"
+
+    session_info = client.get("/api/session/check").get_json()
+    assert session_info["signed_in"] is True
+    assert session_info["admin"] is True
+    assert client.get("/api/settings/mcp").status_code == 200
+    assert client.get("/settings").status_code == 200
+
+
+def test_env_admin_features_still_reject_anonymous_guests(client, monkeypatch):
+    monkeypatch.setenv("ADMIN_ACCESS_FOR_ALL_USERS", "1")
+    assert client.get("/api/session/check").get_json()["admin"] is False
+    assert client.get("/api/settings/mcp").status_code == 403
+
+
 def test_guest_still_opens_the_chat(client):
     for path in ("/", "/chat"):
         assert client.get(path).status_code == 200, path
@@ -57,6 +76,28 @@ def test_admin_reads_settings_api(admin_client):
     assert admin_client.get("/api/settings/providers").status_code == 200
     assert admin_client.get("/api/settings/mcp").status_code == 200
     assert admin_client.get("/api/settings/skills").status_code == 200
+
+
+def test_chat_attachment_menu_contains_mcp_manager_and_catalog(admin_client):
+    page = admin_client.get("/chat").get_data(as_text=True)
+    assert 'id="attachMcpPanel"' in page
+    assert 'id="attachMcpConnected"' in page
+    assert 'id="attachMcpCatalog"' in page
+    assert 'id="mcpActiveBar"' in page
+
+    payload = admin_client.get("/api/settings/mcp").get_json()
+    catalog_ids = {item["id"] for item in payload["catalog"]}
+    assert {"custom", "context7", "github", "notion", "sentry"} <= catalog_ids
+
+
+def test_attachment_menu_opens_upward_on_mobile():
+    import pathlib
+
+    css = (pathlib.Path(__file__).resolve().parent.parent / "static" / "style.css").read_text(encoding="utf-8")
+    block = css.split(".attach-dropdown {", 1)[1].split("}", 1)[0]
+    assert "bottom:" in block
+    assert "top: auto" in block
+    assert ".attach-dropdown .toolbar-btn span { display: inline; }" in css
 
 
 def test_settings_links_are_hidden_for_non_admins():

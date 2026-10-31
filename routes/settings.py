@@ -78,7 +78,8 @@ def settings_skill_text():
     data = request.get_json(silent=True) or {}
     try:
         item = skills_registry.save_text(data.get('id') or data.get('name'), data.get('content') or '')
-        return jsonify({"success": True, "skill": item})
+        validation = skills_registry.validate_skill(item["id"])
+        return jsonify({"success": True, "skill": item, "validation": validation})
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
 
@@ -87,7 +88,8 @@ def settings_skill_text():
 def settings_skill_zip():
     try:
         item = skills_registry.import_zip(request.files.get('file'))
-        return jsonify({"success": True, "skill": item})
+        validation = skills_registry.validate_skill(item["id"])
+        return jsonify({"success": True, "skill": item, "validation": validation})
     except (ValueError, zipfile.BadZipFile) as exc:
         return jsonify({"error": str(exc)}), 400
 
@@ -192,10 +194,8 @@ def settings_mcp_connect():
     try:
         server_id = mcp_registry.save_connection(request.get_json(silent=True) or {})
         result = mcp_registry.test_connection(server_id)
-        if not result.get("connected"):
-            # Не оставляем в каталоге разовые неудачные попытки подключения.
-            # Подробная причина уже возвращается клиенту в result["error"].
-            mcp_registry.remove_connection(server_id)
+        # Не удаляем неудачное подключение: пользователь видит точную ошибку,
+        # может исправить token/URL и нажать «Подключить» ещё раз.
         return jsonify({"id": server_id, **result}), (200 if result.get("connected") else 502)
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
@@ -221,6 +221,18 @@ def settings_mcp_tools(server_id):
         return jsonify({"error": str(exc)}), 404
     except Exception as exc:
         return jsonify({"error": f"MCP: {exc}"}), 502
+
+
+@settings_bp.route('/api/settings/mcp/<server_id>/disconnect', methods=['POST'])
+def settings_mcp_disconnect(server_id):
+    denied = _admin_only()
+    if denied:
+        return denied
+    try:
+        mcp_registry.disconnect_connection(server_id)
+        return jsonify({"success": True, "connected": False})
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 404
 
 
 @settings_bp.route('/api/settings/mcp/<server_id>', methods=['DELETE'])

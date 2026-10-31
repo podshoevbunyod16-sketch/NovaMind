@@ -149,6 +149,19 @@
           case 'plan': turn.plan(event); break;
           case 'step': turn.step(event.icon, event.text); break;
           case 'tool': turn.tool(event); break;
+          case 'task_started': turn.step('🎯', 'Задача принята'); break;
+          case 'task_analysis':
+            if (event.status === 'started') turn.step('🧠', event.summary || 'Анализирую задачу…');
+            else turn.step('✓', event.summary || 'Анализ задачи завершён');
+            break;
+          case 'plan_created': turn.step('✓', event.summary || 'План создан'); break;
+          case 'tool_discovered': turn.step('🧰', `Обнаружено инструментов: ${event.count || 0}`); break;
+          case 'tool_call_started': turn.step('▶', `Использую ${event.tool || 'инструмент'}…`); break;
+          case 'verification_started': turn.step('🔎', event.summary || 'Проверяю результат…'); break;
+          case 'verification_completed': turn.step(event.ok ? '✓' : '⚠️', event.summary || 'Проверка завершена'); break;
+          case 'task_completed': turn.step('🏁', 'Задача выполнена'); break;
+          // tool_call_completed/failed и observation представлены раскрываемой
+          // карточкой legacy `tool`, поэтому не дублируем их отдельной строкой.
           // Динамическое получение инструментов после понимания запроса.
           case 'recall': if (turn.recall) turn.recall(event); break;
           // Думаем перед каждым шагом и ещё раз — после его выполнения.
