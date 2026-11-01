@@ -775,12 +775,13 @@ class NovaToolsContext:
     """
 
     def __init__(self, goal: str, chat_id: str, emit, signed: bool, owner: str,
-                 memory_key: str = ""):
+                 memory_key: str = "", cancel=None):
         self.goal = goal
         self.chat_id = chat_id
         self.emit = emit
         self.signed = signed
         self.owner = owner
+        self.cancel = cancel
         # Ключ памяти считается в потоке запроса: инструменты выполняются
         # в рабочем потоке движка, где flask.session уже недоступен.
         self._memory_user = memory_key
@@ -836,9 +837,13 @@ class NovaToolsContext:
             return ""
 
     # ── действия ─────────────────────────────────────────────────────────
-    def call_mcp(self, server_id: str, tool: str, arguments: dict):
+    def call_mcp(self, server_id: str, tool: str, arguments: dict, cancel=None, timeout=None):
         import mcp_registry
-        return mcp_registry.call_tool(server_id, tool, arguments)
+        eff_cancel = cancel if cancel is not None else self.cancel
+        try:
+            return mcp_registry.call_tool(server_id, tool, arguments, cancel=eff_cancel, timeout=timeout)
+        except TypeError:
+            return mcp_registry.call_tool(server_id, tool, arguments)
 
     def generate_media(self, kind: str, prompt: str, params: dict):
         """Генерация медиа: (result, model, errors), как у media_agent."""
@@ -1338,7 +1343,8 @@ def agent_stream():
 
         if tools_allowed:
             tools_ctx = NovaToolsContext(goal, chat_id or "", emit=lambda event: None,
-                                         signed=signed, owner=owner, memory_key=memory_key)
+                                         signed=signed, owner=owner, memory_key=memory_key,
+                                         cancel=cancel)
             tools_ctx.is_admin = admin_flag
         else:
             # Ни перечисления MCP, ни проверки медиа-бэкендов: в прямом режиме

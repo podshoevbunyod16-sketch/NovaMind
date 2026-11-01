@@ -72,6 +72,34 @@ def _detect_http_status(text: str) -> int | None:
     return int(match.group(1)) if match else None
 
 
+def _is_cancelled(cancel: Any) -> bool:
+    if cancel is None:
+        return False
+    if hasattr(cancel, "is_set"):
+        return bool(cancel.is_set())
+    if callable(cancel):
+        return bool(cancel())
+    return bool(cancel)
+
+
+def _wait_cancel(cancel: Any, delay: float) -> bool:
+    """Ожидает delay секунд или взведения флага отмены. Возвращает True если отменено."""
+    if delay <= 0:
+        return _is_cancelled(cancel)
+    if cancel is None:
+        time.sleep(delay)
+        return False
+    if hasattr(cancel, "wait"):
+        return bool(cancel.wait(delay))
+    step = 0.05
+    end = time.time() + delay
+    while time.time() < end:
+        if _is_cancelled(cancel):
+            return True
+        time.sleep(min(step, max(0.0, end - time.time())))
+    return _is_cancelled(cancel)
+
+
 def _retry_delay(attempt: int, retry_after: str | None = None) -> float:
     base = float(os.getenv("MCP_RETRY_DELAY", str(RETRY_BASE_DELAY)))
     if retry_after:
@@ -179,7 +207,12 @@ def _headers(item: dict[str, Any]) -> dict[str, str]:
     return headers
 
 
-def request(server_id: str, method: str, params: dict[str, Any] | None = None, _retry_session: bool = True) -> dict[str, Any]:
+def request(server_id: str, method: str, params: dict[str, Any] | None = None,
+            _retry_session: bool = True, cancel: Any = None,
+            timeout: float | None = None, deadline: float | None = None) -> dict[str, Any]:
+    if _is_cancelled(cancel):
+        raise McpError("MCP вызов отменён", status_code=499, logged=True)
+
     data = _read()
     item = data.get(server_id)
     if not item:
@@ -188,15 +221,33 @@ def request(server_id: str, method: str, params: dict[str, Any] | None = None, _
         pass
     payload = {"jsonrpc": "2.0", "id": int(time.time() * 1000) % 1000000000, "method": method, "params": params or {}}
     max_retries = max(0, min(int(os.getenv("MCP_MAX_RETRIES", str(MAX_RETRIES))), 5))
+    effective_deadline = deadline if deadline is not None else (time.time() + float(timeout if timeout is not None else TIMEOUT))
     response = None
+
     for attempt in range(max_retries + 1):
+        if _is_cancelled(cancel):
+            raise McpError("MCP вызов отменён", status_code=499, logged=True)
+
+        remaining = effective_deadline - time.time()
+        if remaining <= 0:
+            raise McpError("Превышен общий таймаут MCP-вызова", status_code=504, logged=True)
+
+        req_timeout = max(0.001, min(remaining, float(timeout if timeout is not None else TIMEOUT)))
         try:
-            response = requests.post(item["url"], headers=_headers(item), json=payload, timeout=TIMEOUT)
+            response = requests.post(item["url"], headers=_headers(item), json=payload, timeout=req_timeout)
         except requests.RequestException as exc:
+            if _is_cancelled(cancel):
+                raise McpError("MCP вызов отменён", status_code=499, logged=True)
+            if effective_deadline - time.time() <= 0:
+                raise McpError("Превышен общий таймаут MCP-вызова", status_code=504, logged=True) from exc
             status = getattr(getattr(exc, "response", None), "status_code", None)
             log.error("MCP ошибка сети [%s %s] status=%s: %s",
                       server_id, method, status or "network_error", exc)
             raise
+
+        if _is_cancelled(cancel):
+            raise McpError("MCP вызов отменён", status_code=499, logged=True)
+
         session_id = response.headers.get("mcp-session-id")
         if session_id:
             data[server_id]["session_id"] = session_id
@@ -205,12 +256,18 @@ def request(server_id: str, method: str, params: dict[str, Any] | None = None, _
         if response.status_code in RETRY_STATUS_CODES and attempt < max_retries:
             delay = _retry_delay(attempt, response.headers.get("Retry-After"))
             raw_hint = _extract_error_text(response.text)[:240]
+            remaining = effective_deadline - time.time()
+            if remaining <= 0:
+                raise McpError("Превышен общий таймаут MCP-вызова", status_code=504, logged=True)
+            actual_delay = min(delay, remaining)
             log.warning("MCP HTTP %s [%s %s] status=%s: пауза %.1f с и повтор (%d/%d)%s",
                         response.status_code, server_id, method, response.status_code,
-                        delay, attempt + 1, max_retries,
+                        actual_delay, attempt + 1, max_retries,
                         f" — {raw_hint}" if raw_hint else "")
-            if delay > 0:
-                time.sleep(delay)
+            if _wait_cancel(cancel, actual_delay):
+                raise McpError("MCP вызов отменён", status_code=499, logged=True)
+            if time.time() >= effective_deadline:
+                raise McpError("Превышен общий таймаут MCP-вызова", status_code=504, logged=True)
             continue
         break
 
@@ -226,6 +283,9 @@ def request(server_id: str, method: str, params: dict[str, Any] | None = None, _
         if _retry_session and method not in {"initialize", "notifications/initialized"} and session_lost:
             # Streamable HTTP-сервер мог перезапуститься и забыть старую
             # сессию, хотя NovaMind всё ещё хранит её id. Создаём новую один раз.
+            remaining = effective_deadline - time.time()
+            if remaining <= 0:
+                raise McpError("Превышен общий таймаут MCP-вызова", status_code=504, logged=True)
             data[server_id].pop("session_id", None)
             data[server_id].pop("initialized", None)
             _write(data)
@@ -240,10 +300,12 @@ def request(server_id: str, method: str, params: dict[str, Any] | None = None, _
                 err.status_code = response.status_code
                 raise err
             try:
-                request(server_id, "notifications/initialized", {}, _retry_session=False)
+                request(server_id, "notifications/initialized", {}, _retry_session=False,
+                        cancel=cancel, deadline=effective_deadline)
             except Exception:
                 pass
-            return request(server_id, method, params, _retry_session=False)
+            return request(server_id, method, params, _retry_session=False,
+                           cancel=cancel, deadline=effective_deadline)
         log.error("MCP HTTP ошибка [%s %s] status=%s: %s",
                   server_id, method, response.status_code, detail or "сервер не сообщил причину")
         err = requests.HTTPError(
@@ -410,15 +472,33 @@ def format_tools_summary(tools: list[dict[str, Any]], max_tools: int = 40) -> st
     return "; ".join(entries)
 
 
-def call_tool(server_id: str, tool_name: str, arguments: dict[str, Any] | None = None) -> dict[str, Any]:
-    """Вызывает MCP tools/call с паузой/повтором при 403/429 и логированием ошибок."""
+def call_tool(server_id: str, tool_name: str, arguments: dict[str, Any] | None = None,
+              cancel: Any = None, timeout: float | None = None) -> dict[str, Any]:
+    """Вызывает MCP tools/call с паузой/повтором при 403/429, ограничением общего времени и поддержкой cancellation."""
+    if _is_cancelled(cancel):
+        raise McpError("MCP вызов отменён", status_code=499, logged=True)
+
     server_id = resolve_server_id(server_id, tool_name)
     max_retries = max(0, min(int(os.getenv("MCP_MAX_RETRIES", str(MAX_RETRIES))), 5))
+    overall_timeout = float(timeout if timeout is not None else
+                            os.getenv("MCP_TOTAL_TIMEOUT", os.getenv("MCP_CALL_TIMEOUT", str(TIMEOUT))))
+    deadline = time.time() + overall_timeout
+
     for attempt in range(max_retries + 1):
+        if _is_cancelled(cancel):
+            raise McpError("MCP вызов отменён", status_code=499, logged=True)
+        remaining = deadline - time.time()
+        if remaining <= 0:
+            raise McpError(f"Превышен общий таймаут MCP-вызова ({overall_timeout:.1f} с)", status_code=504, logged=True)
+
         response = request(server_id, "tools/call", {
             "name": tool_name,
             "arguments": arguments or {},
-        })
+        }, cancel=cancel, timeout=remaining, deadline=deadline)
+
+        if _is_cancelled(cancel):
+            raise McpError("MCP вызов отменён", status_code=499, logged=True)
+
         if isinstance(response, dict) and response.get("error"):
             rpc_err = response["error"]
             rpc_code = rpc_err.get("code") if isinstance(rpc_err, dict) else None
@@ -426,10 +506,16 @@ def call_tool(server_id: str, tool_name: str, arguments: dict[str, Any] | None =
             http_code = _detect_http_status(err_text)
             if http_code in RETRY_STATUS_CODES and attempt < max_retries:
                 delay = _retry_delay(attempt)
+                remaining = deadline - time.time()
+                if remaining <= 0:
+                    raise McpError(f"Превышен общий таймаут MCP-вызова ({overall_timeout:.1f} с)", status_code=504, logged=True)
+                actual_delay = min(delay, remaining)
                 log.warning("MCP JSON-RPC ошибка [%s:%s] status=%s: пауза %.1f с и повтор (%d/%d): %s",
-                            server_id, tool_name, http_code, delay, attempt + 1, max_retries, err_text[:240])
-                if delay > 0:
-                    time.sleep(delay)
+                            server_id, tool_name, http_code, actual_delay, attempt + 1, max_retries, err_text[:240])
+                if _wait_cancel(cancel, actual_delay):
+                    raise McpError("MCP вызов отменён", status_code=499, logged=True)
+                if time.time() >= deadline:
+                    raise McpError(f"Превышен общий таймаут MCP-вызова ({overall_timeout:.1f} с)", status_code=504, logged=True)
                 continue
             status_val = http_code or rpc_code or "rpc_error"
             log.error("MCP JSON-RPC ошибка [%s:%s] status=%s: %s",
@@ -442,10 +528,16 @@ def call_tool(server_id: str, tool_name: str, arguments: dict[str, Any] | None =
             http_code = _detect_http_status(err_text)
             if http_code in RETRY_STATUS_CODES and attempt < max_retries:
                 delay = _retry_delay(attempt)
+                remaining = deadline - time.time()
+                if remaining <= 0:
+                    raise McpError(f"Превышен общий таймаут MCP-вызова ({overall_timeout:.1f} с)", status_code=504, logged=True)
+                actual_delay = min(delay, remaining)
                 log.warning("MCP инструмент [%s:%s] вернул код %s (status=%s): пауза %.1f с и повтор (%d/%d): %s",
-                            server_id, tool_name, http_code, http_code, delay, attempt + 1, max_retries, err_text[:240])
-                if delay > 0:
-                    time.sleep(delay)
+                            server_id, tool_name, http_code, http_code, actual_delay, attempt + 1, max_retries, err_text[:240])
+                if _wait_cancel(cancel, actual_delay):
+                    raise McpError("MCP вызов отменён", status_code=499, logged=True)
+                if time.time() >= deadline:
+                    raise McpError(f"Превышен общий таймаут MCP-вызова ({overall_timeout:.1f} с)", status_code=504, logged=True)
                 continue
             log.error("MCP ошибка инструмента [%s:%s] status=%s: %s",
                       server_id, tool_name, http_code or "tool_error", err_text[:500])

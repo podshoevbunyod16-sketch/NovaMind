@@ -196,7 +196,7 @@ class Agent:
             import capabilities
         except Exception:                                   # noqa: BLE001
             capabilities = None
-        if capabilities is not None:
+        if capabilities is not None and capabilities.current() is not None:
             try:
                 error = capabilities.require(tag, payload)
             except Exception:                               # noqa: BLE001

@@ -559,7 +559,7 @@ def _run_nova(parts, timeout):
     return _result(2, "", f"nova: неизвестная команда «{verb}». Список: nova help")
 
 
-def _run_python_gateway(parts):
+def _run_python_gateway(parts, cancel=None, timeout=None):
     """Execute ``python3 -m novamind_cli ...`` through the real tool registry.
 
     This is a built-in terminal command (like ``nova search``), not a visual
@@ -570,6 +570,7 @@ def _run_python_gateway(parts):
     import json
     from agenticseek.tools.terminal_commands import _python_command
     import tool_registry
+    import capabilities
 
     try:
         parsed = _python_command([str(item) for item in parts])
@@ -593,7 +594,33 @@ def _run_python_gateway(parts):
             return _result(2, "", f"invalid JSON: {exc}; исправьте структуру запроса и повторите")
         if not isinstance(arguments, dict):
             return _result(2, "", "аргументы должны быть JSON-объектом")
-        result = tool_registry.call_tool(registry_name, **arguments)
+
+        if registry_name == "mcp_call":
+            if cancel is not None and "cancel" not in arguments:
+                arguments["cancel"] = cancel
+            if timeout is not None and "timeout" not in arguments:
+                arguments["timeout"] = timeout
+
+        cap_ctx = None
+        if capabilities.current() is None:
+            try:
+                role = "admin" if is_admin() else ("user" if can_use_workspace() else "guest")
+            except Exception:
+                role = "user"
+            try:
+                owner = session.get("username") if signed_in() else "cli"
+            except Exception:
+                owner = "cli"
+            _tok, cap = capabilities.mint(owner=owner, run_id="cli", role=role,
+                                          tools=capabilities.scopes_for_role(role))
+            cap_ctx = capabilities.activate(cap)
+
+        try:
+            result = tool_registry.call_tool(registry_name, **arguments)
+        finally:
+            if cap_ctx is not None:
+                capabilities.deactivate(cap_ctx)
+
         ok = not (isinstance(result, dict) and result.get("ok") is False)
         text = json.dumps(result, ensure_ascii=False, indent=2, default=str)
         return _result(0 if ok else 1, text if ok else "", "" if ok else text)
@@ -636,7 +663,7 @@ def run_command(command, timeout=None, cancel=None):
     if len(prepared) == 1 and prepared[0][1] == "nova":    # встроенная команда — без subprocess
         return _run_nova(prepared[0][0], timeout)
     if len(prepared) == 1 and prepared[0][1] in ("python", "python3"):
-        gateway = _run_python_gateway(prepared[0][0])
+        gateway = _run_python_gateway(prepared[0][0], cancel=cancel, timeout=timeout)
         if gateway is not None:
             return gateway
     timeout = float(timeout or COMMAND_TIMEOUT)

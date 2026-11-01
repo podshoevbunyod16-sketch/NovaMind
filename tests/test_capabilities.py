@@ -103,8 +103,38 @@ def test_aliases_are_normalized():
     assert cap.allows("shell") and cap.allows("terminal")
 
 
-def test_require_is_noop_without_active_capability():
-    assert capabilities.require("terminal") is None
+def test_require_is_noop_without_active_capability_for_safe_tools():
+    assert capabilities.require("web_search") is None
+    assert capabilities.require("knowledge_search") is None
+
+
+def test_require_denies_mandatory_tools_without_active_capability():
+    for tool in ("terminal", "file_read", "file_write", "mcp_call", "schedule"):
+        denied = capabilities.require(tool)
+        assert denied is not None
+        assert denied["ok"] is False
+        assert denied["error"]["type"] == "no_capability"
+
+
+def test_require_allows_authorized_flask_routes_without_active_capability(client):
+    with client.application.test_request_context("/"):
+        from flask import session
+        session["admin_logged_in"] = True
+        assert capabilities.require("terminal") is None
+        assert capabilities.require("file_write") is None
+        assert capabilities.require("mcp_call") is None
+
+
+def test_require_allows_authorized_user_flask_routes_without_active_capability(client):
+    with client.application.test_request_context("/"):
+        from flask import session
+        session["nova_signed_in"] = True
+        assert capabilities.require("file_read") is None
+        assert capabilities.require("terminal") is None
+        # mcp_call не разрешён роли user без флага MCP_ALLOW_USER_READ
+        denied = capabilities.require("mcp_call")
+        assert denied is not None and denied["ok"] is False
+        assert denied["error"]["type"] == "tool_not_granted"
 
 
 def test_require_denies_tool_outside_scope():

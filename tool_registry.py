@@ -475,13 +475,14 @@ def _register_agent_tools():
     в нативном режиме о них не знала.
     """
     if get_tool("mcp_call") is None:
-        def mcp_call(server_id, tool, arguments=None):
+        def mcp_call(server_id, tool, arguments=None, cancel=None, timeout=None):
             import mcp_registry
             if not str(server_id or "").strip() or not str(tool or "").strip():
                 return {"ok": False, "error": {"type": "bad_arguments",
                                                "message": "нужны server_id и tool",
                                                "retryable": False}}
-            result = mcp_registry.call_tool(str(server_id), str(tool), arguments or {})
+            result = mcp_registry.call_tool(str(server_id), str(tool), arguments or {},
+                                            cancel=cancel, timeout=timeout)
             if isinstance(result, dict) and result.get("error"):
                 return {"ok": False, "result": result,
                         "error": {"type": "mcp_error", "message": str(result.get("error"))[:500],

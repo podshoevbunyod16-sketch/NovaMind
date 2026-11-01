@@ -77,13 +77,13 @@ ROLE_SCOPES: dict[str, frozenset[str]] = {
         "forget", "task", "task_done", "skill_create", "image", "audio", "video",
         # рабочая папка
         "terminal", "python", "file_read", "file_write", "file_edit", "file_find",
-        "shell", "git", "file_delete",
+        "file_search", "file_tree", "shell", "git", "file_delete",
     }),
     "admin": frozenset({
         "web_search", "web_open", "knowledge_search", "recall", "remember",
         "forget", "task", "task_done", "skill_create", "image", "audio", "video",
         "terminal", "python", "file_read", "file_write", "file_edit", "file_find",
-        "shell", "git", "file_delete",
+        "file_search", "file_tree", "shell", "git", "file_delete",
         "mcp_call", "schedule",
     }),
 }
@@ -91,10 +91,37 @@ ROLE_SCOPES: dict[str, frozenset[str]] = {
 #: Инструменты, которым нужна рабочая папка. Проверяются дополнительно:
 #: даже с ролью ``user`` вызов требует активного токена именно этого хода.
 WORKSPACE_TOOLS = frozenset({"terminal", "python", "file_read", "file_write",
-                             "file_edit", "file_find", "shell", "git", "file_delete"})
+                             "file_edit", "file_find", "file_search", "file_tree",
+                             "shell", "git", "file_delete"})
+
+#: Инструменты, для вызова которых обязательно наличие активного capability-токена.
+MANDATORY_CAPABILITY_TOOLS = WORKSPACE_TOOLS | frozenset({"mcp_call", "schedule"})
+
+
+def is_token_mandatory(tool: str) -> bool:
+    """Обязателен ли capability-токен для вызова этого инструмента."""
+    return normalize_tool(tool) in MANDATORY_CAPABILITY_TOOLS
+
+
+def _flask_session_role() -> str | None:
+    """Определяет роль авторизованного пользователя из сессии Flask, если запрос в её контексте."""
+    try:
+        from flask import has_request_context, session
+        if not has_request_context():
+            return None
+        if session.get("admin_logged_in"):
+            return "admin"
+        from routes.terminal import can_use_workspace, is_admin, signed_in
+        if is_admin():
+            return "admin"
+        if can_use_workspace() or signed_in():
+            return "user"
+        return "guest"
+    except Exception:
+        return None
 
 _ALIASES = {"bash": "terminal", "shell": "terminal", "files": "file_read",
-            "file_finder": "file_find"}
+            "file_finder": "file_find", "grep": "file_search", "tree": "file_tree"}
 
 #: Секрет процесса. Если ``AGENT_CAP_SECRET`` не задан, генерируется случайный:
 #: токены живут только внутри процесса и не переживают перезапуск (это
@@ -314,8 +341,8 @@ def current() -> Capability | None:
 
 
 def enforcement_enabled() -> bool:
-    """Проверки включаются, когда есть активный токен и их не отключили явно."""
-    return str(os.getenv("AGENT_CAPABILITIES", "1")).strip() != "0" and _ACTIVE.get() is not None
+    """Проверки включены по умолчанию (AGENT_CAPABILITIES!=0)."""
+    return str(os.getenv("AGENT_CAPABILITIES", "1")).strip() != "0"
 
 
 def require(tool: str, arguments: object = None) -> dict | None:
@@ -324,18 +351,40 @@ def require(tool: str, arguments: object = None) -> dict | None:
     Формат отказа совпадает с ошибками инструментов NovaMind, поэтому агент
     получает его как обычное наблюдение и может объяснить пользователю.
     """
-    capability = _ACTIVE.get()
-    if capability is None:
-        return None
     name = normalize_tool(tool)
     if not enforcement_enabled():
         log.warning("capability: проверки отключены (AGENT_CAPABILITIES=0), вызов %s", name)
         return None
-    if capability.expired():
-        return _denied(name, "expired", "Срок действия прав на инструменты истёк")
-    if not capability.allows(name):
+
+    capability = _ACTIVE.get()
+    if capability is not None:
+        if capability.expired():
+            return _denied(name, "expired", "Срок действия прав на инструменты истёк")
+        if not capability.allows(name):
+            return _denied(name, "tool_not_granted",
+                           f"Инструмент «{name}» не входит в права этого хода")
+        return None
+
+    # Ход без активного токена:
+    # 1. Если для инструмента токен не обязателен (web_search, knowledge, media и т.д.) —
+    # вызов вне хода агента разрешён.
+    if not is_token_mandatory(name):
+        return None
+
+    # 2. Инструмент требует токен (WORKSPACE_TOOLS, mcp_call, schedule).
+    # Проверяем авторизованный маршрут Flask или CLI-сессию: если пользователь вошёл,
+    # определяем его роль и проверяем права, чтобы не ломать легитимный веб/терминал.
+    role = _flask_session_role()
+    if role is not None:
+        if name in scopes_for_role(role):
+            return None
         return _denied(name, "tool_not_granted",
-                       f"Инструмент «{name}» не входит в права этого хода")
+                       f"Инструмент «{name}» не разрешён для роли {role}")
+
+    # 3. Без активного capability и без авторизованной сессии:
+    # инструменты, где токен обязателен, блокируются с ошибкой.
+    return _denied(name, "no_capability",
+                   f"Инструмент «{name}» требует активный capability-токен хода")
 
 
 def _denied(tool: str, kind: str, message: str) -> dict:

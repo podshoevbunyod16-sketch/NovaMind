@@ -35,7 +35,7 @@ from agenticseek.tools.tools import Tools
 mcp_log = logging.getLogger("novamind.mcp")
 
 MAX_PAYLOAD = 20000
-MAX_MCP_SEARCH_CALLS = 30
+MAX_MCP_SEARCH_CALLS = int(os.getenv("MAX_MCP_SEARCH_CALLS", "3"))
 
 #: MCP tool names that change state on the remote service: always confirmed.
 _MCP_WRITE_HINTS = ("delete", "remove", "create", "update", "post", "send", "write",
@@ -234,13 +234,17 @@ class McpBridgeTool(BridgeTool):
             return (f"[failure] Достигнут лимит поисковых вызовов MCP за запуск "
                     f"(не более {MAX_MCP_SEARCH_CALLS}). Дай итоговый ответ по уже найденным данным.")
 
+        cancel = getattr(self.ctx, "cancel", None)
         done_get_me = self._get_me_set()
         if tool == "get_me":
             done_get_me.add(server_id)
         elif is_search and server_id not in done_get_me and self._is_github_server(server_id, tool):
             done_get_me.add(server_id)
             try:
-                self.ctx.call_mcp(server_id, "get_me", {})
+                try:
+                    self.ctx.call_mcp(server_id, "get_me", {}, cancel=cancel)
+                except TypeError:
+                    self.ctx.call_mcp(server_id, "get_me", {})
                 if self.state is not None:
                     self.state.add_note(f"MCP {server_id}:get_me")
             except Exception as pre_err:  # noqa: BLE001 — не блокируем поиск при отсутствии get_me у кастомного мока
@@ -254,7 +258,10 @@ class McpBridgeTool(BridgeTool):
             self._inc_search_count()
 
         try:
-            result = self.ctx.call_mcp(server_id, tool, arguments)
+            try:
+                result = self.ctx.call_mcp(server_id, tool, arguments, cancel=cancel)
+            except TypeError:
+                result = self.ctx.call_mcp(server_id, tool, arguments)
         except Exception as error:  # noqa: BLE001
             status_code = (
                 getattr(error, "status_code", None)

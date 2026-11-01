@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
+import time
 
 import pytest
 import requests
@@ -261,3 +263,104 @@ def test_mcp_error_surfaces_real_server_message_and_logs_status_to_nova_log(
         for h in added_handlers:
             root_logger.removeHandler(h)
             h.close()
+
+
+def test_mcp_cancellation_propagates_to_transport(tmp_path, monkeypatch):
+    """Отмена (cancel) передаётся до MCP-транспорта и прерывает запрос до сети или во время паузы."""
+    store = tmp_path / "mcp_connections.json"
+    store.write_text(json.dumps({
+        "github": {"name": "GitHub", "url": "https://mcp.example.test/mcp",
+                   "auth": "bearer", "token": "secret", "connected": True, "initialized": True}
+    }), encoding="utf-8")
+    monkeypatch.setattr(mcp_registry, "STORE", store)
+
+    # 1. Заранее отменённый вызов даже не делает сетевой запрос
+    post_calls = []
+    monkeypatch.setattr(mcp_registry.requests, "post", lambda *a, **kw: post_calls.append(a))
+    cancel = threading.Event()
+    cancel.set()
+
+    with pytest.raises(mcp_registry.McpError) as exc_info:
+        mcp_registry.call_tool("github", "search_repositories", {"query": "flask"}, cancel=cancel)
+    assert exc_info.value.status_code == 499
+    assert len(post_calls) == 0
+
+    # 2. Отмена во время паузы между попытками (при 429) не ждёт полной задержки
+    cancel_during_sleep = threading.Event()
+    responses = iter([
+        _FakeResp(429, {"message": "Rate limit"}, headers={"Retry-After": "5"}),
+        _FakeResp(200, {"jsonrpc": "2.0", "id": 1, "result": {"items": []}}),
+    ])
+    monkeypatch.setattr(mcp_registry.requests, "post", lambda *a, **kw: next(responses))
+
+    def trigger_cancel():
+        time.sleep(0.05)
+        cancel_during_sleep.set()
+
+    t = threading.Thread(target=trigger_cancel)
+    t.start()
+    started = time.time()
+    with pytest.raises(mcp_registry.McpError) as exc_info:
+        mcp_registry.call_tool("github", "search_repositories", {"query": "flask"},
+                               cancel=cancel_during_sleep)
+    elapsed = time.time() - started
+    t.join()
+    assert exc_info.value.status_code == 499
+    assert elapsed < 2.0, f"Отмена должна прервать паузу немедленно, заняло {elapsed:.2f}с"
+
+
+def test_mcp_overall_timeout_bounds_retries(tmp_path, monkeypatch):
+    """Общий таймаут MCP-вызова ограничивает суммарное время всех повторных запросов."""
+    store = tmp_path / "mcp_connections.json"
+    store.write_text(json.dumps({
+        "github": {"name": "GitHub", "url": "https://mcp.example.test/mcp",
+                   "auth": "bearer", "token": "secret", "connected": True, "initialized": True}
+    }), encoding="utf-8")
+    monkeypatch.setattr(mcp_registry, "STORE", store)
+    monkeypatch.setenv("MCP_MAX_RETRIES", "4")
+    monkeypatch.setenv("MCP_RETRY_DELAY", "1.0")
+
+    # Сервер постоянно отдаёт 429
+    monkeypatch.setattr(mcp_registry.requests, "post",
+                        lambda *a, **kw: _FakeResp(429, {"message": "Rate limit"}))
+
+    started = time.time()
+    with pytest.raises(mcp_registry.McpError) as exc_info:
+        # Устанавливаем общий таймаут 0.15 с
+        mcp_registry.call_tool("github", "search_repositories", {"query": "flask"},
+                               timeout=0.15)
+    elapsed = time.time() - started
+    assert exc_info.value.status_code == 504
+    assert "таймаут" in str(exc_info.value).lower()
+    assert elapsed < 1.0, f"Общий таймаут должен остановить ретраи, прошло {elapsed:.2f}с"
+
+
+def test_mcp_cancellation_passes_through_agent_context(tmp_path, monkeypatch):
+    """Cancellation передаётся через контекст хода NovaToolsContext до call_tool."""
+    store = tmp_path / "mcp_connections.json"
+    store.write_text(json.dumps({
+        "github": {"name": "GitHub", "url": "https://mcp.example.test/mcp",
+                   "auth": "bearer", "token": "secret", "connected": True, "initialized": True}
+    }), encoding="utf-8")
+    monkeypatch.setattr(mcp_registry, "STORE", store)
+
+    from routes.agent import NovaToolsContext
+    cancel = threading.Event()
+    cancel.set()
+    ctx = NovaToolsContext(goal="тест", chat_id="1", emit=lambda e: None,
+                           signed=True, owner="admin", cancel=cancel)
+    with pytest.raises(mcp_registry.McpError) as exc_info:
+        ctx.call_mcp("github", "search_repositories", {"query": "flask"})
+    assert exc_info.value.status_code == 499
+
+
+def test_cli_python_gateway_executes_with_auto_minted_capability(admin_client, sandbox, monkeypatch):
+    """CLI python3 -m novamind_cli call file_read работает и создаёт активный capability."""
+    import routes.terminal as term_routes
+    from flask import session
+    (sandbox / "sample.txt").write_text("контент файла", encoding="utf-8")
+    with admin_client.application.test_request_context("/"):
+        session["admin_logged_in"] = True
+        result = term_routes.run_agent("python3 -m novamind_cli call file_read '{\"path\":\"sample.txt\"}'")
+        assert result["code"] == 0
+        assert "контент файла" in result["stdout"]
