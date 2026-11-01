@@ -11,7 +11,19 @@ LIFECYCLE_EVENTS = frozenset({
     "tool_call_started", "tool_call_completed", "tool_call_failed",
     "observation", "plan_revised", "verification_started",
     "verification_completed", "task_completed", "task_failed", "task_cancelled",
+    "task_requires_user_action",
 })
+
+#: The five final outcomes and their canonical terminal event type.  A
+#: partially completed run deliberately uses ``task_completed`` (with
+#: ``status="partially_completed"``) so older clients still close the turn.
+TERMINAL_EVENTS = {
+    "completed": "task_completed",
+    "partially_completed": "task_completed",
+    "failed": "task_failed",
+    "cancelled": "task_cancelled",
+    "requires_user_action": "task_requires_user_action",
+}
 
 
 class EventBus:

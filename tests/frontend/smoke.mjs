@@ -1867,6 +1867,64 @@ check('ответ не заменён короткой ошибкой', !longAns
 
 check('консоль после сценариев озвучки чистая', consoleErrors.length === 0, consoleErrors.join(' | '));
 
+// ══════════════════════════════════════════════════════════════
+// 22) Все пять итоговых состояний и честный план
+// ══════════════════════════════════════════════════════════════
+console.log('\n22) Пять итоговых состояний и план по реальным шагам');
+const outcomeStream = (status, verification, extra = {}) => [
+  { type: 'stage', scene: 'agent', title: 'Понимаю запрос', text: 'Разбираю задачу' },
+  { type: 'task_started', task: 'проверка' },
+  { type: 'plan_created', summary: 'План', plan: [
+    { id: 'research', title: 'Собрать данные', status: 'completed' },
+    { id: 'crosscheck', title: 'Сверить данные', status: status === 'partially_completed' ? 'failed' : 'skipped' },
+    { id: 'verify', title: 'Проверить результат', status: status === 'completed' ? 'completed' : 'failed' },
+  ] },
+  { type: 'verification_completed', ...verification },
+  ...(extra.token ? [{ type: 'token', token: extra.token }] : []),
+  extra.event,
+  { type: 'result', reply: extra.token || '', task_status: status,
+    verification, ...(extra.result || {}) },
+  { type: 'done' },
+];
+const outcomeCases = [
+  ['completed', { status: 'completed', ok: true, summary: 'Задача выполнена' }, { token: 'Готовый ответ' }],
+  ['partially_completed', { status: 'partially_completed', ok: false, summary: 'Часть шагов не выполнена' }, { token: 'Частичный ответ' }],
+  ['failed', { status: 'failed', ok: false, summary: 'Задача не выполнена' }, { token: 'Ошибка' }],
+  ['cancelled', { status: 'cancelled', ok: false, summary: 'Задача отменена' }, {}],
+  ['requires_user_action', { status: 'requires_user_action', ok: false, summary: 'Подключите инструмент' }, {}],
+];
+for (const [status, verification, extra] of outcomeCases) {
+  const event = status === 'failed' ? { type: 'task_failed', ...verification }
+    : status === 'completed' ? { type: 'task_completed', ...verification, status }
+    : status === 'cancelled' ? { type: 'task_cancelled', ...verification }
+      : status === 'requires_user_action' ? { type: 'task_requires_user_action', ...verification }
+        : { type: 'task_completed', ...verification, status };
+  mock.agentStream = outcomeStream(status, verification, { ...extra, event });
+  document.getElementById('chat-input').value = `проверка ${status}`;
+  await window.sendMessage();
+  await settle();
+  const bubble = lastAi();
+  check(`итог ${status} помечен на пузыре`, bubble?.dataset.taskStatus === status,
+    bubble?.dataset.taskStatus);
+  check(`итог ${status} виден текстом`, (bubble?.querySelector('.turn-outcome')?.textContent || '').length > 0,
+    bubble?.querySelector('.turn-outcome')?.textContent);
+  if (status === 'requires_user_action') {
+    check('requires_user_action не выдаётся за выполненную задачу',
+      bubble?.querySelector('.answer')?.textContent.includes('Подключите инструмент') === true
+      && !(bubble?.textContent || '').includes('Задача выполнена'),
+      bubble?.textContent);
+  }
+  const planRows = bubble?.querySelectorAll('.stage-plan-steps li') || [];
+  check(`план показывает статусы для ${status}`,
+    planRows.length === 3
+    && [...planRows].some((row) => row.classList.contains('is-failed') || row.classList.contains('is-skipped')),
+    [...planRows].map((row) => row.className).join('|'));
+}
+check('счётчик плана не выдаёт провал за выполненный шаг', (() => {
+  const label = [...document.querySelectorAll('.stage-plan-label')].pop()?.textContent || '';
+  return label.includes('План · 1/3') && label.includes('ошибок: 1');
+})(), [...document.querySelectorAll('.stage-plan-label')].pop()?.textContent);
+
 if (failures.length) {
   console.error(`\n❌ Провалено проверок: ${failures.length} → ${failures.join(', ')}`);
   process.exit(1);

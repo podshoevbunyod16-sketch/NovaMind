@@ -67,6 +67,10 @@ class WebSearchTool(Tools):
         self.backend = backend
         self.state = state
         self.limit = limit
+        self.last_results: list = []
+        self.last_meta: dict = {}
+        self.last_error: str = ""
+        self.last_failed: bool = False
 
     def execute(self, payload: str) -> str:
         parts = str(payload or "").strip().splitlines()
@@ -76,22 +80,33 @@ class WebSearchTool(Tools):
             found = re.match(r"\s*limit\s*=\s*(\d+)\s*$", extra)
             if found:
                 limit = max(1, min(int(found.group(1)), 20))
+        self.last_results, self.last_meta, self.last_error = [], {}, ""
+        self.last_failed = False
         if not query:
+            self.last_failed = True
+            self.last_error = "empty query"
             return "[failure] Пустой поисковый запрос."
         if query.strip(" \"'«»`").lower() in {"query", "запрос", "search query",
                                               "your query", "..."}:
             return ("[failure] «query» — это шаблон, а не запрос. Напиши реальный "
                     "запрос или ответь пользователю по уже найденным данным.")
         if self.backend is None:
+            self.last_failed = True
+            self.last_error = "search backend is not configured"
             return "[failure] Поиск недоступен: не настроен ни один бэкенд."
         try:
             results, meta = self.backend(query, limit)
         except Exception as error:  # noqa: BLE001 — report, do not crash the run
+            self.last_failed = True
+            self.last_error = f"{type(error).__name__}: {error}"
             return f"[failure] Поиск «{query}» не удался: {type(error).__name__}: {error}"
         results = list(results or [])
+        self.last_results = results
+        self.last_meta = dict(meta or {}) if isinstance(meta, dict) else {"meta": meta}
         if not results:
             backend = (meta or {}).get("backend") if isinstance(meta, dict) else ""
             hint = f" (бэкенд: {backend})" if backend else ""
+            self.last_error = "no results"
             return f"[failure] Поиск «{query}» ничего не нашёл{hint}."
         lines = []
         for index, item in enumerate(results[:limit], 1):
@@ -104,6 +119,7 @@ class WebSearchTool(Tools):
             if self.state is not None:
                 self.state.add_source(url, title)
         if not lines:
+            self.last_error = "results without urls"
             return f"[failure] Поиск «{query}» вернул результаты без ссылок."
         return ("[success] Результаты поиска (открой подходящий через ```web_open```):\n"
                 + "\n".join(lines))
@@ -124,21 +140,30 @@ class WebOpenTool(Tools):
         self.reader = reader
         self.state = state
         self.max_chars = max_chars
+        self.last_text: str = ""
+        self.last_error: str = ""
 
     def execute(self, payload: str) -> str:
         url = str(payload or "").strip().splitlines()[0].strip() if str(payload or "").strip() else ""
+        self.last_text, self.last_error = "", ""
         if not url:
+            self.last_error = "empty url"
             return "[failure] Нужен URL страницы."
         if not is_public_url(url):
+            self.last_error = "url is not public"
             return f"[failure] Адрес «{url}» не разрешён (локальная сеть или неверная схема)."
         if self.reader is None:
+            self.last_error = "reader is not configured"
             return "[failure] Чтение страниц недоступно: не настроен зачитыватель."
         try:
             text, error = self.reader(url, self.max_chars)
         except Exception as exc:  # noqa: BLE001
+            self.last_error = f"{type(exc).__name__}: {exc}"
             return f"[failure] Страница «{url}» не открылась: {type(exc).__name__}: {exc}"
         if not text:
+            self.last_error = str(error or "empty page")
             return f"[failure] Страница «{url}» не открылась: {error or 'пустой текст'}"
+        self.last_text = str(text)
         if self.state is not None:
             self.state.add_source(url, url)
         links = _extract_links(text)

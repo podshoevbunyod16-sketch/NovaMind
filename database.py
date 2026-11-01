@@ -79,6 +79,8 @@ def get_chat_history(chat_id, limit=50):
     Раньше отдавались ПЕРВЫЕ сообщения — в длинном диалоге модель «забывала»
     свежий контекст. Теперь берём хвост и разворачиваем обратно.
     """
+    if not chat_allowed(chat_id):
+        return []
     with get_db() as conn:
         rows = conn.execute(
             "SELECT role, content FROM messages WHERE chat_id=? "
@@ -88,7 +90,9 @@ def get_chat_history(chat_id, limit=50):
     return [{"role": r["role"], "content": r["content"]} for r in reversed(rows)]
 
 def add_message(chat_id, role, content):
-    """Добавляет сообщение в историю чата."""
+    """Добавляет сообщение в историю чата (только в разрешённый чат)."""
+    if not chat_allowed(chat_id):
+        return None
     now = time.time()
     with _db_lock:
         with get_db() as conn:
@@ -130,15 +134,18 @@ def list_chats(limit=50, owner=None):
     return [dict(r) for r in rows]
 
 def delete_chat(chat_id):
-    """Удаляет чат, его сообщения и трассы шагов."""
+    """Удаляет чат, его сообщения и трассы шагов (только свой/legacy-admin)."""
+    if not chat_allowed(chat_id):
+        return False
     with _db_lock:
         with get_db() as conn:
             conn.execute("DELETE FROM messages WHERE chat_id=?", (chat_id,))
             conn.execute("DELETE FROM chats WHERE id=?", (chat_id,))
-    try:
-        clear_traces(chat_id)          # таблицы может ещё не быть — не страшно
-    except sqlite3.Error:
-        pass
+            try:
+                conn.execute("DELETE FROM step_traces WHERE chat_id=?", (chat_id,))
+            except sqlite3.Error:
+                pass                     # таблицы может ещё не быть — не страшно
+    return True
 
 def chat_owner_of(chat_id):
     """Владелец чата ("" - старый чат без владельца или чата нет)."""
@@ -210,7 +217,7 @@ def init_traces():
 
 def save_trace(chat_id, run_id, steps, limit_per_chat=100):
     """Сохраняет трассу хода агента. Пустую трассу не пишем."""
-    if not chat_id or not steps:
+    if not chat_id or not steps or not chat_allowed(chat_id):
         return 0
     init_traces()
     payload = json.dumps(steps, ensure_ascii=False)
@@ -231,7 +238,7 @@ def save_trace(chat_id, run_id, steps, limit_per_chat=100):
 
 def get_traces(chat_id, limit=20):
     """Трассы чата (новые последними) — для панели «Что делал агент»."""
-    if not chat_id:
+    if not chat_id or not chat_allowed(chat_id):
         return []
     init_traces()
     with get_db() as conn:
@@ -253,7 +260,7 @@ def get_traces(chat_id, limit=20):
 
 def clear_traces(chat_id):
     """Удаляет трассы чата (вместе с чатом или по кнопке «очистить»)."""
-    if not chat_id:
+    if not chat_id or not chat_allowed(chat_id):
         return 0
     init_traces()
     with _db_lock:
@@ -853,17 +860,23 @@ def _ensure_agent_columns(conn):
 
 
 def create_agent_run(goal, chat_id="", run_id="", provider="", model="",
-                     engine="agenticseek"):
-    """Регистрирует запуск агента. Возвращает id записи ("" при ошибке)."""
+                     engine="agenticseek", owner=None):
+    """Регистрирует запуск агента. Возвращает id записи ("" при ошибке).
+
+    ``owner`` can be passed explicitly by the engine thread (it already carries
+    the request owner through contextvars); every new row therefore has an
+    owner even if the request context was lost.
+    """
     init_agent_runs()
     record_id = str(uuid.uuid4())
+    if owner is None:
+        try:
+            import identity
+            owner = identity.chat_owner()
+        except Exception:
+            owner = ""
     with _db_lock:
         with get_db() as conn:
-            try:
-                import identity
-                owner = identity.chat_owner()
-            except Exception:
-                owner = ""
             conn.execute(
                 "INSERT INTO agent_runs (id, chat_id, run_id, owner, goal, engine, status,"
                 " provider, model, plan, verification, steps, answer, error, started_at, finished_at)"
@@ -924,13 +937,23 @@ def add_agent_run_step(run_id, seq, tool, label="", ok=True, output=""):
 
 
 def _agent_owner_allowed(row_owner: str) -> bool:
+    """Read a run only as its owner (or as maintenance/admin for legacy rows).
+
+    ``owner=''`` means the row predates owner capture.  Treating those rows as
+    public leaked other people's history; the same legacy rule as MCP and Skills
+    is used here: admins see them, ordinary users do not.  Code without a
+    request owner (tests, CLI maintenance) remains allowed.
+    """
     try:
         import identity
         current = identity.chat_owner()
     except Exception:
         current = ""
-    # Legacy rows and maintenance code outside a request remain compatible.
-    return not current or not row_owner or current == row_owner
+    if not current:
+        return True
+    if row_owner:
+        return current == row_owner
+    return identity.is_admin_owner(current)
 
 
 def add_agent_run_event(record_id, event: dict):
@@ -1007,7 +1030,10 @@ def list_agent_runs(chat_id=None, limit=20):
         if chat_id:
             clauses.append("chat_id=?"); args.append(str(chat_id))
         if owner:
-            clauses.append("(owner=? OR owner='')"); args.append(owner)
+            if identity.is_admin_owner(owner):
+                clauses.append("(owner=? OR owner='')"); args.append(owner)
+            else:
+                clauses.append("owner=?"); args.append(owner)
         where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
         rows = conn.execute(f"SELECT {fields} FROM agent_runs{where} ORDER BY started_at DESC LIMIT ?",
                             (*args, int(limit))).fetchall()

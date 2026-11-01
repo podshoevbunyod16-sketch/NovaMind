@@ -303,16 +303,24 @@ class MediaTool(BridgeTool):
             self._generate, risk="write", state=state, emit=emit)
         self.kind = kind
         self.ctx = ctx
+        self.last_result: str = ""
+        self.last_model: str = ""
+        self.last_errors: list = []
 
     def _generate(self, payload: str) -> str:
         params = parse_json(payload)
         prompt = str(params.get("prompt") or params.get("text") or payload).strip()
         if not prompt:
             return f"[failure] {self.kind}: нужен prompt."
+        self.last_result, self.last_model, self.last_errors = "", "", []
         try:
             result, model, errors = self.ctx.generate_media(self.kind, prompt, params)
         except Exception as error:  # noqa: BLE001
+            self.last_errors = [f"{type(error).__name__}: {error}"]
             return f"[failure] Медиа не создано: {type(error).__name__}: {error}"
+        self.last_result = str(result or "")
+        self.last_model = str(model or "")
+        self.last_errors = list(errors or [])
         if not result:
             reason = "; ".join(str(item) for item in (errors or [])[-3:]) or "провайдер не ответил"
             return f"[failure] Медиа не создано: {reason}"

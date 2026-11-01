@@ -87,6 +87,14 @@
     return state.ready;
   }
 
+  const OUTCOME_LABELS = {
+    completed: 'выполнена',
+    partially_completed: 'выполнена частично',
+    failed: 'не выполнена',
+    cancelled: 'отменена',
+    requires_user_action: 'требует действия пользователя',
+  };
+
   function isCodingRequest(message) {
     const text = String(message || '');
     const mentionsProjectFile = /(?:[\w.-]+\/)*[\w.-]+\.(?:py|js|ts|css|html|json|md|yml|yaml|toml)\b/i.test(text);
@@ -131,6 +139,7 @@
     activeAbort = controller;
     let result = {};
     let failure = null;
+    let finalState = null;
     const seenEventIds = new Set();
     const endpoint = coding ? '/api/agent/coding/stream' : '/api/agent/stream';
     // chat_id открытого диалога — сервер пишет ходы в него же (иначе агент,
@@ -182,9 +191,26 @@
             const plan = Array.isArray(event.plan) ? event.plan : [];
             if (plan.length) turn.plan({ steps: plan.map((item) => ({
               text: typeof item === 'string' ? item : (item.title || item.text || item.id),
-              status: (item.status === 'completed' ? 'done' : (item.status || 'todo')),
+              status: (typeof item === 'string' ? 'pending' : (item.status || 'pending')),
             })) });
-            turn.step(event.type === 'plan_revised' ? '↻' : '✓', event.summary || 'План обновлён');
+            // A final plan summary repeats verification; the verification row
+            // already tells the story, so do not add a second noisy line.
+            if (!event.final) {
+              turn.step(event.type === 'plan_revised' ? '↻' : '✓', event.summary || 'План обновлён');
+            }
+            break;
+          }
+          case 'plan_progress': {
+            const plan = Array.isArray(event.plan) ? event.plan
+              : (Array.isArray(event.steps) ? event.steps : []);
+            if (plan.length) {
+              turn.plan({ steps: plan.map((item) => ({
+                text: typeof item === 'string' ? item : (item.title || item.text || item.id),
+                status: (typeof item === 'string' ? 'pending' : (item.status || 'pending')),
+              })) });
+            } else {
+              turn.step('🗺', `План · ${event.done || 0}/${event.total || 0}`);
+            }
             break;
           }
           case 'tool_discovered': turn.step('🧰', `Обнаружено инструментов: ${event.count || 0}`); break;
@@ -198,9 +224,36 @@
             break;
           case 'verification_started': turn.step('🔎', event.summary || 'Проверяю результат…'); break;
           case 'verification_completed': turn.step(event.ok ? '✓' : '⚠️', event.summary || 'Проверка завершена'); break;
-          case 'task_completed': turn.step(event.verified ? '🏁' : '◐', event.status === 'partially_completed' ? 'Задача выполнена частично' : 'Задача выполнена'); break;
-          case 'task_failed': failure = event.verification?.summary || 'Задача не выполнена'; turn.step('✕', failure); break;
-          case 'task_cancelled': turn.step('⏹', 'Задача отменена'); break;
+          case 'task_completed': {
+            const state = event.status || (event.verified ? 'completed' : 'partially_completed');
+            finalState = { status: state, verification: event.verification,
+                           summary: event.summary || event.verification?.summary,
+                           verified: event.verified };
+            const icon = state === 'completed' ? '🏁' : '◐';
+            turn.step(icon, OUTCOME_LABELS[state] ? `Задача ${OUTCOME_LABELS[state]}` : 'Задача выполнена');
+            break;
+          }
+          case 'task_failed': {
+            const summary = event.summary || event.verification?.summary || 'Задача не выполнена';
+            finalState = { status: 'failed', verification: event.verification,
+                           summary, verified: false };
+            failure = summary;
+            turn.step('✕', summary);
+            break;
+          }
+          case 'task_cancelled':
+            finalState = { status: 'cancelled', verification: event.verification,
+                           summary: event.summary || 'Задача отменена', verified: false };
+            turn.step('⏹', 'Задача отменена');
+            break;
+          case 'task_requires_user_action': {
+            const summary = event.summary || event.verification?.summary
+              || 'Нужно действие пользователя';
+            finalState = { status: 'requires_user_action', verification: event.verification,
+                           summary, verified: false };
+            turn.step('🔑', summary);
+            break;
+          }
           // Динамическое получение инструментов после понимания запроса.
           case 'recall': if (turn.recall) turn.recall(event); break;
           // Думаем перед каждым шагом и ещё раз — после его выполнения.
@@ -225,11 +278,20 @@
         }
       });
       activeAbort = null;
+      const taskStatus = finalState?.status || result.task_status || '';
+      if (!turn.text && finalState) {
+        turn.appendText(finalState.summary
+          || (finalState.status === 'requires_user_action'
+            ? 'Нужно ваше действие, чтобы продолжить.'
+            : 'Задача завершилась без текстового ответа.'));
+      }
       if (!turn.text) throw new Error(failure || 'ИИ не вернул ответ');
       if (typeof window.refreshUsage === 'function') window.refreshUsage(true);
       turn.finish({
         model: result.model,
         provider: result.provider,
+        taskStatus,
+        verification: finalState?.verification || result.verification,
         // Серверный id чата: по нему после перезагрузки подтягивается
         // панель «Что делал агент» из базы.
         serverChatId: result.chat_id,
@@ -245,12 +307,18 @@
       if (error.name === 'AbortError') {
         turn.collapseStage();
         turn.appendText(turn.text || '_Остановлено._');
-        turn.finish({ model: result.model, stopped: true });
+        turn.finish({ model: result.model, taskStatus: 'cancelled', stopped: true });
       } else {
         const recovered = await recoverInterruptedRun(state.runId, turn);
         if (recovered && turn.text) {
+          const recoveredStatus = recovered.status === 'completed'
+            ? (recovered.verification?.status || 'completed')
+            : recovered.status;
           turn.finish({ model: recovered.model, provider: recovered.provider,
-                        steps: recovered.steps, stopped: recovered.status === 'cancelled' });
+                        steps: recovered.steps,
+                        taskStatus: recoveredStatus,
+                        verification: recovered.verification,
+                        stopped: recovered.status === 'cancelled' });
         } else {
           turn.fail(error.message || 'ИИ недоступен');
         }

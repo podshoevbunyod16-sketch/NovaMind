@@ -148,3 +148,16 @@ curl -s -X POST http://127.0.0.1:5000/api/agent/stream \
   -H 'Content-Type: application/json' \
   -d '{"message":"расскажи подробно про структуру проекта","tools":false}'
 ```
+
+
+---
+
+## 2.1: execution and records (2026-10-31)
+
+Остаточные пути исполнения переведены на `RuntimeToolRegistry.execute()`
+(форсированный поиск, чтение страниц, офлайн-терминал, медиа). MCP search
+budget теперь общий для `NovaToolsContext`, `execute_unified` и builtin
+`mcp_call`. Записи `agent_runs` с `owner=''` доступны только администратору
+(или maintenance-коду без запроса); новые записи получают владельца явно.
+Пять итоговых состояний и статусы плана отображаются и сохраняются в истории.
+См. `docs/NOVAMIND_2_1_HARDENING.md`.

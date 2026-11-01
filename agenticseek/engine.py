@@ -445,26 +445,31 @@ class AgentEngine:
             self.answer = ("Не удалось получить ответ. "
                            + (f"Причина: {self.state.error}." if self.state.error else ""))
         from core.verification import verify
-        verdict = verify(self.ctx.goal, self.answer, self.state,
+        verdict = verify(self.ctx.goal, self.answer, self.state, plan=self.plan,
                          cancelled=self.state.status == "stopped")
         self.verification = verdict.as_dict()
         self.outcome_status = verdict.status
-        verify_step = next((item for item in self.plan if item.get("id") == "verify"), None)
-        if verify_step:
-            verify_step["status"] = "completed" if verdict.ok else "failed"
-            verify_step["verification_summary"] = verdict.summary
-            if self.record_id:
-                database.update_agent_run(self.record_id, plan=self.plan)
+        # Close the visible plan with the verified outcome, not an optimistic
+        # tick: the verify step gets the verdict and unneeded steps are skipped.
+        from core.planning import finalize_plan
+        finalize_plan(self.plan, verdict.status, verdict.summary)
+        self._persist_plan()
+        self._emit({"type": "plan_updated", "adaptive": True, "final": True,
+                    "summary": f"План закрыт: {verdict.summary}",
+                    "plan": self._plan_snapshot()})
         self._emit({"type": "verification_completed", **self.verification})
         if self.state.sources:
             self._emit({"type": "sources", "sources": list(self.state.sources)})
         for chunk in _chunks(self.answer):
             self._emit({"type": "token", "token": chunk})
         self._finish_run()
-        terminal_type = ("task_cancelled" if verdict.status == "cancelled" else
-                         "task_failed" if verdict.status == "failed" else "task_completed")
+        from core.events import TERMINAL_EVENTS
+        terminal_type = TERMINAL_EVENTS.get(verdict.status, "task_failed")
         self._emit({"type": terminal_type, "status": verdict.status,
+                    "outcome": verdict.status,
                     "steps": self.state.steps, "verified": verdict.ok,
+                    "summary": verdict.summary,
+                    "plan": self._plan_snapshot(),
                     "verification": self.verification})
 
     # ── шаг 1: понять запрос, шаг 2: вспомнить и получить инструменты ─────
@@ -883,32 +888,82 @@ class AgentEngine:
             return None
 
     # ── hooks ─────────────────────────────────────────────────────────────
+    def _plan_snapshot(self) -> list[dict]:
+        return [dict(item) for item in self.plan]
+
+    def _persist_plan(self) -> None:
+        if self.record_id and self.plan:
+            try:
+                database.update_agent_run(self.record_id, plan=self.plan)
+            except Exception:  # noqa: BLE001 — persistence must not stop the run
+                log.debug("cannot persist plan", exc_info=True)
+
+    def _accept_plan(self, event: dict) -> bool:
+        """Adopt a plan that describes the work actually being executed.
+
+        The planner's plan is the real delegated sequence; the adaptive plan is
+        the default.  Either way the statuses come from the payload rather than
+        from a blind "mark the next pending step done" counter.
+        """
+        raw = event.get("plan") or event.get("steps")
+        if not isinstance(raw, list) or not raw:
+            return False
+        from core.planning import normalize_plan
+        incoming = normalize_plan(raw)
+        if not incoming:
+            return False
+        self.plan = incoming
+        self._persist_plan()
+        return True
+
+    def _plan_mark(self, tool: str, status: str, summary: str = "") -> None:
+        """Advance exactly one plan step from a real tool observation."""
+        try:
+            from core.planning import mark_tool
+            plan_tool = tool
+            if tool == "mcp_call" and "search" in str(summary or "").lower():
+                plan_tool = "mcp_search"
+            step, changed = mark_tool(self.plan, plan_tool, status, summary)
+            if not changed:
+                return
+            self._persist_plan()
+            self._emit({
+                "type": "plan_revised" if status == "failed" else "plan_updated",
+                "adaptive": True,
+                "summary": (f"Шаг «{step.get('title', '')[:120]}»: "
+                            + ("выполнен" if status == "completed"
+                               else "не выполнен" if status == "failed" else "выполняется")),
+                "step": step.get("id"),
+                "tool": tool,
+                "plan": self._plan_snapshot(),
+            })
+        except Exception:  # noqa: BLE001 — plan display must not kill execution
+            log.debug("cannot advance plan", exc_info=True)
+
     def _emit(self, event: dict) -> None:
         """Emit legacy UI events plus the stable agent-lifecycle protocol."""
         try:
             kind = str(event.get("type") or "")
-            if kind in {"plan_updated", "plan_revised"} and self.plan:
-                if kind == "plan_updated":
-                    current = next((item for item in self.plan
-                                    if item.get("status") in {"pending", "in_progress"}
-                                    and item.get("id") != "verify"), None)
-                    if current:
-                        current["status"] = "completed"
-                else:
-                    current = next((item for item in self.plan if item.get("status") == "pending"), None)
-                    if current:
-                        current["status"] = "in_progress"
-                        current["revision_reason"] = clip(event.get("reason") or "", 500)
-                event = {**event, "plan": [dict(item) for item in self.plan]}
-                if self.record_id:
-                    database.update_agent_run(self.record_id, plan=self.plan)
+            if kind == "plan":
+                self._accept_plan(event)
+                event = {**event, "plan": self._plan_snapshot()}
+            elif kind == "plan_progress":
+                self._accept_plan(event)
+                event = {**event, "plan": self._plan_snapshot()}
+            elif kind in {"plan_updated", "plan_revised"} and self.plan:
+                # Planner progress carries statuses; agent-level hints have no
+                # status edits (the tool events own those).  Adopt only when a
+                # real plan payload is present, then attach a snapshot.
+                if isinstance(event.get("plan") or event.get("steps"), list):
+                    self._accept_plan(event)
+                event = {**event, "plan": self._plan_snapshot()}
+                self._persist_plan()
             emitted = self.events.emit(event)
             if self.record_id:
                 database.add_agent_run_event(self.record_id, emitted)
             companion = None
-            kind = str(event.get("type") or "")
             if kind == "plan":
-                companion = {"type": "plan_created", "plan": event.get("steps") or event.get("plan") or [],
+                companion = {"type": "plan_created", "plan": self._plan_snapshot(),
                              "summary": event.get("text") or "План создан"}
             elif kind == "tool":
                 ok = event.get("status") not in {"error", "failed"} and event.get("ok", True) is not False
@@ -918,6 +973,9 @@ class AgentEngine:
                     "status": "ok" if ok else "error",
                     "observation": clip(event.get("output") or event.get("error") or "", 1200),
                 }
+            elif kind == "tool_selected":
+                self._plan_mark(str(event.get("tool") or ""), "in_progress",
+                                str(event.get("summary") or ""))
             if companion:
                 emitted_companion = self.events.emit(companion)
                 if self.record_id:
@@ -930,6 +988,9 @@ class AgentEngine:
                                                     "summary": companion.get("observation"), "ok": ok})
                     if self.record_id:
                         database.add_agent_run_event(self.record_id, observation)
+                    self._plan_mark(str(companion.get("tool") or ""),
+                                    "completed" if ok else "failed",
+                                    str(companion.get("observation") or ""))
         except Exception:  # noqa: BLE001 — a closed stream must not kill the run
             log.debug("event sink failed", exc_info=True)
 
@@ -1153,6 +1214,80 @@ class AgentEngine:
         finally:
             self.ctx.pattern = previous
 
+    def _invoke_tool(self, tool_id: str, payload: str = "",
+                     arguments: dict | None = None) -> dict:
+        """Invoke an engine-owned tool through the unified registry.
+
+        The engine's own steps (forced search, page reads, offline terminal,
+        media) used to call ``ctx.search``/``ctx.runner`` directly, bypassing
+        cancellation, guardrails and the registry's normalized errors.  They now
+        take the same gateway as Agent Core.  A direct fallback remains for
+        lightweight unit tests and configurations where the adapter was not
+        built, so behaviour is still available — but never silently different:
+        the result carries ``via``.
+        """
+        registry = self.runtime_registry
+        if registry is not None:
+            has_adapter = registry.resolve(tool_id) is not None
+            if has_adapter or str(tool_id).startswith(("mcp:", "skill:")):
+                result = registry.execute(tool_id, payload, arguments=arguments)
+                result.setdefault("via", "registry")
+                return result
+        ctx = self.ctx
+        try:
+            if tool_id == "web_search":
+                if arguments:
+                    query = str(arguments.get("query") or "")
+                    limit = int(arguments.get("limit") or SEARCH_LIMIT)
+                else:
+                    lines = str(payload or "").splitlines()
+                    query = lines[0].strip() if lines else ""
+                    limit = SEARCH_LIMIT
+                    for extra in lines[1:]:
+                        match = re.match(r"\s*limit\s*=\s*(\d+)\s*$", extra)
+                        if match:
+                            limit = max(1, min(int(match.group(1)), 20))
+                results, meta = ctx.search(query, limit) if ctx.search else ([], {})
+                return {"ok": bool(results), "tool": tool_id, "via": "direct",
+                        "result": "", "artifact": {"last_results": list(results or []),
+                                                   "last_meta": dict(meta or {})},
+                        "error": None if results else {"type": "no_results",
+                                                       "message": "nothing found"}}
+            if tool_id == "web_open":
+                url = str((arguments or {}).get("url") or payload or "").strip().splitlines()[0]
+                text, error = ctx.read_page(url) if ctx.read_page else ("", "reader unavailable")
+                return {"ok": bool(text), "tool": tool_id, "via": "direct",
+                        "result": "", "artifact": {"last_text": str(text or ""),
+                                                   "last_error": str(error or "")},
+                        "error": None if text else {"type": "fetch_failed",
+                                                    "message": str(error or "empty page")}}
+            if tool_id == "terminal":
+                command = str((arguments or {}).get("command") or payload or "")
+                result = ctx.runner(command, timeout=20) if ctx.runner is not None else None
+                result = result or {"code": 2, "stdout": "", "stderr": "Песочница недоступна"}
+                code = int(result.get("code") or 0)
+                ok = code == 0 and not result.get("timed_out")
+                return {"ok": ok, "tool": tool_id, "via": "direct",
+                        "result": ((result.get("stdout") or "") + (result.get("stderr") or "")).strip(),
+                        "artifact": {"last_result": dict(result)},
+                        "error": None if ok else {"type": "command_failed",
+                                                  "message": str(result.get("stderr") or "")}}
+            if tool_id in {"image", "audio", "video"}:
+                result, model, errors = ctx.media_generate(tool_id, ctx.goal, {})
+                return {"ok": bool(result), "tool": tool_id, "via": "direct",
+                        "result": "", "artifact": {"last_result": result,
+                                                   "last_model": model,
+                                                   "last_errors": list(errors or [])},
+                        "error": None if result else {"type": "media_failed",
+                                                      "message": "; ".join(errors or [])}}
+        except Exception as error:  # noqa: BLE001 — engine must report, not crash
+            return {"ok": False, "tool": tool_id, "via": "direct",
+                    "error": {"type": type(error).__name__, "message": str(error),
+                              "retryable": False}}
+        return {"ok": False, "tool": tool_id, "via": "direct",
+                "error": {"type": "unknown_tool", "message": f"Unknown tool: {tool_id}",
+                          "retryable": False}}
+
     def _run_media(self) -> None:
         """Explicit "нарисуй …" request: generate directly, no model needed.
 
@@ -1166,13 +1301,21 @@ class AgentEngine:
         self._emit({"type": "stage", "scene": "media", "title": "Генерирую медиа",
                     "text": f"{label}: запрос принят"})
         with self._thinking(f"создать {label}"):
-            try:
-                result, model, errors = ctx.media_generate(kind, ctx.goal, {})
-            except Exception as error:  # noqa: BLE001 — reported honestly
-                result, model, errors = None, None, [f"{type(error).__name__}: {error}"]
+            invoked = self._invoke_tool(kind, arguments={"prompt": ctx.goal})
+            artifact = invoked.get("artifact") or {}
+            result = artifact.get("last_result")
+            model = artifact.get("last_model") or ""
+            errors = list(artifact.get("last_errors") or [])
+            if not result:
+                error = invoked.get("error") or {}
+                if error and not errors:
+                    errors = [str(error.get("message") or error.get("type") or "media failed")]
         if result:
-            self.state.add_media(result, model)
-            self._emit({"type": "media", "media": result, "model": model})
+            # The registry adapter already wrote state and emitted ``media``;
+            # duplicating it would show the same file twice.
+            if invoked.get("via") != "registry":
+                self.state.add_media(result, model)
+                self._emit({"type": "media", "media": result, "model": model})
             state = str(result.get("state") or "").lower()
             if result.get("job_id") and state in ("queued", "pending", "processing", ""):
                 # Провайдер рендерит видео асинхронно: работа ещё не готова.
@@ -1183,6 +1326,11 @@ class AgentEngine:
                 self.answer = f"Готово: {label} создан и показан выше."
         else:
             reason = "; ".join(str(item) for item in (errors or [])[-2:]) or "провайдер не ответил"
+            # Give verification the same observable evidence as a tool call:
+            # a missing key/permission becomes requires_user_action, not a
+            # misleading green «выполнено».
+            self.state.add_tool(kind, False)
+            self.state.add_observation(kind, False, f"[failure] {reason}", label)
             self._emit({"type": "step", "icon": "⚠️",
                         "text": f"Не получилось создать {label}: {reason}"})
             self.answer = (f"Не получилось создать {label}: {reason}.\n\n"
@@ -1288,17 +1436,27 @@ class AgentEngine:
         self._emit({"type": "tool_selected", "tool": "web_search", "summary": search_step, "risk": "safe"})
         self._emit({"type": "tool_call_started", "tool": "web_search", "summary": search_step})
         self._emit(think_event("before", search_step))
-        try:
-            results, _meta = ctx.search(query, limit)
-        except Exception as error:  # noqa: BLE001 — the answer must still happen
-            log.warning("forced search failed: %s", type(error).__name__)
-            output = f"[failure] {type(error).__name__}: {error}"
+        invoked = self._invoke_tool("web_search", payload=f"{query}\nlimit={limit}")
+        artifact = invoked.get("artifact") or {}
+        results = list(artifact.get("last_results") or [])
+        if str((invoked.get("error") or {}).get("type") or "") == "cancelled":
+            return None
+        failed_search = bool(artifact.get("last_failed"))
+        if artifact and not failed_search and not results:
+            # A valid empty result set is not a broken backend: the model must
+            # still get a chance to answer from its own knowledge.
+            invoked = {**invoked, "ok": True}
+        if failed_search and not results:
+            error = invoked.get("error") or {}
+            reason = str(error.get("message") or invoked.get("result") or "поиск недоступен")
+            log.warning("forced search failed: %s", reason[:200])
+            output = f"[failure] {error.get('type') or 'search_failed'}: {reason}"
             self._emit({"type": "tool", "name": "web_search", "command": search_step,
                         "code": 1, "status": "error", "output": output, "error": output})
             self.state.add_tool("web_search", False)
             self._emit(think_event("after", search_step, done=True))
             self._emit({"type": "step", "icon": "⚠️",
-                        "text": f"Поиск не удался: {type(error).__name__}"})
+                        "text": f"Поиск не удался: {reason[:160]}"})
             return None
         fresh = []
         for item in (results or []):
@@ -1352,15 +1510,10 @@ class AgentEngine:
             self._emit({"type": "tool_selected", "tool": "web_open", "summary": page_step, "risk": "safe"})
             self._emit({"type": "tool_call_started", "tool": "web_open", "summary": page_step})
             with self._thinking(page_step):
-                try:
-                    text, error = ctx.read_page(url)
-                except Exception as exc:  # noqa: BLE001 — one page must not fail the run
-                    output = f"[failure] {type(exc).__name__}: {exc}"
-                    self._emit({"type": "tool", "name": "web_open", "command": page_step,
-                                "code": 1, "status": "error", "output": output,
-                                "error": output})
-                    self.state.add_tool("web_open", False)
-                    continue
+                invoked = self._invoke_tool("web_open", payload=url)
+                artifact = invoked.get("artifact") or {}
+                text = str(artifact.get("last_text") or "")
+                error = artifact.get("last_error") or (invoked.get("error") or {}).get("message")
                 if not text:
                     output = f"[failure] {error or 'страница пустая'}"
                     self._emit({"type": "tool", "name": "web_open", "command": page_step,
@@ -1439,14 +1592,15 @@ class AgentEngine:
             # Каждый шаг терминала: думаем, что делать дальше → выполняем →
             # обдумываем результат и выбираем следующую команду.
             with self._thinking(command):
-                try:
-                    result = ctx.runner(command, timeout=20) if ctx.runner is not None else None
-                except Exception as error:  # noqa: BLE001 — команда не должна ронять ход
-                    result = {"code": 2, "stdout": "", "stderr": str(error)}
-                result = result or {"code": 2, "stdout": "", "stderr": "Песочница недоступна"}
-                code = int(result.get("code") or 0)
-                output = ((result.get("stdout") or "") + (result.get("stderr") or "")).strip()
-                ok = code == 0 and not result.get("timed_out")
+                invoked = self._invoke_tool("terminal", payload=command)
+                artifact = invoked.get("artifact") or {}
+                result = artifact.get("last_result") or {}
+                output = str(invoked.get("result") or "").strip()
+                if not output and result:
+                    output = ((result.get("stdout") or "")
+                              + (result.get("stderr") or "")).strip()
+                code = int(result.get("code") or (0 if invoked.get("ok") else 2))
+                ok = bool(invoked.get("ok"))
                 self._emit(tool_event("terminal", command, ok=ok, command=command,
                                       output=clip(output, 1200), code=code))
                 self.state.add_tool("terminal", ok)   # StepState сам считает шаги
@@ -1774,7 +1928,8 @@ class AgentEngine:
         try:
             record_id = database.create_agent_run(
                 goal=ctx.goal, chat_id=ctx.chat_id, run_id=ctx.run_id,
-                provider=ctx.provider, model=ctx.model)
+                provider=ctx.provider, model=ctx.model,
+                owner=str(getattr(ctx, "owner", "") or ""))
         except Exception:  # noqa: BLE001 — persistence must not break a turn
             log.warning("cannot persist the agent run", exc_info=True)
             return ""

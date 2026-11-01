@@ -168,51 +168,41 @@ class Agent:
     def _guarded(self, tag: str, payload: str) -> str:
         """Проверяет ограждения и права хода. Пустая строка — можно выполнять.
 
-        Два независимых слоя:
-
-        * :mod:`guardrails` — мусорные аргументы (NUL, гигантский блок, выход
-          из папки) и опасная разметка;
-        * :mod:`capabilities` — криптографически подписанные права именно
-          этого хода: инструмент не в списке = отказ, даже если модель его
-          «увидела» в промпте.
-
-        Оба слоя необязательны: если модулей нет (например, движок используется
-        отдельно от NovaMind), поведение остаётся прежним.
+        Единая fail-closed проверка: отсутствие ``guardrails``/``capabilities``
+        или исключение внутри проверки блокирует вызов. Раньше ошибка импорта
+        молча означала «можно», и агент мог обойти ограничения при поломке
+        security-модуля.
         """
         try:
-            import guardrails
-        except Exception:                                   # noqa: BLE001
-            guardrails = None
-        if guardrails is not None:
-            try:
-                verdict = guardrails.guard_tool_call(tag, payload)
-            except Exception:                               # noqa: BLE001 — фильтр не должен ломать ход
-                verdict = None
-            if verdict is not None and not verdict.allowed:
-                reasons = ", ".join(verdict.reasons) or "нарушение правил"
-                self.emit({"type": "guard", "stage": "tool", "severity": verdict.severity,
-                           "allowed": False, "reasons": list(verdict.reasons),
-                           "tool": tag})
-                self.emit({"type": "step", "icon": "🛡",
-                           "text": f"Ограждение отклонило вызов «{tag}»: {reasons}"})
-                return (f"[failure] Вызов «{tag}» отклонён ограждением ({reasons}). "
-                        "Не повторяй его в таком виде — используй корректные аргументы.")
-        try:
-            import capabilities
-        except Exception:                                   # noqa: BLE001
-            capabilities = None
-        if capabilities is not None:
-            try:
-                error = capabilities.require(tag, payload)
-            except Exception:                               # noqa: BLE001
-                error = None
-            if error:
-                message = str((error.get("error") or {}).get("message") or "нет прав")
-                self.emit({"type": "step", "icon": "🔒",
-                           "text": f"Нет прав на инструмент «{tag}»: {message}"})
-                return (f"[failure] {message}. Обойти ограничение нельзя — "
-                        "предложи пользователю безопасную альтернативу.")
-        return ""
+            import tool_registry
+            denied = tool_registry.security_gate(tag, payload)
+        except Exception as exc:  # noqa: BLE001 — no gate means no execution
+            denied = {"ok": False, "tool": tag,
+                      "error": {"type": "security_unavailable", "retryable": False,
+                                "message": f"Проверка безопасности недоступна: {type(exc).__name__}: {exc}"}}
+        if not denied:
+            return ""
+        error = denied.get("error") or {}
+        kind = str(error.get("type") or "security_error")
+        message = str(error.get("message") or "вызов заблокирован проверкой безопасности")
+        if kind in {"guardrail", "guardrail_error", "guardrails_unavailable"}:
+            reasons = list(error.get("reasons") or ())
+            self.emit({"type": "guard", "stage": "tool",
+                       "severity": str(error.get("severity") or "block"),
+                       "allowed": False, "reasons": reasons, "tool": tag})
+            self.emit({"type": "step", "icon": "🛡",
+                       "text": f"Ограждение отклонило вызов «{tag}»: {message}"})
+            return (f"[failure] Вызов «{tag}» отклонён ограждением ({message}). "
+                    "Не повторяй его в таком виде — используй корректные аргументы.")
+        if kind not in {"security_unavailable"}:
+            self.emit({"type": "step", "icon": "🔒",
+                       "text": f"Нет прав на инструмент «{tag}»: {message}"})
+            return (f"[failure] {message}. Обойти ограничение нельзя — "
+                    "предложи пользователю безопасную альтернативу.")
+        self.emit({"type": "step", "icon": "🛡",
+                   "text": f"Проверка безопасности не сработала для «{tag}»: {message}"})
+        return (f"[failure] {message}. Вызов заблокирован, потому что проверка "
+                "безопасности недоступна.")
 
     def emit(self, event: dict) -> None:
         kind = str(event.get("type") or "")
@@ -530,17 +520,19 @@ class Agent:
         tool.saved_path = saved
         try:
             if self.tool_registry is None:
-                # Standalone AgenticSeek compatibility; NovaMind always injects
-                # RuntimeToolRegistry from AgentEngine.
-                output = tool.execute(str(payload))
-                ok = not tool.execution_failure_check(output)
-            else:
-                result = self.tool_registry.execute_legacy(tag, str(payload), saved)
-                ok = bool(result.get("ok"))
-                output = result.get("result")
-                if output is None:
-                    error = result.get("error") or {}
-                    output = f"[failure] {error.get('type', 'tool_error')}: {error.get('message', 'unknown error')}"
+                # Standalone AgenticSeek compatibility must not become a
+                # registry bypass: build the same request-scoped authority
+                # around the tools this agent actually owns.
+                from tool_registry import RuntimeToolRegistry
+                self.tool_registry = RuntimeToolRegistry(
+                    self.all_tools(), cancel=getattr(self, "cancel", None))
+            result = self.tool_registry.execute(
+                tag, str(payload), saved_path=saved, already_guarded=True)
+            ok = bool(result.get("ok"))
+            output = result.get("result")
+            if output is None:
+                error = result.get("error") or {}
+                output = f"[failure] {error.get('type', 'tool_error')}: {error.get('message', 'unknown error')}"
         except AgentStopped:
             raise
         except AgenticSeekError as error:
@@ -633,10 +625,15 @@ class Agent:
         def run(index, call):
             error_text = str(call.get("arguments_error") or "")
             try:
-                import tool_registry
-                canonical = {"terminal": "shell"}.get(call.get("tool"), call.get("tool"))
-                spec = tool_registry.get_tool(canonical)
-                schema_errors = tool_registry.validate_arguments(spec.schema, call.get("arguments") or {}) if spec else []
+                if self.tool_registry is not None:
+                    schema_errors = self.tool_registry.validate(
+                        str(call.get("tool") or ""), call.get("arguments") or {})
+                else:
+                    import tool_registry
+                    canonical = {"terminal": "shell"}.get(call.get("tool"), call.get("tool"))
+                    spec = tool_registry.get_tool(canonical)
+                    schema_errors = (tool_registry.validate_arguments(
+                        spec.schema, call.get("arguments") or {}) if spec else [])
                 if schema_errors:
                     error_text = "; ".join(schema_errors)
             except Exception:

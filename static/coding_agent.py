@@ -34,6 +34,14 @@ def _agent_enabled():
         return os.getenv("AGENT_ENABLED", "0") == "1"
 
 
+def _chat_owner():
+    try:
+        import identity
+        return identity.chat_owner()
+    except Exception:  # noqa: BLE001
+        return ""
+
+
 def _event(payload):
     import json
     return json.dumps(payload, ensure_ascii=False) + "\n"
@@ -65,7 +73,7 @@ def coding_stream():
         engine = AgentEngine(EngineContext(
             goal=goal, complete=chat_completion, emit=lambda event: None,
             provider=provider, model=model, profile="coding",
-            workspace=False, timeout=TIMEOUT))
+            workspace=False, timeout=TIMEOUT, owner=_chat_owner()))
         proposals: list = []
         try:
             for event in engine.stream():
@@ -87,6 +95,8 @@ def coding_stream():
         yield _event({"type": "result", "steps": engine.state.steps, "linux": False,
                       "coding": True, "provider": provider, "model": model,
                       "status": "ok" if engine.state.status == "ok" else engine.state.status,
+                      "task_status": engine.outcome_status,
+                      "verification": engine.verification,
                       "engine": "agenticseek"})
         yield _event({"type": "done"})
 

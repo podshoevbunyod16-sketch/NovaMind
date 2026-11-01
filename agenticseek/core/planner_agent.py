@@ -127,8 +127,11 @@ class PlannerAgent(Agent):
         text = "\n".join(f"{index}. [{item['agent']}] {item['task']}"
                          for index, item in enumerate(plan, 1))
         self.tasks = plan
-        self.emit({"type": "plan", "text": clip(text, 1200), "steps": plan,
-                   "done": done, "total": len(plan), "engine": "agenticseek"})
+        steps = [{**item, "title": item.get("task") or item.get("title") or "",
+                  "status": item.get("status") or "pending"} for item in plan]
+        self.emit({"type": "plan", "text": clip(text, 1200), "steps": steps,
+                   "plan": steps, "done": done, "total": len(plan),
+                   "engine": "agenticseek"})
 
     # ── planning ──────────────────────────────────────────────────────────
     def make_plan(self, goal: str) -> list[dict]:
@@ -181,25 +184,42 @@ class PlannerAgent(Agent):
 
         results: dict[str, dict] = {}
         failures = 0
+        completed = 0
         for index, task in enumerate(plan, 1):
             self.check_limits()
             agent = self.agents.get(task["agent"]) or self.agents["casual"]
+            task["status"] = "in_progress"
+            steps = [{**item, "title": item.get("task") or item.get("title") or "",
+                      "status": item.get("status") or "pending"} for item in plan]
+            self.emit({"type": "plan_updated", "summary": f"Шаг {index}: {task['task'][:120]}",
+                       "done": completed, "failed": failures, "total": len(plan),
+                       "steps": steps, "plan": steps})
             self.emit({"type": "step", "icon": "▶️",
                        "text": f"Шаг {index}/{len(plan)}: {agent.label}"})
             prompt = self.task_prompt(task, results)
+            step_ok = True
             try:
                 answer, _feedback = agent.process(prompt, None)
             except AgentStopped:
                 raise
             except AgenticSeekError as error:
                 failures += 1
+                step_ok = False
                 answer = f"Шаг не выполнен: {error.message}"
                 self.emit({"type": "step", "icon": "⚠️",
                            "text": f"Шаг {index} не выполнен: {clip(error.message, 200)}"})
             results[task["id"]] = {"agent": agent.type, "task": task["task"],
                                    "answer": str(answer or "")}
-            self.emit({"type": "plan_progress", "done": index, "total": len(plan),
-                       "marked": task["task"][:160]})
+            task["status"] = "completed" if step_ok else "failed"
+            if step_ok:
+                completed += 1
+            else:
+                task["revision_reason"] = clip(str(answer or ""), 500)
+            steps = [{**item, "title": item.get("task") or item.get("title") or "",
+                      "status": item.get("status") or "pending"} for item in plan]
+            self.emit({"type": "plan_progress", "done": completed,
+                       "failed": failures, "total": len(plan),
+                       "marked": task["task"][:160], "steps": steps, "plan": steps})
 
         answer = self.conclude(goal, results)
         summary = "\n".join(f"{key}: {clip(value['answer'], 300)}" for key, value in results.items())
