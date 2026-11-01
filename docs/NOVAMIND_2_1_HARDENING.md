@@ -1,6 +1,6 @@
 # NovaMind 2.1 — Architecture Hardening
 
-Дата: 2026-10-31. База: ветка `arena/438d2e2b-novamind`, коммит 2.0
+Дата: 2026-11-01. База: ветка `arena/438d2e2b-novamind`, коммит 2.0
 (`edb40a1`, PR #22). Проверка: `pytest tests -q` и
 `node tests/frontend/smoke.mjs` на настоящем `index.html`, `app.js`, `linux.js`.
 
@@ -25,17 +25,19 @@
 но и для вызова:
 
 * `execute()` проверяет отмену, разрешает адаптер, валидирует структурированные
-  аргументы, применяет guardrails и capability-токен (кроме `already_guarded`,
-  если `Agent._run_tool` уже сделал это до подтверждения пользователя);
+  аргументы, применяет guardrails и capability-токен; `already_guarded` — только
+  историческая подсказка, шлюз всё равно перепроверяет вызов;
 * вызов ограничен таймаутом спецификации; ошибки нормализованы;
 * `execute_legacy()` — совместимый алиас, а не второй путь;
 * `mcp:<server>:<tool>` и `skill:<id>` идут через `execute_unified()`;
 * Agent Core, native tool calls, `PlannerAgent`-специалисты, форсированный
   поиск, чтение страниц, офлайн-терминал и медиа используют этот шлюз.
 
-Прямой вызов остаётся только как аварийный fallback, когда адаптер не собран
-(например, в лёгком юнит-тесте). Такой результат явно содержит `via="direct"`,
-поэтому его нельзя принять за полноценный registry-путь.
+Если `Agent` создан без внешнего registry (standalone-тест или старый
+AgenticSeek-путь), он строит `RuntimeToolRegistry` из собственных адаптеров, а
+не вызывает адаптер напрямую. Прямой вызов остался только как аварийный
+fallback движка, когда адаптер вообще не собран; такой результат помечается
+`via="direct"` и не считается полноценным registry-путём.
 
 Артефакты (`last_results`, `last_text`, `last_result`, `last_model`,
 `last_errors`) возвращаются отдельно от model-visible `result`; truncation
@@ -105,11 +107,54 @@ legacy, а не «общая» запись.**
 * UI считает `done` по статусам (а не по номеру шага), показывает `✕`/`–` и
   «ошибок: N»; в истории сохраняется снимок плана.
 
+## 5. Fail-closed security boundary (2.1.1)
+
+Главный дефект PR #23: `tool_registry.call_tool()` и `Agent._guarded()` ловили
+исключение из `guardrails`/`capabilities` и **продолжали выполнение**. Теперь
+единственная точка решения — `tool_registry.security_gate()`:
+
+* missing/broken `guardrails` → `guardrails_unavailable`;
+* исключение внутри guardrail → `guardrail_error`;
+* missing/broken `capabilities` → `capabilities_unavailable`;
+* исключение или некорректный ответ `capabilities.require()` →
+  `capability_error`;
+* `verdict is None` или `allowed != True` → отказ.
+
+Во всех этих случаях адаптер не вызывается, сеть MCP не трогается, а ошибка
+возвращается агенту как обычный `retryable=False` отказ. Проверка применяется
+в `call_tool()`, `RuntimeToolRegistry.execute()` (включая
+`already_guarded=True` и `execute_legacy()`), `execute_unified()` для
+`mcp:<server>:<tool>` и в `mcp_registry.call_tool()`.
+
+Прямой `mcp_registry.call_tool()` по умолчанию требует capability `mcp_call`.
+Встроенный `web_search` может выполнить свой MCP-подвызов под родительским
+`web_search`-правом только внутри `mcp_registry.internal_search_call()` —
+это contextvar, который выставляет доверенный код поиска, а не аргумент
+вызывающего. Поэтому гостевой токен с `web_search` не может вызвать
+произвольный MCP-инструмент напрямую.
+
+Проверка теперь смотрит не только на «был успешный инструмент», но и на
+критерии задачи:
+
+| Запрос | Обязательное доказательство |
+|---|---|
+| создать/изменить файл | `file_write`/`file_edit` или terminal-команда записи |
+| найти/исследовать | `web_search`/`web_open`/`knowledge_search`/`mcp_call` или источник |
+| запустить тесты | `terminal`/`python` плюс вывод тестовой команды |
+| открыть страницу | `web_open` |
+| прочитать файл | `file_read`/`file_find` или `web_open` |
+| медиа | реально созданный `media`-результат |
+| исправление кода | изменение файла плюс запуск проверки |
+
+Успешный вызов постороннего инструмента больше не даёт `completed`:
+например, `web_search` не подтверждает «создай файл», а `file_write` — «запусти
+тесты».
+
 ## Проверка
 
 ```bash
 .venv/bin/python -m pytest tests -q
-# 980 passed
+# 989 passed
 
 node tests/frontend/smoke.mjs http://127.0.0.1:5000
 # все проверки, включая блок 22: пять итогов + статусы плана
@@ -129,6 +174,14 @@ node tests/frontend/smoke.mjs http://127.0.0.1:5000
   выданные токены недействительны (это осознанно).
 * **Прямой CLI-вызов** `novamind_cli mcp call` не относится к agent-run и не
   расходует его search budget; лимит применяется к ходам агента и registry.
+* **Capability без активного токена** (`capabilities.require()` вне хода
+  агента) по-прежнему разрешает вызов: так работают CLI, тесты и старые
+  маршруты, где авторизация проверяется на уровне Flask. В агенте токен
+  активируется до запуска инструментов; отсутствие/поломка модуля при этом
+  блокируется fail-closed проверкой выше.
+* **Схема аргументов MCP** проверяется в `execute_unified()`; прямой
+  `mcp_registry.call_tool()` не делает повторный `tools/list` только ради
+  валидации (это был бы лишний сетевой round-trip).
 * **История плана** сохраняется в локальном хранилище браузера и в
   `agent_runs.plan`; серверная панель «Что делал агент» по-прежнему показывает
   шаги/трассы, а не отдельный план-виджет.

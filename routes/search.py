@@ -298,9 +298,12 @@ def search_web_exa_mcp(query, num=8, tool=None):
     if not tool:
         return [], "MCP search не подключён"
     import mcp_registry
-    result = mcp_registry.call_tool(
-        str(tool.get("server_id") or ""), str(tool.get("name") or ""),
-        _exa_mcp_arguments(tool, query, num))
+    # This is a sub-call of the allowed ``web_search`` tool, not a direct MCP
+    # grant: the security boundary maps it to the parent capability.
+    with mcp_registry.internal_search_call():
+        result = mcp_registry.call_tool(
+            str(tool.get("server_id") or ""), str(tool.get("name") or ""),
+            _exa_mcp_arguments(tool, query, num))
     results = _exa_mcp_results(result)
     if not results:
         return [], "Exa MCP: пустая выдача"

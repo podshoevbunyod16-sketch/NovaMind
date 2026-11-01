@@ -5,13 +5,17 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import sys
 
 import pytest
 
+import capabilities
 import database
+import guardrails
 import identity
 import mcp_registry
 import tool_registry
+from agenticseek.core.agent import Agent
 from agenticseek.engine import AgentEngine, EngineContext
 from agenticseek.state import RunState
 from core import limits
@@ -304,3 +308,195 @@ def test_engine_plan_emits_statuses_from_tool_events():
         any(item["status"] == "completed" for item in event.get("plan", [])
             if item.get("id") == "research")
         for event in snapshots)
+
+# ── fail-closed security boundary ───────────────────────────────────────────
+
+class _SecurityProbe:
+    """An adapter that records whether its body was reached."""
+
+    tag = "security_probe"
+    aliases = ()
+    description = "security probe"
+    risk = "safe"
+    saved_path = ""
+
+    def __init__(self):
+        self.calls = 0
+
+    def execute(self, payload):
+        self.calls += 1
+        return "[success] executed"
+
+    @staticmethod
+    def execution_failure_check(output):
+        return False
+
+    @staticmethod
+    def interpreter_feedback(output):
+        return output
+
+
+def _probe_tool(name: str, calls: list):
+    tool_registry.register_tool(tool_registry.ToolSpec(
+        name, "probe", {"type": "object", "properties": {}},
+        lambda: calls.append(name) or {"ok": True}, risk="safe",
+    ))
+
+
+def test_guardrail_exception_blocks_builtin_and_runtime_registry(monkeypatch):
+    calls: list = []
+    _probe_tool("security_probe_builtin", calls)
+
+    def broken_guard(*_args, **_kwargs):
+        raise RuntimeError("guardrails crashed")
+
+    monkeypatch.setattr(guardrails, "guard_tool_call", broken_guard)
+    denied = tool_registry.call_tool("security_probe_builtin")
+    assert denied["ok"] is False
+    assert denied["error"]["type"] == "guardrail_error"
+    assert calls == []
+
+    adapter = _SecurityProbe()
+    registry = tool_registry.RuntimeToolRegistry({"security_probe": adapter})
+    for call in (lambda: registry.execute("security_probe", ""),
+                 lambda: registry.execute_legacy("security_probe", ""),
+                 lambda: registry.execute("security_probe", "", already_guarded=True)):
+        result = call()
+        assert result["ok"] is False
+        assert result["error"]["type"] == "guardrail_error"
+    assert adapter.calls == 0
+
+
+def test_missing_security_modules_fail_closed(monkeypatch):
+    calls: list = []
+    _probe_tool("security_probe_missing_guardrails", calls)
+    monkeypatch.setitem(sys.modules, "guardrails", None)
+    denied = tool_registry.call_tool("security_probe_missing_guardrails")
+    assert denied["ok"] is False
+    assert denied["error"]["type"] == "guardrails_unavailable"
+    assert calls == []
+
+    _probe_tool("security_probe_missing_capabilities", calls)
+    monkeypatch.setitem(sys.modules, "guardrails", guardrails)
+    monkeypatch.setitem(sys.modules, "capabilities", None)
+    denied = tool_registry.call_tool("security_probe_missing_capabilities")
+    assert denied["ok"] is False
+    assert denied["error"]["type"] == "capabilities_unavailable"
+    assert calls == []
+
+
+def test_capability_exception_blocks_tool_and_direct_mcp(monkeypatch):
+    calls: list = []
+    _probe_tool("security_probe_capability", calls)
+
+    def broken_require(*_args, **_kwargs):
+        raise RuntimeError("capabilities crashed")
+
+    monkeypatch.setattr(capabilities, "require", broken_require)
+    denied = tool_registry.call_tool("security_probe_capability")
+    assert denied["ok"] is False
+    assert denied["error"]["type"] == "capability_error"
+    assert calls == []
+
+    network: list = []
+    monkeypatch.setattr(mcp_registry, "request",
+                        lambda *args, **kwargs: network.append((args, kwargs)) or {})
+    with pytest.raises(mcp_registry.McpError):
+        mcp_registry.call_tool("demo", "lookup", {"q": "x"})
+    assert network == []
+
+
+def test_direct_mcp_requires_mcp_call_but_internal_search_uses_parent_grant(monkeypatch):
+    token, cap = capabilities.mint("anon:test", "run-mcp", role="guest",
+                                    tools=["web_search"])
+    context = capabilities.activate(cap)
+    network: list = []
+    monkeypatch.setattr(mcp_registry, "request", lambda *args, **kwargs: (
+        network.append((args, kwargs)) or
+        {"result": {"content": [{"type": "text", "text": "ok"}]}}))
+    try:
+        with pytest.raises(mcp_registry.McpError):
+            mcp_registry.call_tool("demo", "search_repositories", {"query": "x"})
+        assert network == []
+        with mcp_registry.internal_search_call():
+            mcp_registry.call_tool("demo", "search_repositories", {"query": "x"})
+        assert network
+    finally:
+        capabilities.deactivate(context)
+
+
+def test_execute_unified_mcp_does_not_bypass_security(monkeypatch):
+    calls: list = []
+    monkeypatch.setattr(mcp_registry, "connected_tools", lambda: [{
+        "server_id": "demo", "server_name": "Demo", "name": "lookup",
+        "description": "Lookup", "inputSchema": {"type": "object"},
+    }])
+    monkeypatch.setattr(mcp_registry, "call_tool",
+                        lambda server_id, name, args: calls.append(name) or {"ok": True})
+
+    def broken_guard(*_args, **_kwargs):
+        raise RuntimeError("guardrails crashed")
+
+    monkeypatch.setattr(guardrails, "guard_tool_call", broken_guard)
+    result = tool_registry.execute_unified("mcp:demo:lookup", {})
+    assert result["ok"] is False
+    assert result["error"]["type"] == "guardrail_error"
+    assert calls == []
+
+
+def test_agent_gate_fails_closed_without_returning_empty_permission(monkeypatch):
+    agent = Agent.__new__(Agent)
+    agent.events = None
+
+    def broken_guard(*_args, **_kwargs):
+        raise RuntimeError("guardrails crashed")
+
+    monkeypatch.setattr(guardrails, "guard_tool_call", broken_guard)
+    denied = agent._guarded("shell", "ls")
+    assert denied.startswith("[failure]")
+    assert "ограждением" in denied or "безопасности" in denied
+
+
+# ── verification checks task criteria, not just a green tool call ───────────
+
+def test_completed_requires_matching_task_criteria():
+    wrong_tool = RunState()
+    wrong_tool.add_tool("web_search", True)
+    wrong_tool.add_observation("web_search", True, "нашёл страницу", "search")
+    assert verify("Создай файл report.txt", "Готово.", wrong_tool).status == "failed"
+
+    search_goal = RunState()
+    search_goal.add_tool("file_write", True)
+    search_goal.add_observation("file_write", True, "saved notes.txt", "write notes.txt")
+    assert verify("Найди актуальные источники", "Готово.", search_goal).status == "failed"
+
+    run_goal = RunState()
+    run_goal.add_tool("file_write", True)
+    run_goal.add_observation("file_write", True, "saved app.py", "write app.py")
+    assert verify("Запусти тесты", "Готово.", run_goal).status == "failed"
+
+
+def test_matching_real_criteria_can_complete():
+    created = RunState()
+    created.add_tool("file_write", True)
+    created.add_observation("file_write", True, "saved report.txt", "write report.txt")
+    assert verify("Создай файл report.txt", "Готово.", created).status == "completed"
+
+    tested = RunState()
+    tested.add_tool("terminal", True)
+    tested.add_observation("terminal", True, "1 passed", "pytest -q")
+    assert verify("Запусти тесты", "Все тесты прошли.", tested).status == "completed"
+
+    searched = RunState()
+    searched.add_tool("web_search", True)
+    searched.add_observation("web_search", True, "нашёл источник", "search query")
+    assert verify("Найди актуальные источники", "Нашёл.", searched).status == "completed"
+
+
+def test_coding_change_without_test_run_is_not_completed():
+    state = RunState()
+    state.add_tool("file_edit", True)
+    state.add_observation("file_edit", True, "patched app.py", "edit app.py")
+    verdict = verify("Исправь ошибку в коде", "Исправил.", state)
+    assert verdict.status != "completed"
+    assert any("проверк" in item for item in verdict.unresolved)

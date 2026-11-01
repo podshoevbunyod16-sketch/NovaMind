@@ -118,6 +118,92 @@ def _failure_needs_user(item) -> bool:
     return bool(text and _NEEDS_USER_RE.search(text))
 
 
+_SEARCH_GOAL_RE = re.compile(
+    r"найди|найти|поиск|исслед|развед|research|search|источник|новост|актуаль|погугл",
+    re.IGNORECASE,
+)
+_OPEN_GOAL_RE = re.compile(r"открой|открыть|перейд|open|url|https?://", re.IGNORECASE)
+_READ_GOAL_RE = re.compile(r"прочита|прочитать|read|содержимое|покажи файл|cat\b", re.IGNORECASE)
+_WRITE_GOAL_RE = re.compile(
+    r"созда|создать|запиш|записать|напиш|написать|create|write|редакт|edit|"
+    r"измени|изменить|исправ|исправить|fix|рефактор|удали|удалить|delete|добав",
+    re.IGNORECASE)
+_FILE_GOAL_RE = re.compile(r"файл|file|report|readme|\.txt|\.md|\.py|проект", re.IGNORECASE)
+_RUN_GOAL_RE = re.compile(
+    r"запусти|запустить|выполни|выполнить|run|execute|терминал|terminal|команд", re.IGNORECASE)
+_TEST_GOAL_RE = re.compile(r"тест|test|pytest|проверк|check|smoke|lint|compile", re.IGNORECASE)
+_CODING_GOAL_RE = re.compile(r"код|code|баг|bug|исправ|fix|рефактор|test|тест|репозитор", re.IGNORECASE)
+_MEDIA_GOAL_RE = re.compile(
+    r"нарису|изображен|картин|image|видео|video|озвуч|аудио|audio|сгенер.*медиа", re.IGNORECASE)
+_TEST_OUTPUT_RE = re.compile(
+    r"pytest|npm (run )?test|unittest|py_compile|smoke|\btests?\b|check|lint|compile|"
+    r"OK\b|passed|прошл", re.IGNORECASE)
+_WRITE_COMMAND_RE = re.compile(
+    r"touch|mkdir|cat\s*>|echo\s+[^|]*>|tee|\bcp\b|\bmv\b|write|save", re.IGNORECASE)
+_TOOL_ALIASES = {"bash": "terminal", "shell": "terminal", "run": "terminal",
+                 "files": "file_read", "file_finder": "file_find"}
+
+
+def _canonical(name) -> str:
+    value = str(name or "").strip().lower()
+    return _TOOL_ALIASES.get(value, value)
+
+
+def _successful(observations) -> list:
+    return [item for item in observations if _ok(item)]
+
+
+def _obs_text(item) -> str:
+    if isinstance(item, dict):
+        return " ".join(str(item.get(key) or "") for key in
+                        ("command", "summary", "output", "result"))
+    return " ".join(str(getattr(item, key, "") or "") for key in
+                    ("command", "summary", "output", "result"))
+
+
+def _criteria_failures(goal: str, observations, media, sources) -> list[str]:
+    """Concrete task criteria, not just «some tool returned success».
+
+    A completed run must demonstrate the requested effect: a written file for a
+    file request, a search/open/knowledge result for research, a real test run
+    for a test request, and generated media for a media request.  Without this
+    check a successful ``web_search`` could mark «создай файл» as completed.
+    """
+    text = str(goal or "")
+    ok = _successful(observations)
+    names = {_canonical(item.get("tool") if isinstance(item, dict) else getattr(item, "tool", ""))
+             for item in ok}
+    evidence_text = " ".join(_obs_text(item) for item in ok)
+    source_list = list(sources or [])
+    failures: list[str] = []
+    if _MEDIA_GOAL_RE.search(text) and not media:
+        failures.append("медиа не создано")
+    if _SEARCH_GOAL_RE.search(text):
+        search_tools = {"web_search", "web_open", "knowledge_search", "mcp_call"}
+        if not (names & search_tools) and not source_list:
+            failures.append("нет результата поиска или открытого источника")
+    if _OPEN_GOAL_RE.search(text) and "web_open" not in names:
+        failures.append("страница не открыта инструментом web_open")
+    if _READ_GOAL_RE.search(text) and not (names & {"file_read", "file_find", "file_search",
+                                                    "file_tree", "web_open"}):
+        failures.append("файл или страница не прочитаны")
+    if _WRITE_GOAL_RE.search(text) and _FILE_GOAL_RE.search(text):
+        wrote = bool(names & {"file_write", "file_edit"}) or bool(
+            names & {"terminal", "python"} and _WRITE_COMMAND_RE.search(evidence_text))
+        if not wrote:
+            failures.append("нет подтверждения записи или изменения файла")
+    if _RUN_GOAL_RE.search(text):
+        if not (names & {"terminal", "python", "git"}):
+            failures.append("команда не выполнялась")
+        elif _TEST_GOAL_RE.search(text) and not _TEST_OUTPUT_RE.search(evidence_text):
+            failures.append("запуск проверки не подтверждён выводом тестов")
+    if _CODING_GOAL_RE.search(text) and _WRITE_GOAL_RE.search(text) \
+            and names & {"file_write", "file_edit"} \
+            and not _TEST_OUTPUT_RE.search(evidence_text):
+        failures.append("изменения не подтверждены запуском подходящей проверки")
+    return failures
+
+
 def verify(goal: str, answer: str, state, plan=None, error: str = "",
            cancelled: bool = False) -> VerificationResult:
     observations = list(getattr(state, "observations", []) or [])
@@ -131,6 +217,7 @@ def verify(goal: str, answer: str, state, plan=None, error: str = "",
         latest_by_tool[name] = item
     failures = [item for item in latest_by_tool.values() if not _ok(item)]
     media = list(getattr(state, "media", []) or [])
+    sources = list(getattr(state, "sources", []) or [])
     answer = str(answer or "").strip()
     error = str(error or "").strip()
     status = str(getattr(state, "status", "ok") or "ok")
@@ -142,7 +229,7 @@ def verify(goal: str, answer: str, state, plan=None, error: str = "",
     if _QUESTION_RE.search(goal_text) and not _IMPERATIVE_RE.search(goal_text):
         # «Что такое test?» is a question, not an instruction to run tests.
         operation = False
-    substantive = bool(answer) or bool(evidence) or bool(media)
+    substantive = bool(answer) or bool(evidence) or bool(media) or bool(sources)
 
     if cancelled:
         return VerificationResult(
@@ -192,7 +279,7 @@ def verify(goal: str, answer: str, state, plan=None, error: str = "",
         if status_name not in {"completed", "skipped"}:
             pending_steps.append(str(item.get("title") or item.get("id") or "шаг"))
 
-    if operation and not evidence and not media:
+    if operation and not evidence and not media and not sources:
         # The user asked to do something, but the turn produced no observable
         # tool result.  Do not paint a green «выполнено» over a plain answer.
         return VerificationResult(
@@ -207,7 +294,15 @@ def verify(goal: str, answer: str, state, plan=None, error: str = "",
             evidence[-8:], ["пустой ответ"],
         )
 
-    summary = "Задача выполнена; результат опирается на наблюдения." if evidence else \
+    criteria = _criteria_failures(goal_text, observations, media, sources) if operation else []
+    if criteria:
+        return VerificationResult(
+            "failed", False,
+            "Задача не выполнена: " + criteria[0] + "; критерии цели не подтверждены.",
+            evidence[-8:], criteria[-5:],
+        )
+
+    summary = "Задача выполнена; критерии цели подтверждены наблюдениями." if evidence else \
         "Задача выполнена; ответ сформирован без вызовов инструментов."
     if pending_steps and operation:
         return VerificationResult(

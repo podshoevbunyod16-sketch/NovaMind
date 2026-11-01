@@ -5,6 +5,7 @@ only connection metadata and masked status, never API keys or OAuth tokens.
 """
 from __future__ import annotations
 
+import contextvars
 import json
 import logging
 import os
@@ -12,6 +13,7 @@ import re
 import secrets
 import stat
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -533,16 +535,63 @@ def format_tools_summary(tools: list[dict[str, Any]], max_tools: int = 40) -> st
     return "; ".join(entries)
 
 
-def call_tool(server_id: str, tool_name: str, arguments: dict[str, Any] | None = None) -> dict[str, Any]:
+#: Only the built-in web-search implementation can mark its MCP sub-call as
+#: covered by the parent ``web_search`` capability.  Direct callers never set
+#: this flag, so they always need the explicit ``mcp_call`` grant.
+_INTERNAL_SEARCH = contextvars.ContextVar("novamind_mcp_internal_search", default=False)
+
+
+@contextmanager
+def internal_search_call():
+    """Scope a trusted MCP sub-call made by the ``web_search`` implementation."""
+    token = _INTERNAL_SEARCH.set(True)
+    try:
+        yield
+    finally:
+        _INTERNAL_SEARCH.reset(token)
+
+
+def _security_denial(tool_name: str, arguments: dict[str, Any]) -> str:
+    """Fail-closed gate for direct MCP callers.
+
+    Normal calls need the ``mcp_call`` capability.  Only the built-in
+    ``web_search`` implementation may run an MCP read under its parent
+    ``web_search`` grant via :func:`internal_search_call`; this is not a
+    caller-controlled argument.  Missing or broken security modules raise
+    ``McpError`` before any network request.
+    """
+    try:
+        from tool_registry import security_gate
+    except Exception as exc:  # noqa: BLE001
+        return f"Проверка безопасности недоступна: {type(exc).__name__}: {exc}"
+    gate_tool = "web_search" if _INTERNAL_SEARCH.get() else "mcp_call"
+    denied = security_gate(gate_tool, arguments or {})
+    if denied is None:
+        return ""
+    error = (denied.get("error") or {}) if isinstance(denied, dict) else {}
+    return str(error.get("message") or "MCP-вызов заблокирован проверкой безопасности")
+
+
+def call_tool(server_id: str, tool_name: str, arguments: dict[str, Any] | None = None,
+              cancel=None) -> dict[str, Any]:
     """Вызывает MCP tools/call с паузой/повтором при 403/429 и логированием ошибок.
 
-    The per-run search cap is enforced here, at the only function that can
-    actually reach an MCP server.  Every gateway (Agent adapter, registry
-    ``mcp_call``, native tool, ``execute_unified``) therefore shares one count.
+    Direct callers cannot skip the security boundary: guardrails and
+    capabilities are checked here as well as in the tool registry.  The
+    per-run search cap stays in the registry gateways, so it is not
+    double-counted on this transport function.
     """
+    arguments = dict(arguments or {})
+    if cancel is not None and cancel.is_set():
+        raise McpError("MCP call cancelled", status_code=499)
+    denial = _security_denial(tool_name, arguments)
+    if denial:
+        raise McpError(denial, status_code=403)
     server_id = resolve_server_id(server_id, tool_name)
     max_retries = max(0, min(int(os.getenv("MCP_MAX_RETRIES", str(MAX_RETRIES))), 5))
     for attempt in range(max_retries + 1):
+        if cancel is not None and cancel.is_set():
+            raise McpError("MCP call cancelled", status_code=499)
         response = request(server_id, "tools/call", {
             "name": tool_name,
             "arguments": arguments or {},

@@ -297,13 +297,68 @@ def native_tool_risk(name: str) -> str:
     return AGENT_ACTION_META.get(action, ("", "safe"))[1]
 
 
+def _security_error(tool: str, kind: str, message: str, **extra) -> dict:
+    """Normalized, non-retryable refusal from the security boundary."""
+    error = {"type": kind, "message": str(message), "retryable": False}
+    error.update(extra)
+    return {"ok": False, "tool": tool, "error": error}
+
+
+def security_gate(tool: str, arguments: Any = None) -> dict | None:
+    """Fail-closed guardrails + capabilities check.
+
+    This is the only security decision used by the registry and the agent.
+    A missing security module, an exception inside a check, or a malformed
+    verdict **blocks** execution: no tool may run on the assumption that a
+    broken check means ``allowed``.  ``None`` means all checks passed.
+    """
+    try:
+        import guardrails
+    except Exception as exc:  # noqa: BLE001 — missing/broken security must block
+        log.error("security: guardrails unavailable for %s: %s", tool, exc)
+        return _security_error(tool, "guardrails_unavailable",
+                               f"Проверка guardrails недоступна: {type(exc).__name__}: {exc}")
+    try:
+        verdict = guardrails.guard_tool_call(tool, arguments)
+    except Exception as exc:  # noqa: BLE001
+        log.error("security: guardrail check failed for %s: %s", tool, exc, exc_info=True)
+        return _security_error(tool, "guardrail_error",
+                               f"Ошибка проверки guardrails: {type(exc).__name__}: {exc}")
+    if verdict is None or not bool(getattr(verdict, "allowed", False)):
+        reasons = list(getattr(verdict, "reasons", ()) or ())
+        severity = str(getattr(verdict, "severity", "block") or "block")
+        return _security_error(
+            tool, "guardrail",
+            "Вызов отклонён ограждением: " + (", ".join(reasons) or "некорректные аргументы"),
+            reasons=reasons, severity=severity,
+        )
+    try:
+        import capabilities
+    except Exception as exc:  # noqa: BLE001
+        log.error("security: capabilities unavailable for %s: %s", tool, exc)
+        return _security_error(tool, "capabilities_unavailable",
+                               f"Проверка capabilities недоступна: {type(exc).__name__}: {exc}")
+    try:
+        denied = capabilities.require(tool, arguments)
+    except Exception as exc:  # noqa: BLE001
+        log.error("security: capability check failed for %s: %s", tool, exc, exc_info=True)
+        return _security_error(tool, "capability_error",
+                               f"Ошибка проверки capabilities: {type(exc).__name__}: {exc}")
+    if denied is not None:
+        if isinstance(denied, dict) and denied.get("ok") is False:
+            return denied
+        return _security_error(tool, "capability_error",
+                               "Проверка capabilities вернула некорректный результат")
+    return None
+
+
 def call_tool(name: str, cancel=None, **kwargs) -> dict:
     """Единая точка исполнения инструмента реестра.
 
-    Здесь стоят три проверки, которых раньше не было в одном месте:
-    существование инструмента, ограждения аргументов (:mod:`guardrails`) и
-    права хода (:mod:`capabilities`). Все три возвращают ошибку в общем формате,
-    поэтому агент видит причину и не повторяет запрещённый вызов.
+    Здесь стоят четыре проверки, которых раньше не было в одном месте:
+    существование инструмента, схема, ограждения аргументов
+    (:mod:`guardrails`) и права хода (:mod:`capabilities`). Проверки
+    fail-closed: сломанный или отсутствующий security-модуль блокирует вызов.
     """
     spec = get_tool(name)
     if not spec:
@@ -313,27 +368,9 @@ def call_tool(name: str, cancel=None, **kwargs) -> dict:
         return {"ok": False, "tool": name,
                 "error": {"type": "schema_validation", "message": "; ".join(schema_errors),
                           "details": schema_errors, "retryable": True}}
-    try:
-        import guardrails
-        verdict = guardrails.guard_tool_call(name, kwargs)
-        if not verdict.allowed:
-            return {"ok": False, "tool": name,
-                    "error": {"type": "guardrail", "retryable": False,
-                              "message": "Вызов отклонён ограждением: "
-                                         + (", ".join(verdict.reasons) or "некорректные аргументы")}}
-    except ImportError:
-        pass
-    except Exception:                         # noqa: BLE001
-        log.warning("guardrail check failed", exc_info=True)
-    try:
-        import capabilities
-        denied = capabilities.require(name, kwargs)
-        if denied:
-            return denied
-    except ImportError:
-        pass
-    except Exception:                         # noqa: BLE001
-        log.warning("capability check failed", exc_info=True)
+    denied = security_gate(name, kwargs)
+    if denied:
+        return denied
     return spec.call(cancel=cancel, **kwargs)
 
 
@@ -389,10 +426,20 @@ def unified_catalog(workspace: bool | None = None, include_unavailable: bool = F
     return items
 
 
-def execute_unified(tool_id: str, arguments: dict[str, Any] | None = None) -> dict[str, Any]:
+def execute_unified(tool_id: str, arguments: dict[str, Any] | None = None,
+                    cancel=None) -> dict[str, Any]:
     """One execution interface for built-ins and dynamically discovered MCP."""
     arguments = dict(arguments or {})
+    if cancel is not None and cancel.is_set():
+        return {"ok": False, "tool": tool_id,
+                "error": {"type": "cancelled", "message": "Tool call cancelled",
+                          "retryable": False}}
     if str(tool_id).startswith("mcp:"):
+        # Check the security boundary before discovery/validation touches the
+        # network; a broken guardrail module must not even enumerate tools.
+        denied = security_gate("mcp_call", arguments)
+        if denied:
+            return denied
         _prefix, server_id, name = str(tool_id).split(":", 2)
         import mcp_registry
         import core.limits as limits
@@ -408,8 +455,12 @@ def execute_unified(tool_id: str, arguments: dict[str, Any] | None = None) -> di
                               "details": errors, "retryable": True}}
         try:
             limits.consume_search(name)
-            return _limit_result({"ok": True, "tool": tool_id,
-                    "result": mcp_registry.call_tool(server_id, name, arguments)})
+            result = mcp_registry.call_tool(server_id, name, arguments)
+            if cancel is not None and cancel.is_set():
+                return {"ok": False, "tool": tool_id,
+                        "error": {"type": "cancelled", "message": "Tool call cancelled",
+                                  "retryable": False}}
+            return _limit_result({"ok": True, "tool": tool_id, "result": result})
         except Exception as exc:
             return {"ok": False, "tool": tool_id,
                     "error": {"type": type(exc).__name__, "message": str(exc),
@@ -419,7 +470,7 @@ def execute_unified(tool_id: str, arguments: dict[str, Any] | None = None) -> di
                 "error": {"type": "instruction_only",
                           "message": "Skill supplies instructions and is not directly executable",
                           "retryable": False}}
-    return call_tool(str(tool_id), **arguments)
+    return call_tool(str(tool_id), cancel=cancel, **arguments)
 
 
 class RuntimeToolRegistry:
@@ -433,6 +484,13 @@ class RuntimeToolRegistry:
     def __init__(self, tools: Mapping[str, Any], cancel=None):
         self.tools = dict(tools or {})
         self.cancel = cancel
+        # Warm the lazy security imports outside the per-call latency budget;
+        # their absence is still enforced fail-closed by ``security_gate``.
+        try:
+            import guardrails  # noqa: F401
+            import capabilities  # noqa: F401
+        except Exception:  # noqa: BLE001
+            pass
         try:
             import core.limits as limits
             # Reuse the request/run budget created by NovaToolsContext; create
@@ -459,31 +517,11 @@ class RuntimeToolRegistry:
     def _guard(self, tool_id: str, arguments: Any) -> dict | None:
         """Guardrails + capability token for callers outside Agent Core.
 
-        ``Agent._run_tool`` already ran both checks (and needs to do so before
-        the confirmation hook), so it passes ``already_guarded=True`` here.
-        Engine-owned helpers call with ``False`` and get exactly the same gate.
+        The gateway always re-checks, including calls that pass
+        ``already_guarded=True`` for compatibility.  A broken security module
+        therefore blocks at every layer, not only the first.
         """
-        try:
-            import guardrails
-            verdict = guardrails.guard_tool_call(tool_id, arguments)
-            if not verdict.allowed:
-                return {"ok": False, "tool": tool_id,
-                        "error": {"type": "guardrail", "message": "Вызов заблокирован правилами безопасности",
-                                  "reasons": list(verdict.reasons), "retryable": False}}
-        except ImportError:
-            pass
-        except Exception:  # noqa: BLE001 — guardrails must not break execution
-            log.warning("guardrail check failed", exc_info=True)
-        try:
-            import capabilities
-            denied = capabilities.require(tool_id, arguments)
-            if denied:
-                return denied
-        except ImportError:
-            pass
-        except Exception:  # noqa: BLE001
-            log.warning("capability check failed", exc_info=True)
-        return None
+        return security_gate(tool_id, arguments)
 
     @staticmethod
     def _artifact(tool) -> dict:
@@ -560,11 +598,10 @@ class RuntimeToolRegistry:
                 return {"ok": False, "tool": tool_id,
                         "error": {"type": "schema_validation", "message": "arguments must be an object",
                                   "retryable": True}}
-            if not already_guarded:
-                denied = self._guard(tool_id, arguments)
-                if denied:
-                    return denied
-            return execute_unified(tool_id, arguments)
+            denied = self._guard(tool_id, arguments)
+            if denied:
+                return denied
+            return execute_unified(tool_id, arguments, cancel=self.cancel)
         if tool_id.startswith("skill:"):
             return execute_unified(tool_id, arguments or {})
 
@@ -583,10 +620,12 @@ class RuntimeToolRegistry:
             # Adapters accept their text payload, not the structured object.
             import json
             payload = json.dumps(arguments, ensure_ascii=False)
-        if not already_guarded:
-            denied = self._guard(canonical, arguments if arguments is not None else payload)
-            if denied:
-                return denied
+        # ``already_guarded`` is a historical hint, not an authority bypass:
+        # the registry re-checks even when Agent Core already did.  A broken
+        # security module must block at every layer.
+        denied = self._guard(canonical, arguments if arguments is not None else payload)
+        if denied:
+            return denied
 
         spec = self.spec_for(canonical)
         timeout = float(getattr(spec, "timeout", 30) or 30)
