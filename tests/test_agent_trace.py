@@ -166,5 +166,5 @@ def test_failed_run_is_recorded_with_error(client, sandbox, monkeypatch):
     events = _ndjson(client.post("/api/agent/stream", json={"message": "привет"}))
     run_id = next(event for event in events if event["type"] == "result")["run_id"]
     run = database.get_agent_run(run_id)
-    assert run and run["status"] == "error"
+    assert run and run["status"] == "failed"
     assert "Модель не ответила" in (run.get("error") or "")

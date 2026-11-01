@@ -2,7 +2,9 @@
 from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping
-import logging, time
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout, as_completed
+import contextvars
+import logging, os, time
 
 log = logging.getLogger("novamind.agent")
 
@@ -20,16 +22,44 @@ class ToolSpec:
     # risk: safe — только чтение; write — меняет данные; danger — необратимые
     # или внешние действия (публикация, отправка, установка пакетов).
     risk: str = "safe"
+    source: str = "builtin"
+    availability: Callable[[], bool] | None = None
+    conflict_key: str = ""
 
-    def call(self, **kwargs) -> dict:
+    def available(self) -> bool:
+        try:
+            return True if self.availability is None else bool(self.availability())
+        except Exception:
+            return False
+
+    def call(self, cancel=None, **kwargs) -> dict:
         started = time.monotonic()
         try:
-            result = self.execute(**kwargs)
+            if cancel is not None and cancel.is_set():
+                return {"ok": False, "tool": self.name,
+                        "error": {"type": "cancelled", "message": "Tool call cancelled", "retryable": False}}
+            if not self.available():
+                return {"ok": False, "tool": self.name,
+                        "error": {"type": "unavailable", "message": "Tool is currently unavailable",
+                                  "retryable": True}}
+            context = contextvars.copy_context()
+            pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="nova-tool")
+            future = pool.submit(lambda: context.run(self.execute, **kwargs))
+            try:
+                result = future.result(timeout=max(0.01, float(self.timeout)))
+            except FutureTimeout:
+                future.cancel()
+                pool.shutdown(wait=False, cancel_futures=True)
+                return {"ok": False, "tool": self.name,
+                        "error": {"type": "timeout", "message": f"Tool timed out after {self.timeout:g}s",
+                                  "retryable": True}}
+            else:
+                pool.shutdown(wait=True)
             if not isinstance(result, dict):
                 result = {"ok": True, "result": result}
             result.setdefault("ok", True)
             result.setdefault("tool", self.name)
-            return result
+            return _limit_result(result)
         except Exception as exc:
             log.exception("tool=%s failed", self.name)
             return {"ok": False, "tool": self.name,
@@ -38,6 +68,53 @@ class ToolSpec:
         finally:
             log.info("tool=%s duration_ms=%d", self.name,
                      int((time.monotonic()-started)*1000))
+
+MAX_RESULT_CHARS = max(1000, int(os.getenv("AGENT_TOOL_RESULT_CHARS", "20000")))
+
+
+def _limit_result(value: dict) -> dict:
+    """Bound persisted/model-visible results without changing structured errors."""
+    import json
+    try:
+        raw = json.dumps(value, ensure_ascii=False, default=str)
+    except Exception:
+        return value
+    if len(raw) <= MAX_RESULT_CHARS:
+        return value
+    return {"ok": bool(value.get("ok")), "tool": value.get("tool"),
+            "result": raw[:MAX_RESULT_CHARS] + "…", "truncated": True}
+
+
+def validate_arguments(schema: Mapping[str, Any], arguments: Any) -> list[str]:
+    """Small dependency-free JSON Schema subset used at the authority boundary."""
+    errors: list[str] = []
+    schema = dict(schema or {})
+    if schema.get("type", "object") == "object":
+        if not isinstance(arguments, dict):
+            return ["arguments must be an object"]
+        for name in schema.get("required") or []:
+            if name not in arguments:
+                errors.append(f"missing required argument: {name}")
+        properties = schema.get("properties") or {}
+        for name, value in arguments.items():
+            rule = properties.get(name)
+            if not isinstance(rule, dict):
+                if schema.get("additionalProperties") is False:
+                    errors.append(f"unknown argument: {name}")
+                continue
+            expected = rule.get("type")
+            valid = (expected == "string" and isinstance(value, str)) or \
+                    (expected == "integer" and isinstance(value, int) and not isinstance(value, bool)) or \
+                    (expected == "number" and isinstance(value, (int, float)) and not isinstance(value, bool)) or \
+                    (expected == "boolean" and isinstance(value, bool)) or \
+                    (expected == "object" and isinstance(value, dict)) or \
+                    (expected == "array" and isinstance(value, list)) or expected in (None, "")
+            if not valid:
+                errors.append(f"argument {name} must be {expected}")
+            if "enum" in rule and value not in rule["enum"]:
+                errors.append(f"argument {name} is not an allowed value")
+    return errors
+
 
 _REGISTRY: dict[str, ToolSpec] = {}
 
@@ -210,7 +287,7 @@ def native_tool_risk(name: str) -> str:
     return AGENT_ACTION_META.get(action, ("", "safe"))[1]
 
 
-def call_tool(name: str, **kwargs) -> dict:
+def call_tool(name: str, cancel=None, **kwargs) -> dict:
     """Единая точка исполнения инструмента реестра.
 
     Здесь стоят три проверки, которых раньше не было в одном месте:
@@ -221,6 +298,11 @@ def call_tool(name: str, **kwargs) -> dict:
     spec = get_tool(name)
     if not spec:
         return {"ok": False, "error": {"type": "unknown_tool", "message": f"Unknown tool: {name}", "retryable": False}}
+    schema_errors = validate_arguments(spec.schema, kwargs)
+    if schema_errors:
+        return {"ok": False, "tool": name,
+                "error": {"type": "schema_validation", "message": "; ".join(schema_errors),
+                          "details": schema_errors, "retryable": True}}
     try:
         import guardrails
         verdict = guardrails.guard_tool_call(name, kwargs)
@@ -242,7 +324,195 @@ def call_tool(name: str, **kwargs) -> dict:
         pass
     except Exception:                         # noqa: BLE001
         log.warning("capability check failed", exc_info=True)
-    return spec.call(**kwargs)
+    return spec.call(cancel=cancel, **kwargs)
+
+
+def unified_catalog(workspace: bool | None = None, include_unavailable: bool = False) -> list[dict[str, Any]]:
+    """Live normalized catalog across built-ins, MCP and Skills.
+
+    It is rebuilt on every discovery request, so a newly connected MCP server
+    or newly created skill appears without a process restart.
+    """
+    bootstrap_default_tools()
+    items: list[dict[str, Any]] = []
+    for spec in list_tools():
+        if workspace is False and spec.name in WORKSPACE_TOOLS:
+            continue
+        available = spec.available()
+        if available or include_unavailable:
+            items.append({"id": spec.name, "name": spec.name, "source": spec.source,
+                          "description": spec.description, "input_schema": dict(spec.schema),
+                          "schema": dict(spec.schema), "permissions": list(spec.permissions),
+                          "timeout": spec.timeout, "risk": spec.risk, "available": available,
+                          "executable": callable(spec.execute), "parallel_safe": spec.risk == "safe",
+                          "conflict_key": spec.conflict_key or spec.name})
+    try:
+        import mcp_registry
+        for tool in mcp_registry.connected_tools():
+            sid, name = str(tool.get("server_id") or ""), str(tool.get("name") or "")
+            if not sid or not name:
+                continue
+            items.append({"id": f"mcp:{sid}:{name}", "name": name, "source": "mcp",
+                          "server_id": sid, "server_name": tool.get("server_name", sid),
+                          "description": str(tool.get("description") or ""),
+                          "input_schema": tool.get("inputSchema") or {"type": "object"},
+                          "schema": tool.get("inputSchema") or {"type": "object"},
+                          "permissions": ["network", "external_service"], "timeout": 30,
+                          "risk": "write", "available": True, "executable": True, "parallel_safe": False,
+                          "conflict_key": f"mcp:{sid}"})
+    except Exception:
+        log.debug("MCP discovery failed", exc_info=True)
+    try:
+        import skills_registry
+        for skill in skills_registry.list_skills():
+            if skill.get("invalid") or not skill.get("enabled", True):
+                continue
+            items.append({"id": f"skill:{skill['id']}", "name": skill.get("name", skill["id"]),
+                          "source": "skill", "kind": "capability",
+                          "description": skill.get("description", ""),
+                          "input_schema": {}, "schema": {}, "permissions": [], "timeout": 0,
+                          "risk": "safe", "available": True, "executable": False,
+                          "parallel_safe": False, "conflict_key": "",
+                          "requires": list(skill.get("tools") or [])})
+    except Exception:
+        log.debug("Skill discovery failed", exc_info=True)
+    return items
+
+
+def execute_unified(tool_id: str, arguments: dict[str, Any] | None = None) -> dict[str, Any]:
+    """One execution interface for built-ins and dynamically discovered MCP."""
+    arguments = dict(arguments or {})
+    if str(tool_id).startswith("mcp:"):
+        _prefix, server_id, name = str(tool_id).split(":", 2)
+        import mcp_registry
+        meta = next((item for item in unified_catalog(include_unavailable=True)
+                     if item.get("id") == tool_id), None)
+        if not meta or not meta.get("available"):
+            return {"ok": False, "tool": tool_id,
+                    "error": {"type": "unavailable", "message": "MCP tool is unavailable", "retryable": True}}
+        errors = validate_arguments(meta.get("input_schema") or {}, arguments)
+        if errors:
+            return {"ok": False, "tool": tool_id,
+                    "error": {"type": "schema_validation", "message": "; ".join(errors),
+                              "details": errors, "retryable": True}}
+        try:
+            return _limit_result({"ok": True, "tool": tool_id,
+                    "result": mcp_registry.call_tool(server_id, name, arguments)})
+        except Exception as exc:
+            return {"ok": False, "tool": tool_id,
+                    "error": {"type": type(exc).__name__, "message": str(exc),
+                              "retryable": isinstance(exc, (TimeoutError, ConnectionError))}}
+    if str(tool_id).startswith("skill:"):
+        return {"ok": False, "tool": tool_id,
+                "error": {"type": "instruction_only",
+                          "message": "Skill supplies instructions and is not directly executable",
+                          "retryable": False}}
+    return call_tool(str(tool_id), **arguments)
+
+
+class RuntimeToolRegistry:
+    """Request-scoped execution authority over actual AgenticSeek adapters.
+
+    Legacy adapters retain parsing/UI compatibility, but Agent Core never calls
+    them directly: selection, availability, cancellation and normalized errors
+    pass through this registry.
+    """
+
+    def __init__(self, tools: Mapping[str, Any], cancel=None):
+        self.tools = dict(tools or {})
+        self.cancel = cancel
+
+    def resolve(self, tool_id: str):
+        tool = self.tools.get(tool_id)
+        if tool is not None:
+            return tool
+        for key, candidate in self.tools.items():
+            if tool_id == (getattr(candidate, "tag", key) or key) or \
+                    tool_id in (getattr(candidate, "aliases", ()) or ()):
+                return candidate
+        return None
+
+    def catalog(self, include_capabilities: bool = True) -> list[dict[str, Any]]:
+        """Live definitions for exactly the adapters executable in this run."""
+        items, seen = [], set()
+        for key, tool in self.tools.items():
+            canonical = str(getattr(tool, "tag", key) or key)
+            if canonical in seen or not callable(getattr(tool, "execute", None)):
+                continue
+            seen.add(canonical)
+            spec_name = {"terminal": "shell"}.get(canonical, canonical)
+            spec = get_tool(spec_name)
+            items.append({
+                "id": canonical, "name": canonical,
+                "description": str(getattr(tool, "description", "") or (spec.description if spec else "")),
+                "source": (spec.source if spec else ("terminal" if canonical in {"terminal", "python"} else "builtin")),
+                "input_schema": dict(spec.schema) if spec else {"type": "object"},
+                "schema": dict(spec.schema) if spec else {"type": "object"},
+                "permissions": list(spec.permissions) if spec else [],
+                "available": True, "executable": True,
+                "risk": str(getattr(tool, "risk", None) or (spec.risk if spec else "write")),
+                "timeout": float(spec.timeout if spec else 30),
+                "parallel_safe": str(getattr(tool, "risk", "write")) == "safe",
+                "conflict_key": canonical,
+            })
+        if include_capabilities:
+            for item in unified_catalog(include_unavailable=False):
+                if item.get("source") in {"mcp", "skill"} and item.get("id") not in seen:
+                    items.append(item)
+        return items
+
+    def execute_legacy(self, tool_id: str, payload: str, saved_path: str = "") -> dict:
+        if self.cancel is not None and self.cancel.is_set():
+            return {"ok": False, "tool": tool_id,
+                    "error": {"type": "cancelled", "message": "Tool call cancelled", "retryable": False}}
+        if str(tool_id).startswith("mcp:"):
+            import json
+            try:
+                arguments = json.loads(str(payload or "{}"))
+            except ValueError as exc:
+                return {"ok": False, "tool": tool_id,
+                        "error": {"type": "schema_validation", "message": str(exc), "retryable": True}}
+            return execute_unified(tool_id, arguments)
+        tool = self.resolve(tool_id)
+        if tool is None or not callable(getattr(tool, "execute", None)):
+            return {"ok": False, "tool": tool_id,
+                    "error": {"type": "unknown_tool", "message": f"Unknown tool: {tool_id}", "retryable": False}}
+        try:
+            tool.saved_path = saved_path
+            output = tool.execute(str(payload))
+            ok = not tool.execution_failure_check(output)
+            return _limit_result({"ok": ok, "tool": tool_id, "result": output})
+        except Exception as exc:
+            return {"ok": False, "tool": tool_id,
+                    "error": {"type": type(exc).__name__, "message": str(exc),
+                              "retryable": isinstance(exc, (TimeoutError, ConnectionError))}}
+
+
+def execute_parallel(calls: list[dict[str, Any]], max_workers: int = 4) -> list[dict[str, Any]]:
+    """Run independent safe calls concurrently; serialize writes/conflicts."""
+    catalog = {item["id"]: item for item in unified_catalog(include_unavailable=True)}
+    results: list[dict[str, Any] | None] = [None] * len(calls)
+    safe = []
+    serial = []
+    occupied: set[str] = set()
+    for index, call in enumerate(calls):
+        tool_id = str(call.get("tool") or call.get("id") or "")
+        meta = catalog.get(tool_id, {})
+        key = str(meta.get("conflict_key") or tool_id)
+        if meta.get("parallel_safe") and key not in occupied:
+            safe.append((index, tool_id, call.get("arguments") or {})); occupied.add(key)
+        else:
+            serial.append((index, tool_id, call.get("arguments") or {}))
+    with ThreadPoolExecutor(max_workers=max(1, min(max_workers, 8))) as pool:
+        futures = {pool.submit(execute_unified, tool_id, args): index
+                   for index, tool_id, args in safe}
+        for future in as_completed(futures):
+            results[futures[future]] = future.result()
+    for index, tool_id, args in serial:
+        results[index] = execute_unified(tool_id, args)
+    return [result or {"ok": False, "error": {"type": "internal", "message": "No result"}}
+            for result in results]
+
 
 def bootstrap_default_tools():
     _register_agent_tools()
@@ -530,7 +800,10 @@ def _register_agent_tools():
             except ValueError as exc:
                 return {"ok": False, "error": {"type": "invalid_skill", "message": str(exc),
                                                "retryable": False}}
-            return {"ok": True, "skill": item}
+            validation = skills_registry.validate_skill(item["id"])
+            item["validation"] = validation
+            return {"ok": True, "skill": item, "validated": validation["ok"],
+                    "missing_tools": validation["missing_tools"]}
         register_tool(ToolSpec(
             "skill_create", "Создать skill (SKILL.md) из готового текста.",
             {"type": "object",

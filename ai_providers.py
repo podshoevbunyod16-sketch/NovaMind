@@ -413,6 +413,34 @@ def normalize_tool_calls(raw_calls):
     return calls
 
 
+def merge_tool_call_fragments(fragments):
+    """Merge OpenAI-style streamed tool-call deltas into normalized calls.
+
+    Transports that stream may pass each ``delta.tool_calls`` list here. The
+    synchronous providers use ``normalize_tool_calls`` directly; both paths
+    produce the same internal representation.
+    """
+    merged: dict[int, dict] = {}
+    for batch in fragments or []:
+        values = batch if isinstance(batch, list) else [batch]
+        for position, call in enumerate(values):
+            if not isinstance(call, dict):
+                continue
+            try:
+                index = int(call.get("index", position))
+            except (TypeError, ValueError):
+                index = position
+            target = merged.setdefault(index, {"id": "", "function": {"name": "", "arguments": ""}})
+            if call.get("id"):
+                target["id"] = str(call["id"])
+            function = call.get("function") if isinstance(call.get("function"), dict) else {}
+            if function.get("name"):
+                target["function"]["name"] += str(function["name"])
+            if function.get("arguments") is not None:
+                target["function"]["arguments"] += str(function["arguments"])
+    return normalize_tool_calls([merged[index] for index in sorted(merged)])
+
+
 def openai_tools_payload(tools):
     """Оставляет только корректные OpenAI-совместимые описания инструментов."""
     payload = []

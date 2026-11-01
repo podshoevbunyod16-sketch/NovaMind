@@ -775,6 +775,7 @@ def init_agent_runs():
                     id TEXT PRIMARY KEY,
                     chat_id TEXT DEFAULT '',
                     run_id TEXT DEFAULT '',
+                    owner TEXT DEFAULT '',
                     goal TEXT NOT NULL DEFAULT '',
                     engine TEXT NOT NULL DEFAULT 'agenticseek',
                     status TEXT NOT NULL DEFAULT 'running',
@@ -785,6 +786,7 @@ def init_agent_runs():
                     steps INTEGER NOT NULL DEFAULT 0,
                     answer TEXT DEFAULT '',
                     error TEXT DEFAULT '',
+                    verification TEXT NOT NULL DEFAULT '{}',
                     started_at REAL NOT NULL,
                     finished_at REAL
                 );
@@ -803,6 +805,19 @@ def init_agent_runs():
                 );
                 CREATE INDEX IF NOT EXISTS idx_agent_run_steps
                     ON agent_run_steps(run_id, seq);
+                CREATE TABLE IF NOT EXISTS agent_run_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    run_id TEXT NOT NULL,
+                    event_id TEXT NOT NULL,
+                    sequence INTEGER NOT NULL,
+                    type TEXT NOT NULL,
+                    payload TEXT NOT NULL DEFAULT '{}',
+                    created_at REAL NOT NULL
+                );
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_run_event_id
+                    ON agent_run_events(event_id);
+                CREATE INDEX IF NOT EXISTS idx_agent_run_events
+                    ON agent_run_events(run_id, sequence);
             """)
             _ensure_agent_columns(conn)
     _runs_ready.add(DB_PATH)
@@ -819,8 +834,9 @@ def _ensure_agent_columns(conn):
     wanted = {
         "agent_runs": {
             "chat_id": "TEXT DEFAULT ''", "run_id": "TEXT DEFAULT ''",
-            "route": "TEXT DEFAULT ''", "provider": "TEXT DEFAULT ''",
-            "model": "TEXT DEFAULT ''", "plan": "TEXT NOT NULL DEFAULT '[]'",
+            "owner": "TEXT DEFAULT ''", "route": "TEXT DEFAULT ''",
+            "provider": "TEXT DEFAULT ''", "model": "TEXT DEFAULT ''",
+            "plan": "TEXT NOT NULL DEFAULT '[]'", "verification": "TEXT NOT NULL DEFAULT '{}'",
             "steps": "INTEGER NOT NULL DEFAULT 0", "answer": "TEXT DEFAULT ''",
             "error": "TEXT DEFAULT ''", "finished_at": "REAL",
         },
@@ -843,11 +859,16 @@ def create_agent_run(goal, chat_id="", run_id="", provider="", model="",
     record_id = str(uuid.uuid4())
     with _db_lock:
         with get_db() as conn:
+            try:
+                import identity
+                owner = identity.chat_owner()
+            except Exception:
+                owner = ""
             conn.execute(
-                "INSERT INTO agent_runs (id, chat_id, run_id, goal, engine, status,"
-                " provider, model, plan, steps, answer, error, started_at, finished_at)"
-                " VALUES (?, ?, ?, ?, ?, 'running', ?, ?, '[]', 0, '', '', ?, NULL)",
-                (record_id, str(chat_id or ""), str(run_id or ""),
+                "INSERT INTO agent_runs (id, chat_id, run_id, owner, goal, engine, status,"
+                " provider, model, plan, verification, steps, answer, error, started_at, finished_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, 'running', ?, ?, '[]', '{}', 0, '', '', ?, NULL)",
+                (record_id, str(chat_id or ""), str(run_id or ""), str(owner or "")[:200],
                  str(goal or "")[:4000], str(engine or "agenticseek"),
                  str(provider or ""), str(model or ""), time.time()),
             )
@@ -859,13 +880,14 @@ def update_agent_run(record_id, **fields):
     if not record_id:
         return None
     init_agent_runs()
-    allowed = ("status", "route", "plan", "steps", "answer", "error",
+    allowed = ("status", "route", "plan", "verification", "steps", "answer", "error",
                "provider", "model", "finished_at", "chat_id")
     values = {key: fields[key] for key in allowed if key in fields}
     if not values:
         return get_agent_run(record_id)
-    if "plan" in values and not isinstance(values["plan"], str):
-        values["plan"] = json.dumps(values["plan"], ensure_ascii=False)[:20000]
+    for structured in ("plan", "verification"):
+        if structured in values and not isinstance(values[structured], str):
+            values[structured] = json.dumps(values[structured], ensure_ascii=False)[:20000]
     if "answer" in values:
         values["answer"] = str(values["answer"] or "")[:20000]
     if "error" in values:
@@ -901,8 +923,39 @@ def add_agent_run_step(run_id, seq, tool, label="", ok=True, output=""):
     return seq
 
 
+def _agent_owner_allowed(row_owner: str) -> bool:
+    try:
+        import identity
+        current = identity.chat_owner()
+    except Exception:
+        current = ""
+    # Legacy rows and maintenance code outside a request remain compatible.
+    return not current or not row_owner or current == row_owner
+
+
+def add_agent_run_event(record_id, event: dict):
+    """Persist a bounded structured lifecycle event without large tool output."""
+    if not record_id or not isinstance(event, dict) or not event.get("event_id"):
+        return None
+    init_agent_runs()
+    payload = event.get("payload") if isinstance(event.get("payload"), dict) else {
+        k: v for k, v in event.items()
+        if k not in {"event_id", "task_id", "timestamp", "sequence", "type"}
+    }
+    raw = json.dumps(payload, ensure_ascii=False, default=str)[:8000]
+    with _db_lock:
+        with get_db() as conn:
+            conn.execute(
+                "INSERT OR IGNORE INTO agent_run_events"
+                " (run_id,event_id,sequence,type,payload,created_at) VALUES (?,?,?,?,?,?)",
+                (str(record_id), str(event["event_id"]), int(event.get("sequence") or 0),
+                 str(event.get("type") or "event")[:80], raw,
+                 float(event.get("timestamp") or time.time())))
+    return event["event_id"]
+
+
 def get_agent_run(record_id):
-    """Запуск + шаги. record_id — id записи или run_id."""
+    """Запуск + шаги, доступный только его владельцу."""
     if not record_id:
         return None
     init_agent_runs()
@@ -910,39 +963,67 @@ def get_agent_run(record_id):
         row = conn.execute(
             "SELECT * FROM agent_runs WHERE id=? OR run_id=?"
             " ORDER BY started_at DESC LIMIT 1", (str(record_id), str(record_id))).fetchone()
-        if row is None:
+        if row is None or not _agent_owner_allowed(row["owner"]):
             return None
         steps = conn.execute(
             "SELECT seq, tool, label, ok, output, created_at FROM agent_run_steps"
             " WHERE run_id=? ORDER BY seq", (row["id"],)).fetchall()
+        events = conn.execute(
+            "SELECT event_id, sequence, type, payload, created_at FROM agent_run_events"
+            " WHERE run_id=? ORDER BY sequence LIMIT 500", (row["id"],)).fetchall()
     data = dict(row)
     try:
         data["plan"] = json.loads(data.get("plan") or "[]")
     except (TypeError, ValueError):
         data["plan"] = []
+    try:
+        data["verification"] = json.loads(data.get("verification") or "{}")
+    except (TypeError, ValueError):
+        data["verification"] = {}
     data["steps_log"] = [dict(step) for step in steps]
+    data["events"] = []
+    for row_event in events:
+        item = dict(row_event)
+        try:
+            item["payload"] = json.loads(item.get("payload") or "{}")
+        except (TypeError, ValueError):
+            item["payload"] = {}
+        data["events"].append(item)
     return data
 
 
 def list_agent_runs(chat_id=None, limit=20):
     """Последние запуски агента (для панели «Что делал агент»)."""
     init_agent_runs()
+    try:
+        import identity
+        owner = identity.chat_owner()
+    except Exception:
+        owner = ""
+    fields = ("id, chat_id, run_id, goal, status, route, provider, model,"
+              " steps, answer, error, verification, started_at, finished_at")
     with get_db() as conn:
+        clauses, args = [], []
         if chat_id:
-            rows = conn.execute(
-                "SELECT id, chat_id, run_id, goal, status, route, provider, model,"
-                " steps, answer, error, started_at, finished_at FROM agent_runs"
-                " WHERE chat_id=? ORDER BY started_at DESC LIMIT ?",
-                (str(chat_id), int(limit))).fetchall()
-        else:
-            rows = conn.execute(
-                "SELECT id, chat_id, run_id, goal, status, route, provider, model,"
-                " steps, answer, error, started_at, finished_at FROM agent_runs"
-                " ORDER BY started_at DESC LIMIT ?", (int(limit),)).fetchall()
-    return [dict(row) for row in rows]
+            clauses.append("chat_id=?"); args.append(str(chat_id))
+        if owner:
+            clauses.append("(owner=? OR owner='')"); args.append(owner)
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        rows = conn.execute(f"SELECT {fields} FROM agent_runs{where} ORDER BY started_at DESC LIMIT ?",
+                            (*args, int(limit))).fetchall()
+    result = []
+    for row in rows:
+        item = dict(row)
+        try:
+            item["verification"] = json.loads(item.get("verification") or "{}")
+        except (TypeError, ValueError):
+            item["verification"] = {}
+        result.append(item)
+    return result
 
 
-def finish_agent_run(record_id, status, answer="", error="", steps=0):
-    """Закрывает запуск: статус, ответ, время окончания."""
+def finish_agent_run(record_id, status, answer="", error="", steps=0, verification=None):
+    """Закрывает запуск: статус, доказательства проверки, ответ и время."""
     return update_agent_run(record_id, status=status, answer=answer, error=error,
-                            steps=int(steps or 0), finished_at=time.time())
+                            verification=verification or {}, steps=int(steps or 0),
+                            finished_at=time.time())

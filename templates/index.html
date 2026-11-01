@@ -199,7 +199,14 @@
             <div id="attachMcpCatalog" class="attach-mcp-list"></div>
             <form id="attachMcpForm" class="attach-mcp-form" onsubmit="connectAttachMcp(event)" hidden>
               <input id="attachMcpName" maxlength="80" placeholder="Название сервера" required>
+              <select id="attachMcpTransport" onchange="updateAttachMcpTransport()" aria-label="Транспорт MCP">
+                <option value="http">Streamable HTTP</option>
+                <option value="sse">SSE</option>
+                <option value="stdio">STDIO</option>
+              </select>
               <input id="attachMcpUrl" type="url" placeholder="https://server.example/mcp" required>
+              <input id="attachMcpCommand" placeholder="Команда STDIO, например npx" hidden>
+              <input id="attachMcpArgs" placeholder="Аргументы, например -y @modelcontextprotocol/server-filesystem /workspace" hidden>
               <select id="attachMcpAuth" onchange="updateAttachMcpSecret()" aria-label="Авторизация MCP">
                 <option value="none">Без авторизации</option>
                 <option value="bearer">Bearer token</option>

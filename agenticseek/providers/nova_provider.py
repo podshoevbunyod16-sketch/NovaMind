@@ -90,6 +90,34 @@ class NovaProvider:
                 causes=[str(reason or "провайдер вернул пустой ответ")])
         return str(text)
 
+    def respond_tools(self, messages: list, tools: list[dict]) -> tuple[str, list[dict]]:
+        """Provider-neutral native tool call, with text-protocol fallback metadata."""
+        if self.calls >= self.max_calls:
+            raise AgenticSeekError("Model call limit reached", "Закончился лимит обращений к модели.")
+        system, dialogue = _split_system(messages)
+        if not dialogue:
+            raise AgenticSeekError("Empty conversation", "Нечего отправлять модели.")
+        self.calls += 1
+        try:
+            text, meta = self.complete(
+                dialogue, system=system, temperature=self.temperature,
+                max_tokens=self.max_tokens, timeout=self.timeout,
+                tools=tools, tool_choice="auto")
+        except Exception as error:
+            raise AgenticSeekError(f"{type(error).__name__}: {error}",
+                                   "Ошибка при обращении к модели.") from error
+        self.last_meta = meta if isinstance(meta, dict) else {}
+        self._add_usage(self.last_meta)
+        calls = list(self.last_meta.get("tool_calls") or [])
+        if not calls and self.last_meta.get("tool_call_fragments"):
+            from ai_providers import merge_tool_call_fragments
+            calls = merge_tool_call_fragments(self.last_meta["tool_call_fragments"])
+        if text is None and not calls:
+            reason = self.last_meta.get("error") or meta
+            raise AgenticSeekError(f"Provider returned no answer: {reason}",
+                                   "Модель не ответила.")
+        return str(text or ""), calls
+
     def get_model_name(self) -> str:
         return str(self.model or self.provider or "novamind")
 

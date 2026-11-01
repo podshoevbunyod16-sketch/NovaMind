@@ -53,8 +53,8 @@ def _validate_markdown(text: str) -> dict[str, str]:
 def _write_skill(name: str, markdown: str, source_dir: Path | None = None) -> dict[str, Any]:
     name = _safe_name(name)
     meta = _validate_markdown(markdown)
-    SKILLS_DIR.mkdir(parents=True, exist_ok=True)
-    target = SKILLS_DIR / name
+    _skills_dir().mkdir(parents=True, exist_ok=True)
+    target = _skills_dir() / name
     if target.exists():
         shutil.rmtree(target)
     target.mkdir(parents=True)
@@ -76,8 +76,21 @@ def _write_skill(name: str, markdown: str, source_dir: Path | None = None) -> di
 DISABLED_FILE = ".disabled.json"
 
 
+def _skills_dir() -> Path:
+    """Per-user skill storage; administrator/maintenance keeps legacy location."""
+    try:
+        import hashlib
+        import identity
+        owner = identity.chat_owner()
+        if owner and not identity.is_admin_owner(owner):
+            return SKILLS_DIR / "users" / hashlib.sha256(owner.encode()).hexdigest()[:20]
+    except Exception:
+        pass
+    return SKILLS_DIR
+
+
 def _disabled() -> set[str]:
-    path = SKILLS_DIR / DISABLED_FILE
+    path = _skills_dir() / DISABLED_FILE
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -86,8 +99,8 @@ def _disabled() -> set[str]:
 
 
 def _write_disabled(values: set[str]) -> None:
-    SKILLS_DIR.mkdir(parents=True, exist_ok=True)
-    path = SKILLS_DIR / DISABLED_FILE
+    _skills_dir().mkdir(parents=True, exist_ok=True)
+    path = _skills_dir() / DISABLED_FILE
     path.write_text(json.dumps(sorted(values), ensure_ascii=False, indent=2), encoding="utf-8")
 
 
@@ -98,7 +111,7 @@ def is_enabled(skill_id: str) -> bool:
 def set_enabled(skill_id: str, enabled: bool) -> dict[str, Any]:
     """Включает или выключает навык. Возвращает обновлённую запись."""
     name = _safe_name(skill_id)
-    if not (SKILLS_DIR / name / "SKILL.md").is_file():
+    if not (_skills_dir() / name / "SKILL.md").is_file():
         raise FileNotFoundError("Skill не найден")
     disabled = _disabled()
     if enabled:
@@ -116,11 +129,11 @@ def _tools_of(meta: dict[str, str]) -> list[str]:
 
 
 def list_skills() -> list[dict[str, Any]]:
-    if not SKILLS_DIR.exists():
+    if not _skills_dir().exists():
         return []
     disabled = _disabled()
     items = []
-    for directory in sorted(SKILLS_DIR.iterdir()):
+    for directory in sorted(_skills_dir().iterdir()):
         skill_file = directory / "SKILL.md"
         if not directory.is_dir() or not skill_file.is_file():
             continue
@@ -142,7 +155,7 @@ def list_skills() -> list[dict[str, Any]]:
 
 def get_skill(skill_id: str) -> dict[str, Any]:
     name = _safe_name(skill_id)
-    path = SKILLS_DIR / name / "SKILL.md"
+    path = _skills_dir() / name / "SKILL.md"
     if not path.is_file():
         raise FileNotFoundError("Skill не найден")
     text = path.read_text(encoding="utf-8")
@@ -183,7 +196,7 @@ def import_zip(file_storage) -> dict[str, Any]:
 
 def delete_skill(skill_id: str) -> None:
     name = _safe_name(skill_id)
-    target = SKILLS_DIR / name
+    target = _skills_dir() / name
     if target.exists():
         shutil.rmtree(target)
     disabled = _disabled()
@@ -192,19 +205,67 @@ def delete_skill(skill_id: str) -> None:
         _write_disabled(disabled)
 
 
-def prompt_context(max_chars: int = 18_000) -> str:
-    blocks = []
-    remaining = max_chars
+def _available_tool_names() -> set[str]:
+    """Live unified names used to validate skill requirements."""
+    names: set[str] = set()
+    try:
+        import tool_registry
+        names.update(spec.name for spec in tool_registry.list_tools())
+        names.update(tool_registry.ACTION_TO_TOOL)
+    except Exception:
+        pass
+    try:
+        import mcp_registry
+        for item in mcp_registry.connected_tools():
+            names.add(str(item.get("name") or ""))
+            names.add("mcp_call")
+    except Exception:
+        pass
+    return {name for name in names if name}
+
+
+def validate_skill(skill_id: str) -> dict[str, Any]:
+    """Validate markdown and report unavailable declared tools without executing it."""
+    skill = get_skill(skill_id)
+    available = _available_tool_names()
+    missing = [name for name in skill.get("tools", []) if name not in available]
+    return {"ok": not missing, "skill": skill_id, "missing_tools": missing,
+            "available_tools": sorted(available)}
+
+
+def prompt_context(query: str = "", max_chars: int = 18_000, limit: int = 6) -> str:
+    """Load only relevant enabled skills into the temporary task context.
+
+    Skills remain persisted globally, but unrelated instructions are not mixed
+    into every request.  Declared unavailable tools are shown as a warning so
+    the model does not hallucinate their execution.
+    """
+    words = {w for w in re.findall(r"[a-zA-Zа-яА-ЯёЁ0-9_-]{3,}", str(query).lower())}
+    ranked = []
     for item in list_skills():
         if item.get("invalid") or not item.get("enabled", True):
             continue
+        haystack = f"{item.get('id','')} {item.get('name','')} {item.get('description','')}".lower()
+        score = sum(3 if word in haystack else 0 for word in words)
+        # Explicitly named skills always win; with an empty query preserve the
+        # old behaviour (up to the bounded limit).
+        if not words or score or str(item.get("id")) in str(query).lower():
+            ranked.append((score, float(item.get("updated") or 0), item))
+    ranked.sort(key=lambda row: (row[0], row[1]), reverse=True)
+    blocks = []
+    remaining = max_chars
+    available = _available_tool_names()
+    for _score, _updated, item in ranked[:max(1, min(int(limit), 20))]:
         try:
             skill = get_skill(item["id"])
         except Exception:
             continue
-        block = f"\n## Skill: {skill['name']} ({skill['id']})\n{skill['description']}\n{skill['content']}\n"
+        missing = [name for name in skill.get("tools", []) if name not in available]
+        warning = ("\nНедоступные инструменты (не вызывать): " + ", ".join(missing)) if missing else ""
+        block = (f"\n## Skill: {skill['name']} ({skill['id']})\n{skill['description']}"
+                 f"{warning}\n{skill['content']}\n")
         if len(block) > remaining:
-            break
+            continue
         blocks.append(block)
         remaining -= len(block)
     return "\n".join(blocks)

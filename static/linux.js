@@ -94,6 +94,23 @@
     return mentionsProjectFile && asksForCodeWork;
   }
 
+  async function recoverInterruptedRun(runId, turn) {
+    if (!runId) return null;
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      try {
+        const data = await getJson(`/api/agent/runs/${encodeURIComponent(runId)}`);
+        const run = data.run || {};
+        if (run.status && run.status !== 'running') {
+          turn.step('↻', 'Поток прервался — восстановил результат из истории задачи');
+          if (!turn.text && run.answer) turn.appendText(run.answer);
+          return run;
+        }
+      } catch (_) { /* task may not be committed yet */ }
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    }
+    return null;
+  }
+
   async function runTurn(message, options = {}) {
     if (state.ready) await state.ready.catch(() => null);
     if (!isAvailable()) return false;
@@ -114,6 +131,7 @@
     activeAbort = controller;
     let result = {};
     let failure = null;
+    const seenEventIds = new Set();
     const endpoint = coding ? '/api/agent/coding/stream' : '/api/agent/stream';
     // chat_id открытого диалога — сервер пишет ходы в него же (иначе агент,
     // поиск и обычный чат разъезжаются по разным серверным чатам).
@@ -144,11 +162,45 @@
       }
 
       await consumeNdjson(response, (event) => {
+        if (event.event_id) {
+          if (seenEventIds.has(event.event_id)) return;
+          seenEventIds.add(event.event_id);
+        }
         switch (event.type) {
           case 'stage': turn.setStage(event.scene || 'agent', event.title, event.text); break;
           case 'plan': turn.plan(event); break;
           case 'step': turn.step(event.icon, event.text); break;
           case 'tool': turn.tool(event); break;
+          case 'task_started': turn.step('🎯', 'Задача принята'); break;
+          case 'task_analysis':
+            if (event.status === 'started') turn.step('🧠', event.summary || 'Анализирую задачу…');
+            else turn.step('✓', event.summary || 'Анализ задачи завершён');
+            break;
+          case 'plan_created':
+          case 'plan_updated':
+          case 'plan_revised': {
+            const plan = Array.isArray(event.plan) ? event.plan : [];
+            if (plan.length) turn.plan({ steps: plan.map((item) => ({
+              text: typeof item === 'string' ? item : (item.title || item.text || item.id),
+              status: (item.status === 'completed' ? 'done' : (item.status || 'todo')),
+            })) });
+            turn.step(event.type === 'plan_revised' ? '↻' : '✓', event.summary || 'План обновлён');
+            break;
+          }
+          case 'tool_discovered': turn.step('🧰', `Обнаружено инструментов: ${event.count || 0}`); break;
+          case 'tool_selected': turn.step('☑', `Выбран ${event.tool || 'инструмент'}`); break;
+          case 'permission_requested': turn.step('🔐', event.description || `Нужно разрешение: ${event.tool || 'действие'}`); break;
+          case 'tool_call_started': turn.step('▶', `Использую ${event.tool || 'инструмент'}…`); break;
+          case 'tool_call_completed': turn.step('✓', `${event.tool || 'Инструмент'} завершён`); break;
+          case 'tool_call_failed': turn.step('⚠️', `${event.tool || 'Инструмент'}: ${event.observation || 'ошибка'}`); break;
+          case 'observation':
+            if (event.summary) turn.step(event.ok === false ? '⚠️' : '↳', String(event.summary).slice(0, 240));
+            break;
+          case 'verification_started': turn.step('🔎', event.summary || 'Проверяю результат…'); break;
+          case 'verification_completed': turn.step(event.ok ? '✓' : '⚠️', event.summary || 'Проверка завершена'); break;
+          case 'task_completed': turn.step(event.verified ? '🏁' : '◐', event.status === 'partially_completed' ? 'Задача выполнена частично' : 'Задача выполнена'); break;
+          case 'task_failed': failure = event.verification?.summary || 'Задача не выполнена'; turn.step('✕', failure); break;
+          case 'task_cancelled': turn.step('⏹', 'Задача отменена'); break;
           // Динамическое получение инструментов после понимания запроса.
           case 'recall': if (turn.recall) turn.recall(event); break;
           // Думаем перед каждым шагом и ещё раз — после его выполнения.
@@ -195,7 +247,13 @@
         turn.appendText(turn.text || '_Остановлено._');
         turn.finish({ model: result.model, stopped: true });
       } else {
-        turn.fail(error.message || 'ИИ недоступен');
+        const recovered = await recoverInterruptedRun(state.runId, turn);
+        if (recovered && turn.text) {
+          turn.finish({ model: recovered.model, provider: recovered.provider,
+                        steps: recovered.steps, stopped: recovered.status === 'cancelled' });
+        } else {
+          turn.fail(error.message || 'ИИ недоступен');
+        }
       }
     }
     return true;
