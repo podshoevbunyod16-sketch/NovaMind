@@ -39,6 +39,14 @@ def _event(payload):
     return json.dumps(payload, ensure_ascii=False) + "\n"
 
 
+def _chat_owner():
+    try:
+        import identity
+        return identity.chat_owner()
+    except Exception:  # noqa: BLE001
+        return ""
+
+
 def _signed_in():
     """Project inspection is available to every signed-in user, not just admins."""
     return bool(session.get("admin_logged_in") or session.get("nova_google_login")
@@ -95,6 +103,7 @@ def coding_stream():
             provider=provider, model=model, profile="coding",
             history=prior,
             workspace=False, timeout=TIMEOUT, tools_allowed=tools_allowed,
+            owner=_chat_owner(),
             max_tokens=answer_tokens,
             repair_answer=lambda text: repair_truncated_answer(text, goal)))
         proposals: list = []
@@ -119,6 +128,8 @@ def coding_stream():
         yield _event({"type": "result", "steps": engine.state.steps, "linux": False,
                       "coding": True, "provider": provider, "model": model,
                       "status": "ok" if engine.state.status == "ok" else engine.state.status,
+                      "task_status": engine.outcome_status,
+                      "verification": engine.verification,
                       "chat_id": chat_id, "engine": "agenticseek"})
         yield _event({"type": "done"})
 

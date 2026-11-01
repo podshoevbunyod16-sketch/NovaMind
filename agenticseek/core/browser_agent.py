@@ -69,7 +69,7 @@ class BrowserAgent(Agent):
             self.last_answer = answer
 
             url = self._chosen_url(answer)
-            if url and self.browser is not None:
+            if url and (self.browser is not None or "web_open" in self.all_tools()):
                 text = self._open(url)
                 self.memory.push("user", text)
                 continue
@@ -98,6 +98,13 @@ class BrowserAgent(Agent):
         return ""
 
     def _open(self, url: str) -> str:
+        # A bare URL in the model's answer is still a tool call: route it through
+        # the same registry (schema, guardrails, cancellation, artifact) as
+        # ```web_open```.  The browser object remains a compatibility fallback
+        # for runs without the registry adapter.
+        if "web_open" in self.all_tools() and self.tool_registry is not None:
+            _ok, feedback = self.run_tool("web_open", url)
+            return feedback
         try:
             text = self.browser.go_to(url)
         except BrowserError as error:

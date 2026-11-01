@@ -534,7 +534,12 @@ def format_tools_summary(tools: list[dict[str, Any]], max_tools: int = 40) -> st
 
 
 def call_tool(server_id: str, tool_name: str, arguments: dict[str, Any] | None = None) -> dict[str, Any]:
-    """Вызывает MCP tools/call с паузой/повтором при 403/429 и логированием ошибок."""
+    """Вызывает MCP tools/call с паузой/повтором при 403/429 и логированием ошибок.
+
+    The per-run search cap is enforced here, at the only function that can
+    actually reach an MCP server.  Every gateway (Agent adapter, registry
+    ``mcp_call``, native tool, ``execute_unified``) therefore shares one count.
+    """
     server_id = resolve_server_id(server_id, tool_name)
     max_retries = max(0, min(int(os.getenv("MCP_MAX_RETRIES", str(MAX_RETRIES))), 5))
     for attempt in range(max_retries + 1):

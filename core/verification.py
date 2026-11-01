@@ -1,8 +1,62 @@
-"""Evidence-based verification for autonomous task outcomes."""
+"""Evidence-based verification of a finished agent turn.
+
+There are exactly five final outcomes.  They are a closed vocabulary shared by
+the engine, the JSON result and the browser: ``completed``,
+``partially_completed``, ``failed``, ``cancelled`` and
+``requires_user_action``.  A completed turn must not be reported when the only
+evidence is the model's own text, and a denied/unavailable tool must not be
+reported as a plain failure when the user can unblock it.
+"""
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, field
+
+#: The only five final states the product may display.
+OUTCOMES = ("completed", "partially_completed", "failed", "cancelled",
+            "requires_user_action")
+
+OUTCOME_LABELS = {
+    "completed": "выполнено",
+    "partially_completed": "выполнено частично",
+    "failed": "не выполнено",
+    "cancelled": "отменено",
+    "requires_user_action": "нужно действие пользователя",
+}
+
+#: Errors where retrying the same call cannot help but a person can.
+_NEEDS_USER_RE = re.compile(
+    r"нет прав|не разреш|запрещ|permission|forbidden|unauthori[sz]ed|"
+    r"not enabled|выключен|не подключ|not connected|not granted|"
+    r"нужно подтвержд|разрешить|подтвердите|missing credential|"
+    r"api key|токен|token|авториз|login|войдите|подключите|"
+    r"not configured|не настроен|лимит|quota|rate limit",
+    re.IGNORECASE,
+)
+
+_CANCELLED_RE = re.compile(r"останов|прерван|cancel|abort|отмен", re.IGNORECASE)
+
+_QUESTION_RE = re.compile(
+    r"^\s*(?:что|кто|как|почему|зачем|где|когда|сколько|какой|какая|какие|"
+    r"what|who|how|why|where|when|which|is|are|can you explain)\b|\?\s*$",
+    re.IGNORECASE,
+)
+
+_IMPERATIVE_RE = re.compile(
+    r"найди|запусти|выполни|созда|запиш|измени|прочита|открой|проверь|"
+    r"установ|скачай|сгенер|исправ|почини|удали|отправ|подключ|"
+    r"search|find|run|execute|create|write|edit|read|open|build|install|fix|delete|send",
+    re.IGNORECASE,
+)
+
+_OPERATION_RE = re.compile(
+    r"найди|найти|поиск|запусти|запустить|выполни|выполнить|созда|создать|"
+    r"запиш|записать|измени|изменить|прочита|прочитать|открой|открыть|"
+    r"проверь|проверить|установ|скачай|скачать|сгенер|сгенерир|"
+    r"исправ|почини|удали|отправ|подключ|search|find|run|execute|create|"
+    r"write|edit|read|open|check|build|test|install|fix|delete|send",
+    re.IGNORECASE,
+)
 
 
 @dataclass
@@ -10,58 +64,155 @@ class VerificationResult:
     status: str
     ok: bool
     summary: str
-    evidence: list[dict]
-    unresolved: list[str]
+    evidence: list[dict] = field(default_factory=list)
+    unresolved: list[str] = field(default_factory=list)
 
     def as_dict(self) -> dict:
-        return asdict(self)
+        return {
+            "status": self.status,
+            "ok": self.ok,
+            "summary": self.summary,
+            "evidence": list(self.evidence),
+            "unresolved": list(self.unresolved),
+        }
 
 
-def verify(goal: str, answer: str, state, cancelled: bool = False) -> VerificationResult:
-    """Evaluate completion from execution evidence, never response length alone."""
-    snapshot = state.snapshot() if hasattr(state, "snapshot") else dict(state or {})
-    stats = snapshot.get("tool_stats") or {}
-    successes = stats.get("ok") or {}
-    failures = stats.get("failed") or {}
-    observations = list(snapshot.get("observations") or [])
-    sources = list(snapshot.get("sources") or [])
-    evidence = [item for item in observations if item.get("ok")]
-    unresolved = []
-    low = str(goal or "").lower()
-    answer_ok = bool(str(answer or "").strip())
+def _ok(item) -> bool:
+    return bool(item.get("ok", True)) if isinstance(item, dict) else bool(
+        getattr(item, "ok", True))
+
+
+def _failure_text(item) -> str:
+    if isinstance(item, dict):
+        text = str(item.get("summary") or item.get("error")
+                   or item.get("message") or "").strip()
+        return text or str(item.get("command") or "").strip()
+    parts = [str(getattr(item, "summary", "") or ""),
+             str(getattr(item, "error", "") or "")]
+    data = getattr(item, "data", None)
+    if isinstance(data, dict):
+        parts.append(str(data.get("error") or ""))
+    return " ".join(part for part in parts if part).strip()
+
+
+def _evidence_text(item) -> str:
+    if not _ok(item):
+        return _failure_text(item)
+    if isinstance(item, dict):
+        return str(item.get("summary") or "")
+    return str(getattr(item, "summary", "") or "")
+
+
+def _failure_needs_user(item) -> bool:
+    kind = ""
+    if isinstance(item, dict):
+        kind = str(item.get("error_type") or item.get("type") or "").lower()
+    else:
+        data = getattr(item, "data", None)
+        if isinstance(data, dict):
+            kind = str(data.get("error_type") or data.get("type") or "").lower()
+    if kind in {"requires_user_action", "permission_denied", "unauthorized",
+                "not_configured", "cancelled", "cancelled_by_user"}:
+        return True
+    text = _failure_text(item)
+    return bool(text and _NEEDS_USER_RE.search(text))
+
+
+def verify(goal: str, answer: str, state, plan=None, error: str = "",
+           cancelled: bool = False) -> VerificationResult:
+    observations = list(getattr(state, "observations", []) or [])
+    evidence = list(observations)
+    # A failed attempt that was retried successfully is not an unresolved
+    # failure.  Only the latest observation for each tool decides its status.
+    latest_by_tool: dict[str, object] = {}
+    for item in observations:
+        name = str((item.get("tool") if isinstance(item, dict)
+                    else getattr(item, "tool", "")) or "")
+        latest_by_tool[name] = item
+    failures = [item for item in latest_by_tool.values() if not _ok(item)]
+    media = list(getattr(state, "media", []) or [])
+    answer = str(answer or "").strip()
+    error = str(error or "").strip()
+    status = str(getattr(state, "status", "ok") or "ok")
+    needs_user = any(_failure_needs_user(item) for item in failures)
+    cancelled = cancelled or bool(getattr(state, "cancelled", False)) \
+        or status == "cancelled" or bool(_CANCELLED_RE.search(error))
+    goal_text = str(goal or "")
+    operation = bool(_OPERATION_RE.search(goal_text))
+    if _QUESTION_RE.search(goal_text) and not _IMPERATIVE_RE.search(goal_text):
+        # «Что такое test?» is a question, not an instruction to run tests.
+        operation = False
+    substantive = bool(answer) or bool(evidence) or bool(media)
 
     if cancelled:
-        return VerificationResult("cancelled", False, "Задача отменена пользователем", evidence, [])
-    if snapshot.get("status") == "error":
-        return VerificationResult("failed", False, snapshot.get("error") or "Выполнение завершилось ошибкой", evidence,
-                                  [snapshot.get("error") or "runtime error"])
+        return VerificationResult(
+            "cancelled", False,
+            "Задача отменена пользователем; незавершённые шаги не считаются выполненными.",
+            evidence[-8:], ["задача отменена до получения результата"],
+        )
 
-    operation = bool(re.search(r"созда|измени|исправ|удали|запусти|подключ|отправ|commit|push|fix|write|create", low))
-    coding = bool(re.search(r"код|репозитор|repository|bug|ошиб|исправ|test|тест|fix", low))
-    research = bool(re.search(r"найди|поиск|research|источник|актуаль|новост", low))
-    tests_seen = any(item.get("ok") and re.search(
-        r"pytest|npm test|unittest|test(s)?\b|py_compile|check",
-        str(item.get("command") or item.get("summary") or ""), re.I)
-        for item in observations)
-    if operation and not successes:
-        unresolved.append("Нет успешного инструментального подтверждения запрошенной операции")
-    if coding and operation and successes and not tests_seen:
-        unresolved.append("Изменения не подтверждены запуском подходящей проверки")
-    if research and not (sources or evidence):
-        unresolved.append("Нет полученных источников или результатов исследования")
+    if needs_user:
+        unresolved = [(_failure_text(item) or "инструмент недоступен")[:300]
+                      for item in failures if _failure_needs_user(item)]
+        return VerificationResult(
+            "requires_user_action", False,
+            "Нужно действие пользователя: " + (unresolved[0] if unresolved else
+                                                "подключите или разрешите инструмент."),
+            evidence[-8:], unresolved[-5:] or ["нет разрешения на нужный инструмент"],
+        )
+
     if failures:
-        failed_total = sum(int(v or 0) for v in failures.values())
-        successful_total = sum(int(v or 0) for v in successes.values())
-        if failed_total and not successful_total:
-            unresolved.append("Все инструментальные попытки завершились ошибкой")
-    if not answer_ok:
-        unresolved.append("Нет итогового ответа")
+        unresolved = [(_failure_text(item) or "инструмент завершился ошибкой")[:300]
+                      for item in failures]
+        if answer:
+            return VerificationResult(
+                "partially_completed", False,
+                "Ответ получен, но часть действий завершилась ошибкой; см. журнал.",
+                evidence[-8:], unresolved[-5:],
+            )
+        return VerificationResult(
+            "failed", False,
+            "Задача не выполнена: " + unresolved[0], evidence[-8:], unresolved[-5:],
+        )
 
-    if unresolved:
-        needs_user = any(re.search(r"пользователь|разрешени|permission|credential|token|401|403",
-                                   str(item.get("summary") or ""), re.I)
-                         for item in observations if not item.get("ok"))
-        status = ("requires_user_action" if needs_user else
-                  "partially_completed" if (answer_ok and (evidence or successes or sources)) else "failed")
-        return VerificationResult(status, False, "; ".join(unresolved), evidence[-8:], unresolved)
-    return VerificationResult("completed", True, "Цель подтверждена результатами выполнения", evidence[-8:], [])
+    if error or status == "error":
+        return VerificationResult(
+            "failed", False,
+            "Задача не выполнена: " + (error or "неизвестная ошибка."),
+            evidence[-8:], [error] if error else ["нет ответа"],
+        )
+
+    # A bare "ok" from the model is not proof of an operation.  If the plan has
+    # unfinished tool steps, the honest outcome is partial.
+    pending_steps = []
+    for item in plan or []:
+        status_name = str(item.get("status") or "pending")
+        if str(item.get("id") or "") in {"verify", "context", "crosscheck"}:
+            continue            # reason-only steps are closed by verification
+        if status_name not in {"completed", "skipped"}:
+            pending_steps.append(str(item.get("title") or item.get("id") or "шаг"))
+
+    if operation and not evidence and not media:
+        # The user asked to do something, but the turn produced no observable
+        # tool result.  Do not paint a green «выполнено» over a plain answer.
+        return VerificationResult(
+            "failed", False,
+            "Задача не выполнена: нет инструментального подтверждения действия.",
+            evidence[-8:], ["действие не подтверждено наблюдением"],
+        )
+
+    if not substantive:
+        return VerificationResult(
+            "failed", False, "Модель не вернула ни результата, ни наблюдений.",
+            evidence[-8:], ["пустой ответ"],
+        )
+
+    summary = "Задача выполнена; результат опирается на наблюдения." if evidence else \
+        "Задача выполнена; ответ сформирован без вызовов инструментов."
+    if pending_steps and operation:
+        return VerificationResult(
+            "partially_completed", False,
+            "Получен полезный результат, но не все шаги плана были выполнены.",
+            evidence[-8:], [f"не выполнено: {title}" for title in pending_steps[-5:]],
+        )
+    return VerificationResult("completed", True, summary, evidence[-8:], [])

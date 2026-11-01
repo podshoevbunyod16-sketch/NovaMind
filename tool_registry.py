@@ -73,16 +73,26 @@ MAX_RESULT_CHARS = max(1000, int(os.getenv("AGENT_TOOL_RESULT_CHARS", "20000")))
 
 
 def _limit_result(value: dict) -> dict:
-    """Bound persisted/model-visible results without changing structured errors."""
+    """Bound persisted/model-visible results without changing structured errors.
+
+    ``artifact`` is engine-internal (search hits/page text) and must survive the
+    truncation that applies to the model-visible ``result``; otherwise forced
+    search would lose the results it just fetched.
+    """
     import json
+    artifact = value.get("artifact")
+    probe = {key: item for key, item in value.items() if key != "artifact"}
     try:
-        raw = json.dumps(value, ensure_ascii=False, default=str)
+        raw = json.dumps(probe, ensure_ascii=False, default=str)
     except Exception:
         return value
     if len(raw) <= MAX_RESULT_CHARS:
         return value
-    return {"ok": bool(value.get("ok")), "tool": value.get("tool"),
-            "result": raw[:MAX_RESULT_CHARS] + "…", "truncated": True}
+    limited = {"ok": bool(value.get("ok")), "tool": value.get("tool"),
+               "result": raw[:MAX_RESULT_CHARS] + "…", "truncated": True}
+    if artifact is not None:
+        limited["artifact"] = artifact
+    return limited
 
 
 def validate_arguments(schema: Mapping[str, Any], arguments: Any) -> list[str]:
@@ -385,6 +395,7 @@ def execute_unified(tool_id: str, arguments: dict[str, Any] | None = None) -> di
     if str(tool_id).startswith("mcp:"):
         _prefix, server_id, name = str(tool_id).split(":", 2)
         import mcp_registry
+        import core.limits as limits
         meta = next((item for item in unified_catalog(include_unavailable=True)
                      if item.get("id") == tool_id), None)
         if not meta or not meta.get("available"):
@@ -396,6 +407,7 @@ def execute_unified(tool_id: str, arguments: dict[str, Any] | None = None) -> di
                     "error": {"type": "schema_validation", "message": "; ".join(errors),
                               "details": errors, "retryable": True}}
         try:
+            limits.consume_search(name)
             return _limit_result({"ok": True, "tool": tool_id,
                     "result": mcp_registry.call_tool(server_id, name, arguments)})
         except Exception as exc:
@@ -421,6 +433,67 @@ class RuntimeToolRegistry:
     def __init__(self, tools: Mapping[str, Any], cancel=None):
         self.tools = dict(tools or {})
         self.cancel = cancel
+        try:
+            import core.limits as limits
+            # Reuse the request/run budget created by NovaToolsContext; create
+            # one only for direct CLI/tests that have no agent context.
+            self.search_budget = limits.current_search_budget()
+        except Exception:  # noqa: BLE001
+            self.search_budget = None
+
+    def spec_for(self, tool_id: str):
+        """Return the built-in schema for an adapter (terminal → shell etc.)."""
+        bootstrap_default_tools()
+        tool = self.resolve(tool_id)
+        if tool is None:
+            return get_tool(str(tool_id))
+        canonical = str(getattr(tool, "tag", tool_id) or tool_id)
+        return get_tool({"terminal": "shell"}.get(canonical, canonical))
+
+    def validate(self, tool_id: str, arguments: Any) -> list[str]:
+        spec = self.spec_for(tool_id)
+        if spec is None:
+            return []
+        return validate_arguments(spec.schema, arguments)
+
+    def _guard(self, tool_id: str, arguments: Any) -> dict | None:
+        """Guardrails + capability token for callers outside Agent Core.
+
+        ``Agent._run_tool`` already ran both checks (and needs to do so before
+        the confirmation hook), so it passes ``already_guarded=True`` here.
+        Engine-owned helpers call with ``False`` and get exactly the same gate.
+        """
+        try:
+            import guardrails
+            verdict = guardrails.guard_tool_call(tool_id, arguments)
+            if not verdict.allowed:
+                return {"ok": False, "tool": tool_id,
+                        "error": {"type": "guardrail", "message": "Вызов заблокирован правилами безопасности",
+                                  "reasons": list(verdict.reasons), "retryable": False}}
+        except ImportError:
+            pass
+        except Exception:  # noqa: BLE001 — guardrails must not break execution
+            log.warning("guardrail check failed", exc_info=True)
+        try:
+            import capabilities
+            denied = capabilities.require(tool_id, arguments)
+            if denied:
+                return denied
+        except ImportError:
+            pass
+        except Exception:  # noqa: BLE001
+            log.warning("capability check failed", exc_info=True)
+        return None
+
+    @staticmethod
+    def _artifact(tool) -> dict:
+        """Structured facts adapters expose to the engine (not model-facing)."""
+        artifact = {}
+        for attr in ("last_results", "last_meta", "last_text", "last_error",
+                     "last_result", "last_model", "last_errors"):
+            if hasattr(tool, attr):
+                artifact[attr] = getattr(tool, attr)
+        return artifact
 
     def resolve(self, tool_id: str):
         tool = self.tools.get(tool_id)
@@ -461,31 +534,97 @@ class RuntimeToolRegistry:
                     items.append(item)
         return items
 
-    def execute_legacy(self, tool_id: str, payload: str, saved_path: str = "") -> dict:
+    def execute(self, tool_id: str, payload: str = "", *,
+                arguments: dict | None = None, saved_path: str = "",
+                already_guarded: bool = False) -> dict:
+        """The single execution gateway for every adapter and dynamic tool.
+
+        ``Agent._run_tool``, native tool calls and engine-owned helpers (forced
+        search, page reads, offline terminal, media) all end here.  Adapters keep
+        their legacy parsing, but cannot be reached without cancellation,
+        schema/guardrail/capability checks and a bounded timeout.
+        """
+        tool_id = str(tool_id or "").strip()
         if self.cancel is not None and self.cancel.is_set():
             return {"ok": False, "tool": tool_id,
                     "error": {"type": "cancelled", "message": "Tool call cancelled", "retryable": False}}
-        if str(tool_id).startswith("mcp:"):
+        if tool_id.startswith("mcp:"):
             import json
-            try:
-                arguments = json.loads(str(payload or "{}"))
-            except ValueError as exc:
+            if arguments is None:
+                try:
+                    arguments = json.loads(str(payload or "{}"))
+                except ValueError as exc:
+                    return {"ok": False, "tool": tool_id,
+                            "error": {"type": "schema_validation", "message": str(exc), "retryable": True}}
+            if not isinstance(arguments, dict):
                 return {"ok": False, "tool": tool_id,
-                        "error": {"type": "schema_validation", "message": str(exc), "retryable": True}}
+                        "error": {"type": "schema_validation", "message": "arguments must be an object",
+                                  "retryable": True}}
+            if not already_guarded:
+                denied = self._guard(tool_id, arguments)
+                if denied:
+                    return denied
             return execute_unified(tool_id, arguments)
+        if tool_id.startswith("skill:"):
+            return execute_unified(tool_id, arguments or {})
+
         tool = self.resolve(tool_id)
         if tool is None or not callable(getattr(tool, "execute", None)):
             return {"ok": False, "tool": tool_id,
-                    "error": {"type": "unknown_tool", "message": f"Unknown tool: {tool_id}", "retryable": False}}
+                    "error": {"type": "unknown_tool", "message": f"Unknown tool: {tool_id}",
+                              "retryable": False}}
+        canonical = str(getattr(tool, "tag", tool_id) or tool_id)
+        if arguments is not None:
+            errors = self.validate(canonical, arguments)
+            if errors:
+                return {"ok": False, "tool": canonical,
+                        "error": {"type": "schema_validation", "message": "; ".join(errors),
+                                  "details": errors, "retryable": True}}
+            # Adapters accept their text payload, not the structured object.
+            import json
+            payload = json.dumps(arguments, ensure_ascii=False)
+        if not already_guarded:
+            denied = self._guard(canonical, arguments if arguments is not None else payload)
+            if denied:
+                return denied
+
+        spec = self.spec_for(canonical)
+        timeout = float(getattr(spec, "timeout", 30) or 30)
+        started = time.monotonic()
         try:
             tool.saved_path = saved_path
-            output = tool.execute(str(payload))
+            context = contextvars.copy_context()
+            pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="nova-adapter")
+            future = pool.submit(lambda: context.run(tool.execute, str(payload)))
+            try:
+                output = future.result(timeout=timeout)
+            except FutureTimeout:
+                future.cancel()
+                pool.shutdown(wait=False, cancel_futures=True)
+                return {"ok": False, "tool": canonical,
+                        "error": {"type": "timeout",
+                                  "message": f"Tool timed out after {timeout:g}s",
+                                  "retryable": True}}
+            finally:
+                pool.shutdown(wait=False, cancel_futures=True)
+            if self.cancel is not None and self.cancel.is_set():
+                return {"ok": False, "tool": canonical,
+                        "error": {"type": "cancelled", "message": "Tool call cancelled",
+                                  "retryable": False}}
             ok = not tool.execution_failure_check(output)
-            return _limit_result({"ok": ok, "tool": tool_id, "result": output})
+            return _limit_result({"ok": ok, "tool": canonical, "result": output,
+                                  "artifact": self._artifact(tool)})
         except Exception as exc:
-            return {"ok": False, "tool": tool_id,
+            return {"ok": False, "tool": canonical,
                     "error": {"type": type(exc).__name__, "message": str(exc),
                               "retryable": isinstance(exc, (TimeoutError, ConnectionError))}}
+        finally:
+            log.info("adapter=%s duration_ms=%d", canonical,
+                     int((time.monotonic() - started) * 1000))
+
+    def execute_legacy(self, tool_id: str, payload: str, saved_path: str = "") -> dict:
+        """Backward-compatible alias; all checks live in :meth:`execute`."""
+        return self.execute(tool_id, payload, saved_path=saved_path)
 
 
 def execute_parallel(calls: list[dict[str, Any]], max_workers: int = 4) -> list[dict[str, Any]]:
@@ -751,6 +890,8 @@ def _register_agent_tools():
                 return {"ok": False, "error": {"type": "bad_arguments",
                                                "message": "нужны server_id и tool",
                                                "retryable": False}}
+            import core.limits as limits
+            limits.consume_search(str(tool))
             result = mcp_registry.call_tool(str(server_id), str(tool), arguments or {})
             if isinstance(result, dict) and result.get("error"):
                 return {"ok": False, "result": result,

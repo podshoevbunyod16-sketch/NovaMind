@@ -819,6 +819,9 @@ function createAssistantTurn(options = {}) {
   let answerText = '';
   let sourcesData = [];
   const mediaData = [];
+  // План хода: статусы сохраняются вместе с сообщением, чтобы после
+  // перезагрузки не показывать «красивый», но выдуманный прогресс.
+  let planData = [];
   // «Что делал агент»: шаги и команды этого хода — переживают перезагрузку.
   const traceData = [];
   let finished = false;
@@ -942,15 +945,27 @@ function createAssistantTurn(options = {}) {
         stage.insertBefore(box, stepsEl);
       }
       if (Array.isArray(event.steps) && event.steps.length) {
-        const done = Number.isFinite(event.done) ? event.done
-          : event.steps.filter((step) => step.status === 'done').length;
-        const total = event.total || event.steps.length;
+        const normalize = (status) => ({
+          completed: 'done', done: 'done',
+          in_progress: 'doing', doing: 'doing', started: 'doing',
+          failed: 'failed', cancelled: 'failed',
+          skipped: 'skipped', pending: 'todo',
+        }[status] || 'todo');
+        const icons = { done: '✔', doing: '◔', failed: '✕', skipped: '–', todo: '•' };
+        const steps = event.steps.map((step) => ({
+          text: typeof step === 'string' ? step : (step.text || step.title || ''),
+          status: normalize(typeof step === 'string' ? 'todo' : step.status),
+        }));
+        planData = steps;
+        const done = steps.filter((step) => step.status === 'done').length;
+        const failed = steps.filter((step) => step.status === 'failed').length;
+        const total = event.total || steps.length;
         box.innerHTML = `
-          <span class="stage-plan-label">План · ${done}/${total}</span>
+          <span class="stage-plan-label">План · ${done}/${total}${failed ? ` · ошибок: ${failed}` : ''}</span>
           <ul class="stage-plan-steps">
-            ${event.steps.map((step) => `
-              <li class="is-${escapeHtml(step.status || 'todo')}">
-                <span class="stage-plan-check">${step.status === 'done' ? '✔' : '•'}</span>
+            ${steps.map((step) => `
+              <li class="is-${step.status}">
+                <span class="stage-plan-check">${icons[step.status]}</span>
                 ${escapeHtml(step.text || '')}
               </li>`).join('')}
           </ul>`;
@@ -1530,6 +1545,15 @@ function createAssistantTurn(options = {}) {
       }
 
       const seconds = ((Date.now() - startedAt) / 1000).toFixed(1);
+      const OUTCOME_LABELS = {
+        completed: 'выполнено',
+        partially_completed: 'выполнено частично',
+        failed: 'не выполнено',
+        cancelled: 'отменено',
+        requires_user_action: 'нужно действие пользователя',
+      };
+      const taskStatus = meta.taskStatus
+        || (meta.stopped ? 'cancelled' : (meta.verification?.status || ''));
       const bits = [];
       if (meta.model) bits.push(`модель: ${escapeHtml(meta.model)}`);
       if (meta.provider) bits.push(escapeHtml(meta.provider));
@@ -1537,14 +1561,28 @@ function createAssistantTurn(options = {}) {
       if (meta.searched) bits.push('с поиском');
       if (meta.agent || meta.linux) bits.push('Linux');
       if (meta.steps) bits.push(`шагов: ${meta.steps}`);
+      if (taskStatus && OUTCOME_LABELS[taskStatus]) {
+        bits.unshift(`состояние: ${OUTCOME_LABELS[taskStatus]}`);
+      }
       if (meta.usage && meta.usage.total_tokens) {
         bits.push(`токенов: ${formatTokens(meta.usage.total_tokens)}`
           + ` (${formatCost(meta.usage.cost_known === false ? null : meta.usage.cost_usd)})`);
       }
-      if (meta.stopped) bits.push('остановлено');
+      if (meta.stopped && taskStatus !== 'cancelled') bits.push('остановлено');
       if (sourcesData.length) bits.push(`источников: ${sourcesData.length}`);
       bits.push(`${seconds} c`);
       metaEl.innerHTML = `<span>${bits.join(' · ')}</span>`;
+      if (taskStatus) {
+        wrap.dataset.taskStatus = taskStatus;
+        let chip = bubble.querySelector('.turn-outcome');
+        if (!chip) {
+          chip = document.createElement('div');
+          chip.className = 'turn-outcome';
+          bubble.appendChild(chip);
+        }
+        chip.className = `turn-outcome is-${taskStatus}`;
+        chip.textContent = OUTCOME_LABELS[taskStatus] || taskStatus;
+      }
 
       actionsEl.innerHTML = `
         <button type="button" data-act="copy" title="Скопировать ответ">📋 Копировать</button>
@@ -1572,6 +1610,8 @@ function createAssistantTurn(options = {}) {
           sources: sourcesData.slice(0, 12),
           media: mediaData.length ? mediaData.slice(0, 6) : undefined,
           model: meta.model || null,
+          task_status: taskStatus || null,
+          plan: planData.length ? planData.slice(0, 30) : undefined,
           elapsed_ms: Date.now() - startedAt,
           reasoning: reasoningText || null,
           trace: traceData.length ? traceData.slice(0, 60) : undefined,
@@ -1587,7 +1627,9 @@ function createAssistantTurn(options = {}) {
     },
 
     fail(message) {
+      if (finished) return;
       finished = true;
+      wrap.dataset.taskStatus = 'failed';
       api.collapseStage();
       stage.classList.add('lg-hidden');
       api.finishTerm();
@@ -2177,6 +2219,29 @@ function appendMessage(role, content, meta = null) {
   const traceSteps = isAI && Array.isArray(meta?.trace) ? meta.trace : [];
   const traceHtml = (traceSteps.length || meta?.reasoning)
     ? agentTraceHtml(traceSteps, meta?.reasoning) : '';
+  const savedPlan = isAI && Array.isArray(meta?.plan) ? meta.plan : [];
+  const planIcons = { done: '✔', doing: '◔', failed: '✕', skipped: '–', todo: '•' };
+  const savedPlanDone = savedPlan.filter((step) => step.status === 'done').length;
+  const savedPlanHtml = savedPlan.length ? `
+    <div class="stage-plan">
+      <span class="stage-plan-label">План · ${savedPlanDone}/${savedPlan.length}</span>
+      <ul class="stage-plan-steps">
+        ${savedPlan.map((step) => `<li class="is-${escapeHtml(step.status || 'todo')}">
+          <span class="stage-plan-check">${planIcons[step.status] || '•'}</span>
+          ${escapeHtml(step.text || '')}
+        </li>`).join('')}
+      </ul>
+    </div>` : '';
+  const savedStatus = isAI && meta?.task_status ? String(meta.task_status) : '';
+  const savedStatusLabels = {
+    completed: 'выполнено', partially_completed: 'выполнено частично',
+    failed: 'не выполнено', cancelled: 'отменено',
+    requires_user_action: 'нужно действие пользователя',
+  };
+  const savedStatusHtml = savedStatus
+    ? `<div class="turn-outcome is-${escapeHtml(savedStatus)}">${escapeHtml(savedStatusLabels[savedStatus] || savedStatus)}</div>`
+    : '';
+  if (savedStatus) wrap.dataset.taskStatus = savedStatus;
   const sources = Array.isArray(meta?.sources) ? meta.sources.filter((s) => s && s.url) : [];
   const sourcesHtml = sources.length ? `
     <div class="sources min">
@@ -2191,7 +2256,9 @@ function appendMessage(role, content, meta = null) {
       <div class="msg-bubble">
         ${mediaHtml}
         ${traceHtml}
+        ${savedPlanHtml}
         <div class="answer">${formatted}${imageHtml}</div>
+        ${savedStatusHtml}
         ${sourcesHtml}
       </div>
       ${isAI && meta?.model ? `<div class="msg-meta"><span>модель: ${escapeHtml(String(meta.model))}${meta.elapsed_ms ? ' · ' + (meta.elapsed_ms / 1000).toFixed(1) + ' c' : ''}</span></div>` : ''}

@@ -446,3 +446,37 @@ MCP и медиа, а `_run_direct()` делает **один** запрос к 
 `git revert` мержа либо возврат к коммиту `ae02cb1`: старый движок жил целиком
 в `routes/agent.py`, а новые таблицы (`agent_runs`, `agent_run_steps`)
 создаются с `CREATE TABLE IF NOT EXISTS` и старому коду не мешают.
+
+
+---
+
+## 2.1. Уточнения контракта исполнения (2026-10-31)
+
+2.1 не меняет архитектуру 2.0, а закрывает пути, которые обходили её гарантии.
+
+### Один execution gateway
+
+`agenticseek`-адаптеры больше не вызываются напрямую ни из Agent Core, ни из
+движка:
+
+* `RuntimeToolRegistry.execute(tool_id, payload, arguments=..., saved_path=...)`
+  — отмена, adapter lookup, schema-validation, guardrails, capability-token,
+  timeout, нормализованная ошибка и `artifact`;
+* `execute_legacy()` — совместимый alias;
+* форсированный поиск, чтение страниц, офлайн-терминал и медиа используют
+  `AgentEngine._invoke_tool()` → registry; `via="direct"` остаётся только
+  аварийным fallback для тестов/незарегистрированных адаптеров.
+
+### Бюджет MCP-поиска
+
+`core.limits.SearchBudget` — mutable-объект в `ContextVar`, поэтому его видят
+все копии контекста и рабочие потоки одного запуска. `routes.agent.
+NovaToolsContext.call_mcp`, `tool_registry.execute_unified("mcp:…")` и
+builtin `mcp_call` расходуют один счётчик; четвёртый поиск отклоняется.
+
+### Итоговые состояния и план
+
+`core.events.TERMINAL_EVENTS` — единая карта пяти результатов. Событие
+`plan`/`plan_progress` несёт статусы; `tool_selected`/`tool_call_*` меняют
+ровно один релевантный шаг. `finalize_plan()` закрывает `verify` и помечает
+неиспользованные шаги `skipped`.

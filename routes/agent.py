@@ -797,6 +797,11 @@ class NovaToolsContext:
         # Run-wide MCP budget lives on the request context, not on a tool
         # instance: adaptive rounds may rebuild McpBridgeTool several times.
         self._mcp_search_calls = 0
+        try:
+            import core.limits as limits
+            self._search_budget = limits.bind_search_budget()
+        except Exception:  # noqa: BLE001
+            self._search_budget = None
         for kind in ("image", "audio", "video"):
             setattr(self, f"media_{kind}_available", self._media_ready(kind))
 
@@ -841,14 +846,13 @@ class NovaToolsContext:
     # ── действия ─────────────────────────────────────────────────────────
     def call_mcp(self, server_id: str, tool: str, arguments: dict):
         import mcp_registry
-        if "search" in str(tool or "").lower():
-            limit = max(1, min(int(os.getenv("MCP_MAX_SEARCH_CALLS", "3")), 10))
-            if self._mcp_search_calls >= limit:
-                raise mcp_registry.McpError(
-                    f"Достигнут лимит поисковых вызовов MCP за запуск (не более {limit})"
-                )
-            self._mcp_search_calls += 1
-        return mcp_registry.call_tool(server_id, tool, arguments)
+        import core.limits as limits
+        limits.consume_search(tool)
+        result = mcp_registry.call_tool(server_id, tool, arguments)
+        # The authoritative counter lives in the RunBudget (mcp_registry),
+        # shared with the tool registry; keep the attribute for diagnostics.
+        self._mcp_search_calls = limits.current_search_budget().used
+        return result
 
     def generate_media(self, kind: str, prompt: str, params: dict):
         """Генерация медиа: (result, model, errors), как у media_agent."""
@@ -1462,6 +1466,7 @@ def agent_stream():
                                  for violation in output_guards]},
             "stopped": state.status == "stopped",
             "task_status": engine.outcome_status,
+            "task_outcome": engine.outcome_status,
             "verification": engine.verification,
             "status": "stopped" if state.status == "stopped" else
                       ("error" if state.status == "error" else "ok"),

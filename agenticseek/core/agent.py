@@ -535,7 +535,8 @@ class Agent:
                 output = tool.execute(str(payload))
                 ok = not tool.execution_failure_check(output)
             else:
-                result = self.tool_registry.execute_legacy(tag, str(payload), saved)
+                result = self.tool_registry.execute(
+                    tag, str(payload), saved_path=saved, already_guarded=True)
                 ok = bool(result.get("ok"))
                 output = result.get("result")
                 if output is None:
@@ -633,10 +634,15 @@ class Agent:
         def run(index, call):
             error_text = str(call.get("arguments_error") or "")
             try:
-                import tool_registry
-                canonical = {"terminal": "shell"}.get(call.get("tool"), call.get("tool"))
-                spec = tool_registry.get_tool(canonical)
-                schema_errors = tool_registry.validate_arguments(spec.schema, call.get("arguments") or {}) if spec else []
+                if self.tool_registry is not None:
+                    schema_errors = self.tool_registry.validate(
+                        str(call.get("tool") or ""), call.get("arguments") or {})
+                else:
+                    import tool_registry
+                    canonical = {"terminal": "shell"}.get(call.get("tool"), call.get("tool"))
+                    spec = tool_registry.get_tool(canonical)
+                    schema_errors = (tool_registry.validate_arguments(
+                        spec.schema, call.get("arguments") or {}) if spec else [])
                 if schema_errors:
                     error_text = "; ".join(schema_errors)
             except Exception:

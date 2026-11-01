@@ -124,6 +124,8 @@ class BashTool(Tools):
     def __init__(self, timeout: float | None = None):
         super().__init__()
         self.timeout = max(1.0, timeout or DEFAULT_TIMEOUT)
+        self.last_result: dict = {}
+        self.last_output: str = ""
 
     def execute(self, payload: str) -> str:
         # Комментарии и пустые строки — не команды: песочница отвечала на них
@@ -154,6 +156,8 @@ class BashTool(Tools):
             if result.get("cancelled"):
                 return f"[failure] Команда отменена: {line[:200]}"
             text = ((result.get("stdout") or "") + (result.get("stderr") or "")).strip()
+            self.last_result = dict(result)
+            self.last_output = text
             if result["code"] != 0 or result.get("timed_out"):
                 return _failure(line, result, timeout, text)
             outputs.append(f"[success] {line[:200]}:\n{clip(text or '(нет вывода)', 3000)}")
