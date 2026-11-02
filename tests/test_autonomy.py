@@ -38,9 +38,9 @@ def test_github_sketch_url_inspects_repo_tree_instead_of_generating_image(
         if "/git/trees/main" in url:
             return _FakeHttpxResp(200, {
                 "tree": [
-                    {"path": "agenticseek", "type": "tree"},
-                    {"path": "agenticseek/engine.py", "type": "blob"},
-                    {"path": "agenticseek/router.py", "type": "blob"},
+                    {"path": "agent", "type": "tree"},
+                    {"path": "agent/loop.py", "type": "blob"},
+                    {"path": "agent/verification.py", "type": "blob"},
                     {"path": "routes", "type": "tree"},
                     {"path": "routes/agent.py", "type": "blob"},
                     {"path": "app.py", "type": "blob"},
@@ -57,7 +57,7 @@ def test_github_sketch_url_inspects_repo_tree_instead_of_generating_image(
         monkeypatch,
         [
             "```web_open\nhttps://github.com/podshoevbunyod16-sketch/NovaMind\n```",
-            "Структура репозитория NovaMind:\n├── agenticseek/\n├── routes/\n└── app.py",
+            "Структура репозитория NovaMind:\n├── agent/\n├── routes/\n└── app.py",
         ],
         seen,
     )
@@ -67,10 +67,10 @@ def test_github_sketch_url_inspects_repo_tree_instead_of_generating_image(
     assert events_of(events, "media") == []
     tools = events_of(events, "tool")
     assert len(tools) == 1 and tools[0]["name"] == "web_open"
-    assert "├── agenticseek/" in tools[0]["output"]
+    assert "├── agent/" in tools[0]["output"]
     assert "├── routes/" in tools[0]["output"]
     assert "└── app.py" in tools[0]["output"]
-    assert "agenticseek/" in answer_of(events)
+    assert "agent/" in answer_of(events)
 
 
 def test_read_page_formats_github_subpath_and_blob(monkeypatch):

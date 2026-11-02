@@ -320,8 +320,8 @@ _PROJECT_ANSWER = """**Офлайн-режим: языковой модели н
 **HTTP-слой (`routes/`)**
 `agent.py` — NDJSON-поток агента, `chat.py` — обычный чат и `/send_stream`, `terminal.py` — песочница Linux, `search.py` — поиск, `media.py` — медиа, `admin.py` — вход и настройки.
 
-**Движок агента (`agenticseek/`)**
-`engine.py` управляет ходом, `router.py` выбирает исполнителя, `timeline.py` формирует события таймлайна, `core/` — базовые агенты и цикл, `tools/` — терминал, Python, файлы, веб и MCP-мост, `providers/nova_provider.py` — адаптер к `ai_providers`, `prompts/base/` — русские промпты агентов.
+**ReAct-агент (`agent/`)**
+`loop.py` управляет циклом «модель → инструмент → наблюдение → ответ», `verification.py` помогает честно оценить результат, `workspace.py` изолирует рабочие каталоги, а `runtime.py` содержит общие правила работы с сессией и opt-in инструментов. `tool_registry.py` — единый каталог и точка запуска инструментов; `ai_providers.py` — единый слой моделей.
 
 **Фронтенд (`static/`, `templates/`)**
 `app.js` рисует чат и ответ, `linux.js` разбирает NDJSON-поток, `style.css` — оформление, остальные файлы — настройки, MCP, медиа, озвучка, аккордеоны.

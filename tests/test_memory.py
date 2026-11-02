@@ -179,8 +179,9 @@ def test_agent_remember_action_saves_and_blocks_secrets(google_client, sandbox, 
     assert saved and saved[0]["text"] == "Работаю над проектом NovaMind"
     assert all("123456" not in item["text"] for item in saved)
     tools = [event for event in events if event["type"] == "tool"]
-    assert tools[0]["name"] == "remember" and tools[0]["code"] == 0
-    assert tools[1]["name"] == "remember" and tools[1]["code"] == 1
+    assert tools[0]["name"] == "remember" and tools[0]["status"] == "ok"
+    assert tools[1]["name"] == "remember" and tools[1]["status"] == "error"
+    assert "пароль" in tools[1]["output"].lower()
     assert "Запомнил" in _answer(events)
 
 

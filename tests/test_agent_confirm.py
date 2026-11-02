@@ -3,14 +3,15 @@
 Опасный шаг агент не выполняет сам: в поток уходит событие ``confirm`` с точной
 командой, а ход ждёт ``POST /api/agent/confirm``. Нет ответа — отказ (fail
 closed). Уровни риска и правила «разрешить всегда» живут в
-:mod:`agenticseek.policy`.
+:mod:`agent.policy`.
 """
 import threading
 import time
 
 import pytest
 
-import agenticseek.policy as policy
+import database
+import agent.policy as policy
 import routes.agent as agent_routes
 from tests.agent_helpers import events_of, model_text, ndjson, script
 
@@ -180,34 +181,32 @@ def test_permissions_endpoint_shows_rules(admin_client):
 
 # ══════════════ в потоке агента ══════════════
 
-def test_dangerous_command_asks_and_runs_after_approval(admin_client, sandbox, monkeypatch):
+def test_dangerous_command_pauses_before_execution(admin_client, sandbox, monkeypatch):
     _mode(monkeypatch, "danger")
-    monkeypatch.setattr(policy, "await_confirmation", lambda record, timeout=None: True)
-    script(monkeypatch, ["```bash\ngit push origin main\n```", "Отправил"])
+    script(monkeypatch, ["```bash\ngit push origin main\n```"])
 
     events = ndjson(admin_client.post("/api/agent/stream",
                                       json={"message": "запусти git push origin main"}))
-    confirm = events_of(events, "confirm")[0]
-    assert confirm["tool"] == "terminal" and confirm["risk"] == "danger"
-    assert "git push origin main" in confirm["command"]
-    assert events_of(events, "confirm_result")[0]["approved"] is True
-    assert events_of(events, "tool")[0]["code"] in (0, 1)      # команда дошла до песочницы
+    confirmation = events_of(events, "confirmation")[0]
+    result = next(event for event in events if event["type"] == "result")
+    assert confirmation["tool"] == "shell" and confirmation["risk"] == "danger"
+    assert result["status"] == "paused"
+    assert events_of(events, "tool") == []  # ни команда, ни сеть не запускались
 
 
 def test_denied_command_is_not_executed(admin_client, sandbox, monkeypatch):
     _mode(monkeypatch, "danger")
-    monkeypatch.setattr(policy, "await_confirmation", lambda record, timeout=None: False)
     seen = []
-    script(monkeypatch, ["```bash\ngit push origin main\n```", "Не отправлял"], seen)
+    script(monkeypatch, ["```bash\ngit push origin main\n```"], seen)
 
     events = ndjson(admin_client.post("/api/agent/stream",
                                       json={"message": "запусти git push origin main"}))
-    assert events_of(events, "confirm_result")[0]["approved"] is False
+    run_id = next(event for event in events if event["type"] == "result")["run_id"]
+    denied = ndjson(admin_client.post("/api/agent/answer",
+                                      json={"run_id": run_id, "approved": False}))
+    assert "отклонено пользователем" in "".join(event.get("token", "") for event in denied).lower()
     assert events_of(events, "tool") == []
-    assert "запретил" in model_text(seen, -1).lower()
-    # Отказ объяснён: иначе «🚫 Запрещено» выглядело как поломка.
-    steps = [event.get("text", "") for event in events_of(events, "step")]
-    assert any("разрешение не получено" in step for step in steps)
+    assert database.get_agent_run(run_id)["status"] == "abandoned"
 
 
 def test_safe_actions_are_never_confirmed(admin_client, sandbox, monkeypatch):
@@ -229,7 +228,7 @@ def test_confirm_off_skips_the_question(admin_client, sandbox, monkeypatch):
     events = ndjson(admin_client.post("/api/agent/stream",
                                       json={"message": "запусти git push origin main"}))
     assert events_of(events, "confirm") == []
-    assert events_of(events, "tool")[0]["name"] == "terminal"
+    assert events_of(events, "tool")[0]["name"] == "shell"
 
 
 # ══════════════ блок bash из одних комментариев ══════════════

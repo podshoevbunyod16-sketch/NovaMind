@@ -9,8 +9,7 @@
   * статусы генерации медиа не доходили до интерфейса;
   * офлайн-«модель» отвечала заглушкой «вопрос принят и разобран».
 
-Действия модели оформляются блоками AgenticSeek (``agenticseek/core/agent.py``):
-```web_search``, ```bash``, ```image`` и так далее.
+Действия модели идут через first-party ReAct и общий реестр инструментов NovaMind.
 """
 import json
 
@@ -70,7 +69,7 @@ def test_status_reports_capabilities_without_login(client):
     assert status["enabled"] is True and status["available"] is True
     assert status["tools"] is False and status["guest"] is True
     assert status["search"] is True
-    assert status["engine"] == "agenticseek"
+    assert status["engine"] == "react"
     assert "TERMINAL_ENABLED" in status["workspace_hint"]
 
 
@@ -121,30 +120,30 @@ def test_linux_flag_is_true_only_after_workspace_action(admin_client, monkeypatc
     script(monkeypatch, ["```bash\npwd\n```", "Готово."])
     events = ndjson(admin_client.post("/api/agent/stream", json={"message": "запусти pwd"}))
     result = next(event for event in events if event["type"] == "result")
-    assert result["linux"] is True and "terminal" in result["tools"]
+    assert result["linux"] is True
+    assert any(tool.get("name") == "shell" for tool in events_of(events, "tool"))
 
 
 def test_git_command_runs_through_the_sandbox(admin_client, monkeypatch, sandbox):
     script(monkeypatch, ["```bash\ngit status --short\n```", "Проверил git."])
     events = ndjson(admin_client.post("/api/agent/stream", json={"message": "проверь git"}))
     tool = next(event for event in events if event["type"] == "tool")
-    assert tool["command"].startswith("git status")
-    result = next(event for event in events if event["type"] == "result")
-    assert "terminal" in result["tools"]
+    assert tool["name"] == "shell"
+    assert json.loads(tool["command"])["command"].startswith("git status")
+    output = json.loads(tool["output"])
+    assert output["exit_code"] == 128
+    assert "not a git repository" in output["stderr"]
 
 
 def test_workspace_tools_are_hidden_from_guest_prompt(client, sandbox, monkeypatch):
     seen = []
     script(monkeypatch, ["Ответ без файлов"], seen)
     ndjson(client.post("/api/agent/stream", json={"message": "что в папке?"}))
-    system = model_text(seen)
-    # В промпте есть примеры блоков, поэтому проверяем список инструментов
-    # запуска: у гостя нет файлов и терминала, но поиск и задачи остаются.
-    tools_block = system.split("ДОСТУПНЫЕ ИНСТРУМЕНТЫ", 1)[-1]
-    assert "```web_search" in tools_block
-    for hidden in ("```bash", "```python", "```file_finder"):
-        assert hidden not in tools_block
-    assert "Рабочая папка:" in system      # папка названа, но инструментов нет
+    assert seen
+    names = {item["function"]["name"] for item in (seen[0]["tools"] or [])}
+    assert "web_search" in names
+    assert not names.intersection({"shell", "file_read", "file_write", "file_edit",
+                                   "file_search", "file_tree"})
 
 
 # ══════════════ медиа ══════════════
@@ -186,14 +185,19 @@ def test_media_request_does_not_ask_the_model(client, sandbox, monkeypatch):
     _fake_generate(monkeypatch, {"kind": "image", "url": "/media/y.png"}, calls=calls)
     script(monkeypatch, ["этот ответ не должен использоваться"], seen)
     events = ndjson(client.post("/api/agent/stream", json={"message": "нарисуй закат"}))
-    assert seen == [] and calls and calls[0] == "нарисуй закат"
+    assert seen == [] and calls and calls[0] == "закат"
     assert answer_of(events).startswith("Готово")
 
 
 # ══════════════ совместимость: /send_stream с agent=true ══════════════
 
-def test_send_stream_can_delegate_to_agent(client, sandbox, monkeypatch, fake_search):
-    script(monkeypatch, ["```web_search\nкурс доллара\n```", "Курс найден."])
+def test_send_stream_can_delegate_to_react_agent(client, sandbox, monkeypatch, fake_search):
+    import ai_providers
+    answers = iter([
+        ('```json\n{"tool":"web_search","arguments":{"query":"курс доллара"}}\n```', {}),
+        ("Курс найден.", {"model": "mock"}),
+    ])
+    monkeypatch.setattr(ai_providers, "chat_completion", lambda *args, **kwargs: next(answers))
     events = ndjson(client.post("/send_stream", json={"message": "какой курс", "agent": True}))
     assert events_of(events, "tool")
     assert answer_of(events) == "Курс найден."

@@ -157,13 +157,14 @@ def test_ai_draws_picture_by_itself(google_client, monkeypatch, fake_media):
 
     events = ndjson(google_client.post("/api/agent/stream", json={"message": "нарисуй лису"}))
     assert len(fake_media) == 1 and fake_media[0]["kind"] == "image"
-    assert "нарисуй лису" in fake_media[0]["prompt"]
+    assert fake_media[0]["prompt"] == "лису"  # в генератор передаётся само описание, без команды
     assert seen == [], "явный медиа-запрос не зовёт модель"
     stage = next(event for event in events_of(events, "stage") if event["scene"] == "media")
     assert "медиа" in stage["title"].lower()
     media = events_of(events, "media")[0]["media"]
     assert media["url"] == "/media/image_1.png" and media["model_name"] == "Pollinations Flux"
-    assert not events_of(events, "tool")          # это не Linux
+    assert [event["name"] for event in events_of(events, "tool")] == ["image"]
+    assert events_of(events, "tool")[0]["status"] == "ok"  # генерация медиа, не запуск shell
     assert "Готово" in answer_of(events)
 
     result = next(event for event in events if event["type"] == "result")

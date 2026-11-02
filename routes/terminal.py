@@ -35,11 +35,14 @@ WORKSPACE = os.path.realpath(os.environ.get("TERMINAL_DIR") or os.path.join(ROOT
 
 
 def _ws():
-    """Рабочая папка ТЕКУЩЕГО пользователя.
-
-    Админ работает в общем корне WORKSPACE (старые файлы на месте), остальные -
-    каждый в своей WORKSPACE/users/<хэш>. Без запроса и без привязки - корень.
-    """
+    """Рабочая папка пользователя; для ReAct-хода может быть конкретной сессией."""
+    try:
+        from agent.workspace import current_workspace
+        active = current_workspace()
+        if active is not None:
+            return str(active)
+    except Exception:
+        pass
     return identity.current_workspace(WORKSPACE)
 
 COMMAND_TIMEOUT = float(os.getenv("TERMINAL_TIMEOUT", "20"))
@@ -559,6 +562,33 @@ def _run_nova(parts, timeout):
     return _result(2, "", f"nova: неизвестная команда «{verb}». Список: nova help")
 
 
+def _python_command(parts):
+    """Parse the deliberately small in-process CLI for registered NovaMind tools."""
+    import json
+    tokens = [str(item) for item in parts]
+    if len(tokens) < 4 or tokens[0] not in {"python", "python3"} \
+            or tokens[1:3] != ["-m", "novamind_cli"]:
+        return None
+    command = tokens[3:]
+    if command == ["tools"]:
+        return "__tools__", "{}"
+    if command == ["mcp", "tools"]:
+        return "__mcp_tools__", "{}"
+    if len(command) == 3 and command[0] == "call":
+        target, body = command[1], command[2]
+    elif len(command) == 3 and command[:2] == ["mcp", "call"]:
+        target, body = "mcp_call", command[2]
+    else:
+        raise ValueError("Ожидается tools, mcp tools, call <tool> '<JSON>' или mcp call '<JSON>'")
+    try:
+        payload = json.loads(body)
+    except (TypeError, ValueError) as error:
+        raise ValueError(f"invalid JSON: {error}") from error
+    if not isinstance(payload, dict):
+        raise ValueError("аргументы должны быть JSON-объектом")
+    return target, json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+
+
 def _run_python_gateway(parts):
     """Execute ``python3 -m novamind_cli ...`` through the real tool registry.
 
@@ -568,7 +598,6 @@ def _run_python_gateway(parts):
     process-shaped result: exit code, stdout and stderr.
     """
     import json
-    from agenticseek.tools.terminal_commands import _python_command
     import tool_registry
 
     try:
@@ -762,10 +791,54 @@ def run_command(command, timeout=None, cancel=None):
     }
 
 
-def run_agent(command, timeout=12, cancel=None):
-    """Запуск команды агентом: короче таймаут, всегда с префиксом ошибки."""
+def _agent_server_guard(command):
+    """Reject common long-lived server launches; direct users to in-process smoke tests."""
     try:
-        return run_command(command, timeout=timeout, cancel=cancel)
+        prepared, _redirects = check_command(command)
+    except ValueError:
+        return ""
+    if not prepared:
+        return ""
+    argv, program = prepared[0]
+    if program in {"python", "python3"} and "-m" in argv:
+        module_index = argv.index("-m") + 1
+        if module_index < len(argv) and argv[module_index] in {"http.server", "uvicorn", "gunicorn"}:
+            return "Запуск сервера из агента запрещён: используйте Flask test_client или отдельный deploy-процесс."
+    if program not in {"python", "python3"}:
+        return ""
+    script = next((part for part in argv[1:] if not part.startswith("-")), "")
+    if not script or not script.endswith(".py"):
+        return ""
+    try:
+        with open(safe_path(script), "r", encoding="utf-8", errors="replace") as handle:
+            source = handle.read(200_000)
+    except (OSError, ValueError):
+        return ""
+    if re.search(r"(?m)\b(?:app|application)\s*\.\s*run\s*\(|\bserve_forever\s*\(", source):
+        return "Запуск веб-сервера из агента запрещён: используйте Flask test_client для smoke-проверок."
+    return ""
+
+
+def _agent_timeout(command, requested):
+    """Give explicit package/bootstrap operations more room, with a hard ceiling."""
+    try:
+        prepared, _redirects = check_command(command)
+    except ValueError:
+        return max(0.1, min(float(requested or 12), 120.0))
+    words = [part.lower() for argv, _program in prepared for part in argv]
+    slow = ((words and words[0] in {"pip", "pip3"} and "install" in words)
+            or ("-m" in words and "venv" in words))
+    cap = 120.0 if slow else 45.0
+    return max(float(requested or 12), min(cap, 120.0))
+
+
+def run_agent(command, timeout=12, cancel=None):
+    """Run one policy-checked workspace command with bounded time and honest errors."""
+    try:
+        server_error = _agent_server_guard(command)
+        if server_error:
+            raise ValueError(server_error)
+        return run_command(command, timeout=_agent_timeout(command, timeout), cancel=cancel)
     except (ValueError, RuntimeError) as exc:
         return {"code": 2, "stdout": "", "stderr": str(exc), "duration_ms": 0,
                 "timed_out": False, "cancelled": False}

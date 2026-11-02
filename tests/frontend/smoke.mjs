@@ -216,6 +216,11 @@ const mock = {
   agentStream: AGENT_STREAM,
   agentStatus: 200,
   agentRequests: [],
+  reactAnswers: [],
+  reactFinishes: [],
+  answerStream: [],
+  continueStream: [],
+  stopCurrentAgent: null,
   confirmRequests: [],
   sendStreamCalls: 0,
   sessionLogins: [],
@@ -271,6 +276,7 @@ function streamResponse(events) {
   return {
     ok: true,
     status: 200,
+    headers: { get: (name) => name.toLowerCase() === 'x-agent-run-id' ? 'smoke-run-1' : null },
     mimetype: 'application/x-ndjson',
     body: {
       getReader() {
@@ -451,7 +457,20 @@ const dom = new JSDOM(html, {
           : { enabled: false, tools: false, available: false, max_steps: 8,
               hint: 'Linux-окружение выключено: добавьте TERMINAL_ENABLED=1 в .env и перезапустите сервер' });
       }
-      if (path.startsWith('/api/agent/stream')) {
+      if (path.startsWith('/api/agent/answer')) {
+        mock.reactAnswers.push(JSON.parse(options.body || '{}'));
+        return streamResponse(mock.continueStream);
+      }
+      if (path.startsWith('/api/agent/finish')) {
+        const payload = JSON.parse(options.body || '{}');
+        mock.reactFinishes.push(payload);
+        return payload.outcome === 'continued' ? streamResponse(mock.continueStream) : json({ ok: true });
+      }
+      if (path.startsWith('/api/agent/react/stop')) {
+        mock.stopCurrentAgent?.();
+        return json({ ok: true, stopping: true });
+      }
+      if (path.startsWith('/api/agent/react')) {
         mock.agentRequests.push(JSON.parse(options.body || '{}'));
         if (mock.agentStatus !== 200) {
           return { ok: false, status: mock.agentStatus, async json() { return { error: 'выключено' }; },
@@ -1491,15 +1510,35 @@ mock.agentStatus = 200;
 await window.Linux.loadStatus();
 
 // «Стоп» останавливает и работу в Linux
-const hangingAgent = (signal) => ({
-  ok: true, status: 200,
-  body: { getReader: () => ({ read: () => new Promise((_, reject) => {
-    signal?.addEventListener('abort', () => { const e = new Error('aborted'); e.name = 'AbortError'; reject(e); }, { once: true });
-  }) }) },
-});
+const hangingAgent = (signal) => {
+  let release;
+  const encoder = new TextEncoder();
+  const stopped = [
+    { type: 'token', token: 'Работа остановлена по запросу пользователя. Остальное не выполнено.' },
+    { type: 'result', reply: 'Работа остановлена по запросу пользователя. Остальное не выполнено.', status: 'cancelled' },
+    { type: 'completion', run_id: 'smoke-run-1', buttons: ['Готово', 'Продолжай работать'] },
+    { type: 'done' },
+  ].map((event) => JSON.stringify(event)).join('\n') + '\n';
+  let sent = false;
+  return {
+    ok: true, status: 200,
+    headers: { get: (name) => name.toLowerCase() === 'x-agent-run-id' ? 'smoke-run-1' : null },
+    body: { getReader: () => ({
+      read: () => {
+        if (sent) return Promise.resolve({ done: true, value: undefined });
+        return new Promise((resolve, reject) => {
+          release = () => { sent = true; resolve({ done: false, value: encoder.encode(stopped) }); };
+          mock.stopCurrentAgent = release;
+          signal?.addEventListener('abort', () => { const error = new Error('aborted'); error.name = 'AbortError'; reject(error); }, { once: true });
+        });
+      },
+    }) },
+  };
+};
 const fetchBeforeStop = window.fetch;
 window.fetch = async (url, options = {}) =>
-  String(url).includes('/api/agent/stream') ? hangingAgent(options?.signal) : fetchBeforeStop(url, options);
+  String(url).includes('/api/agent/react') && !String(url).includes('/stop')
+    ? hangingAgent(options?.signal) : fetchBeforeStop(url, options);
 document.getElementById('chat-input').value = 'долгая задача';
 const longTask = window.sendMessage();
 await settle(60);
@@ -1509,7 +1548,8 @@ await longTask.catch(() => {});
 await settle(60);
 check('«стоп» останавливает работу в Linux',
   !document.getElementById('sendBtn').classList.contains('is-stop')
-  && lastAi().querySelector('.answer').textContent.includes('Остановлено'));
+  && lastAi().querySelector('.answer').textContent.toLowerCase().includes('останов')
+  && !!lastAi().querySelector('.agent-completion'));
 window.fetch = fetchBeforeStop;
 
 check('за весь прогон ошибок в консоли нет', consoleErrors.length === 0, consoleErrors.join(' | '));
@@ -1810,7 +1850,51 @@ check('перед шагом и после него агент думает — 
   [...recallTurn.querySelectorAll('.agent-thought-label')].map((el) => el.textContent).join('|'));
 
 // ══════════════════════════════════════════════════════════════
-// 21) Длинный ответ показывается целиком, без обрезки
+// 21) ReAct: уточнение, возобновление и выбор исхода
+// ══════════════════════════════════════════════════════════════
+console.log('\n21) ReAct: вопрос пользователя и продолжение после паузы');
+mock.answerStream = [
+  { type: 'token', token: 'Нужно уточнение.' },
+  { type: 'ask_user', run_id: 'smoke-run-1', question: 'Какой формат выбрать?', options: ['JSON'] },
+  { type: 'result', reply: 'Нужно уточнение.', status: 'paused' },
+  { type: 'done' },
+];
+mock.continueStream = [
+  { type: 'token', token: 'Продолжил и проверил результат.' },
+  { type: 'result', reply: 'Продолжил и проверил результат.', status: 'completed' },
+  { type: 'completion', run_id: 'smoke-run-1', buttons: ['Готово', 'Продолжай работать'] },
+  { type: 'done' },
+];
+mock.agentStream = mock.answerStream;
+document.getElementById('chat-input').value = 'Подготовь ответ';
+await window.sendMessage();
+await settle();
+let reactBubble = lastAi();
+check('ReAct API показывает уточнение и доступные варианты',
+  reactBubble.querySelector('.agent-question')?.textContent.includes('Какой формат выбрать?')
+  && [...reactBubble.querySelectorAll('.agent-question button')].some((button) => button.textContent === 'JSON'));
+const reactQuestion = reactBubble.querySelector('.agent-question');
+const reactInput = reactQuestion?.querySelector('input');
+if (reactInput) reactInput.value = 'YAML';
+reactQuestion?.dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
+await settle(80);
+check('ответ уточнения отправлен на сервер с тем же run_id',
+  mock.reactAnswers.at(-1)?.run_id === 'smoke-run-1' && mock.reactAnswers.at(-1)?.answer === 'YAML',
+  JSON.stringify(mock.reactAnswers.at(-1)));
+check('после продолжения доступны действия «Готово» и «Продолжай работать»',
+  [...reactBubble.querySelectorAll('.agent-completion button')].map((button) => button.textContent).join('|')
+    === 'Готово|Продолжай работать');
+reactBubble.querySelector('.agent-completion [data-outcome="continued"]')?.click();
+await settle(80);
+check('«Продолжай работать» возобновляет тот же запуск',
+  mock.reactFinishes.at(-1)?.run_id === 'smoke-run-1' && mock.reactFinishes.at(-1)?.outcome === 'continued');
+reactBubble.querySelector('.agent-completion [data-outcome="confirmed"]')?.click();
+await settle(60);
+check('«Готово» сохраняет подтверждённый исход запуска',
+  mock.reactFinishes.at(-1)?.run_id === 'smoke-run-1' && mock.reactFinishes.at(-1)?.outcome === 'confirmed');
+
+// ══════════════════════════════════════════════════════════════
+// 22) Длинный ответ показывается целиком, без обрезки
 // ══════════════════════════════════════════════════════════════
 console.log('\n21) Длинный ответ отображается до конца');
 mock.agentStream = LONG_STREAM;

@@ -305,11 +305,6 @@ def ops_health():
                                                   any_owner=_any_owner())
     except Exception:  # noqa: BLE001
         knowledge_stats_data = {"ready": False, "error": "недоступна"}
-    try:
-        import agenticseek.orchestration as orchestration
-        orchestration_data = orchestration.summary()
-    except Exception:  # noqa: BLE001
-        orchestration_data = {}
     return jsonify({
         "ok": True,
         "guardrails": guardrails.summary(),
@@ -317,6 +312,5 @@ def ops_health():
         "knowledge": knowledge_stats_data,
         "prompts": prompt_registry.summary(),
         "telemetry": telemetry.summary(),
-        "orchestration": orchestration_data,
         "session": {"signed_in": signed_in(), "admin": bool(is_admin())},
     })

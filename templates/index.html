@@ -7,6 +7,8 @@
   <title>NovaMind · Liquid Glass</title>
   <link rel="stylesheet" href="/static/liquid-glass.css">
   <link rel="stylesheet" href="/static/style.css?v=speech1">
+  <link rel="stylesheet" href="/static/workspace.css">
+  <link rel="stylesheet" href="/static/agent-controls.css">
 </head>
 <body>
 
@@ -188,6 +190,7 @@
         </div>
 
         <button class="toolbar-btn" id="btn-calm" onclick="toggleCalmMotion()" title="Отключить фоновые анимации">✨ <span>Анимации</span></button>
+        <button class="toolbar-btn" type="button" onclick="toggleWorkspace(true)" title="Открыть файлы этой сессии">📁 <span>Файлы</span></button>
       </div>
 
       <div class="mode-active" id="modeActiveBar" hidden>
@@ -238,6 +241,21 @@
 
 
 
+  <aside class="agent-workspace" id="agentWorkspace" aria-hidden="true">
+    <div class="agent-workspace-head"><strong>Файлы этой сессии</strong>
+      <div><a id="workspaceZip" href="#" download>Скачать ZIP</a>
+        <button type="button" onclick="toggleWorkspace(false)" aria-label="Закрыть">✕</button></div>
+    </div>
+    <nav class="workspace-tabs"><button type="button" onclick="showWorkspaceTab('files')">Файлы</button><button type="button" onclick="showWorkspaceTab('diff')">GitHub · Diff</button></nav>
+    <section id="workspaceTabFiles"><div id="workspaceFiles" class="agent-workspace-files">Откройте чат, чтобы посмотреть его файлы.</div>
+      <pre id="workspacePreview" class="agent-workspace-preview" hidden></pre></section>
+    <section id="workspaceTabDiff" hidden><form id="githubCloneForm" class="workspace-github-form">
+      <label for="githubRepository">Репозиторий GitHub</label><input id="githubRepository" type="url" placeholder="https://github.com/owner/repo" required>
+      <button type="submit">Открыть копию в workspace</button></form>
+      <div class="workspace-github-actions"><button type="button" onclick="refreshWorkspaceDiff()">Обновить Diff</button><button type="button" onclick="commitWorkspaceChanges()">Коммит</button><button type="button" onclick="publishWorkspaceChanges()">Пуш и PR…</button></div>
+      <div id="workspaceGitStatus"></div><pre id="workspaceDiff" class="agent-workspace-preview">Выберите репозиторий, чтобы начать.</pre></section>
+  </aside>
+
   <!-- ═══════════ ПАНЕЛЬ «ПАМЯТЬ» ═══════════ -->
   <div class="memory-modal" id="memoryPanel" aria-hidden="true" onclick="if (event.target === this) closeMemory()">
     <div class="memory-panel" role="dialog" aria-modal="true" aria-label="Долгосрочная память">
@@ -286,5 +304,6 @@
   <script src="/static/app.js?v=chatmem1"></script>
   <script src="/static/linux.js?v=chatmem1"></script>
   <script src="/static/memory.js"></script>
+  <script src="/static/workspace.js"></script>
 </body>
 </html>

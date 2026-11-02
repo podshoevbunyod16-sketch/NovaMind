@@ -37,12 +37,6 @@ def isolated_env(tmp_path, monkeypatch):
     # Подтверждение опасных действий в тестах не ждёт 120 секунд:
     # тест, которому нужен таймаут, выставляет своё значение сам.
     monkeypatch.setenv("AGENT_CONFIRM_TIMEOUT", "0.05")
-    # Поиск по раундам вызывает модель-«судью» полноты; в тестах со скриптом ответов
-    # она бы съедала чужие реплики, поэтому по умолчанию — один раунд.
-    # Тесты адаптивного поиска (tests/test_adaptive_search.py) включают раунды сами.
-    import agenticseek.engine as _engine
-    monkeypatch.setattr(_engine, "SEARCH_ROUNDS", 1)
-
     import media_generation as mg
     media_dir = tmp_path / "generated_media"
     monkeypatch.setattr(mg, "MEDIA_DIR", str(media_dir))
@@ -99,6 +93,8 @@ def client(tmp_path, monkeypatch, isolated_env):
     """Flask test client с отдельной базой данных (репозиторий не трогает)."""
     import database
     monkeypatch.setattr(database, "DB_PATH", str(tmp_path / "test_chats.db"))
+    # Lazy schema caches outlive a temporary file if pytest reuses its path.
+    database._runs_ready.discard(database.DB_PATH)
     database.init_db()
 
     import routes.media as media_routes
@@ -147,6 +143,10 @@ def sandbox(tmp_path, monkeypatch):
     # google_client читает/пишет не ту же папку, что проверяет тест.
     monkeypatch.setattr(term_routes, "_ws", lambda: os.path.realpath(str(workspace)))
     monkeypatch.setattr(agent_routes, "run_terminal", term_routes.run_agent)
+    # First-party registry adapters resolve these module functions at call time.
+    import routes.search as search_routes
+    monkeypatch.setattr(search_routes, "search_web",
+                        lambda query, num=8: agent_routes.nova_search(query, limit=num))
     monkeypatch.setenv("TERMINAL_ENABLED", "1")
     monkeypatch.setenv("AGENT_ENABLED", "1")
     return workspace

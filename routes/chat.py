@@ -48,7 +48,7 @@ def _chat_ownership_guard():
 def _chat_tools_allowed(data) -> bool:
     """Кнопка «Автопоиск» выключает инструменты и в запасном обычном чате."""
     try:
-        from routes.agent import request_tools_allowed
+        from agent.runtime import request_tools_allowed
         return request_tools_allowed(data)
     except Exception:  # noqa: BLE001 — старый чат не должен падать без агента
         return True
@@ -57,7 +57,7 @@ def _chat_tools_allowed(data) -> bool:
 def is_agent_enabled():
     """Включён ли агентный режим (по умолчанию — да)."""
     try:
-        from routes.agent import is_enabled
+        from agent.runtime import is_enabled
         return bool(is_enabled())
     except Exception:
         return False
@@ -183,9 +183,10 @@ def send():
     # chat_id из интерфейса: null = новый диалог, иначе — привязка к открытому.
     # Невалидный id до этого уже отсёк before_request (_chat_ownership_guard).
     try:
-        from routes.agent import bind_client_chat
-        bind_client_chat(data)
-    except Exception:  # noqa: BLE001 — старый чат не должен падать без агента
+        from agent.runtime import bind_client_chat
+        if not bind_client_chat(data):
+            return jsonify({'error': 'Чат не найден'}), 404
+    except Exception:  # noqa: BLE001 — обычный чат не зависит от привязки
         pass
     chat_id = get_or_create_session_chat()
 
@@ -282,22 +283,20 @@ def send_stream():
     # Явный запрос агентного режима: клиенты без JS (curl, мобильные
     # приложения, интеграции) получают ровно тот же цикл с инструментами,
     # что и веб-чат. {"message": "...", "agent": true}
-    if data.get("agent") is True:
-        try:
-            from routes.agent import agent_stream
-            if is_agent_enabled():
-                return agent_stream()
-        except Exception:
-            logging.getLogger(__name__).warning("agent fallback недоступен", exc_info=True)
+    if data.get("agent") is True and is_agent_enabled():
+        # The compatibility flag enters the same first-party runner as the web UI.
+        from routes.react_agent import start_react_run
+        return start_react_run()
 
     # FIX: загружаем историю из БД для send_stream тоже
     # Привязка к чату интерфейса — до чтения истории: иначе реплики из
     # разных путей (агент / поиск / обычный чат) разъезжаются по двум
     # диалогам, и после перезагрузки контекст теряется.
     try:
-        from routes.agent import bind_client_chat
-        bind_client_chat(data)
-    except Exception:  # noqa: BLE001 — старый чат не должен падать без агента
+        from agent.runtime import bind_client_chat
+        if not bind_client_chat(data):
+            return jsonify({'error': 'Чат не найден'}), 404
+    except Exception:  # noqa: BLE001 — обычный чат не зависит от привязки
         pass
     _chat_id_stream = get_or_create_session_chat()
     _history_stream = get_chat_history(_chat_id_stream, limit=50)

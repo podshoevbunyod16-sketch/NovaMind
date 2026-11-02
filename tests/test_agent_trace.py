@@ -4,7 +4,7 @@ import json
 import pytest
 
 import database
-import routes.agent as agent_routes
+import ai_providers
 from tests.agent_helpers import script
 
 
@@ -23,8 +23,7 @@ def _stub_model(monkeypatch, answers):
         yield "token", text
         yield "done", ""
 
-    monkeypatch.setattr(agent_routes, "chat_completion", fake_completion)
-    monkeypatch.setattr(agent_routes, "chat_stream", fake_stream)
+    monkeypatch.setattr(ai_providers, "chat_completion", fake_completion)
     return queue
 
 
@@ -159,12 +158,13 @@ def test_trace_is_not_saved_for_offline_turn_without_steps(client, sandbox, monk
 
 def test_failed_run_is_recorded_with_error(client, sandbox, monkeypatch):
     """Отказ модели всё равно виден в истории запусков."""
-    monkeypatch.setattr(agent_routes, "resolve_target",
+    monkeypatch.setattr(ai_providers, "resolve_target",
                         lambda provider=None, model=None: ("groq", "test-model", {}))
-    monkeypatch.setattr(agent_routes, "chat_completion",
+    monkeypatch.setattr(ai_providers, "chat_completion",
                         lambda messages, **kwargs: (None, "quota exceeded"))
     events = _ndjson(client.post("/api/agent/stream", json={"message": "привет"}))
     run_id = next(event for event in events if event["type"] == "result")["run_id"]
     run = database.get_agent_run(run_id)
-    assert run and run["status"] == "error"
-    assert "Модель не ответила" in (run.get("error") or "")
+    assert run and run["status"] == "provider_error"
+    assert "Не удалось получить ответ модели" in (run.get("answer") or "")
+    assert "quota exceeded" in (run.get("answer") or "")

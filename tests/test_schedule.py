@@ -262,4 +262,6 @@ def test_agent_schedule_needs_expression(admin_client, sandbox, db, monkeypatch)
                                        json={"message": "поставь отчёт по расписанию"}))
     assert not any(event["type"] == "schedule" for event in events)
     assert database.list_jobs(owner="admin:admin") == []
-    assert events_of(events, "tool")[0]["code"] == 1
+    tool = events_of(events, "tool")[0]
+    assert tool["name"] == "schedule" and tool["status"] == "error"
+    assert "Укажите cron или every" in tool["output"]

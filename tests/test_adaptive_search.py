@@ -1,114 +1,130 @@
-"""Поиск по раундам: агент сам решает, хватает ли данных, и продолжает искать."""
+"""Multi-round search is ordinary model-directed ReAct, not a specialist judge."""
 import json
 
-import pytest
-
-import agenticseek.engine as engine_mod
-from agenticseek.engine import AgentEngine, EngineContext
-from agenticseek.tools.terminal_commands import _delegated_input
-from agenticseek.tools.web_tools import WebSearchTool
+from agent.loop import AgentContext, run_react
+from tool_registry import ToolSpec
 
 
 def _items(prefix, count):
-    return [{"title": f"{prefix} {i}", "url": f"https://example.com/{prefix}/{i}",
-             "snippet": f"сниппет {prefix} {i}"} for i in range(count)]
+    return [{"title": f"{prefix} {index}",
+             "url": f"https://example.test/{prefix}/{index}",
+             "snippet": f"выдержка {prefix} {index}"}
+            for index in range(count)]
 
 
-def _engine(search, complete):
-    events = []
-    ctx = EngineContext(goal="5 фактов про Исмаила Сомони", complete=complete,
-                        emit=events.append, search=search,
-                        read_page=lambda url, *a, **k: (f"текст {url}", None),
-                        force_search=True)
-    return AgentEngine(ctx), events
+def _search_spec(search):
+    return ToolSpec("web_search", "Search fixture pages.", {
+        "type": "object", "properties": {
+            "query": {"type": "string"}, "limit": {"type": "integer"}},
+        "required": ["query"], "additionalProperties": False,
+    }, search, permissions=("network",), risk="safe")
 
 
-@pytest.fixture(autouse=True)
-def rounds(monkeypatch):
-    monkeypatch.setattr(engine_mod, "SEARCH_ROUNDS", 4)
+def _call(query, limit=10):
+    return f'```json\n{{"tool":"web_search","arguments":{{"query":{json.dumps(query, ensure_ascii=False)},"limit":{limit}}}}}\n```'
 
 
-def test_stops_after_first_round_when_data_is_enough():
-    queries = []
-
-    def search(query, limit):
-        queries.append((query, limit))
-        return _items("a", 10), {}
-
-    engine, _ = _engine(search, lambda *a, **k: ('{"enough": true}', {}))
-    text = engine._run_forced_search()
-
-    assert len(queries) == 1 and queries[0][1] == engine_mod.SEARCH_LIMIT == 10
-    assert "данных достаточно" in text
+def _run(goal, search, complete, max_steps=12):
+    spec = _search_spec(search)
+    return run_react(AgentContext(
+        goal, tools=[spec], complete=complete,
+        call_tool=lambda name, **kwargs: spec.call(**kwargs), max_steps=max_steps,
+    ))
 
 
-def test_keeps_searching_with_a_new_query_until_enough():
-    queries, verdicts = [], iter([
-        '{"enough": false, "query": "Исмаил Сомони биография даты"}',
-        '{"enough": true}',
+def test_model_stops_after_one_search_when_it_has_enough_data():
+    searches = []
+    replies = iter([
+        (_call("Исмаил Сомони факты"), {}),
+        ("Нашёл достаточно фактов для ответа.", {}),
+    ])
+    result = _run(
+        "Найди пять фактов об Исмаиле Сомони",
+        lambda query, limit=10: searches.append((query, limit)) or
+        {"ok": True, "results": _items("bio", 10)},
+        lambda *a, **k: next(replies),
+    )
+    assert searches == [("Исмаил Сомони факты", 10)]
+    assert result.steps == 1
+    assert "достаточно" in result.answer
+
+
+def test_model_can_refine_search_after_observing_first_results():
+    searches = []
+    replies = iter([
+        (_call("Исмаил Сомони"), {}),
+        (_call("Исмаил Сомони биография даты правления"), {}),
+        ("Сводка опирается на оба поиска.", {}),
     ])
 
-    def search(query, limit):
-        queries.append(query)
-        # второй раунд возвращает один повтор и два новых источника
-        return (_items("a", 3) if len(queries) == 1 else _items("a", 1) + _items("b", 2)), {}
+    def search(query, limit=10):
+        searches.append(query)
+        if len(searches) == 1:
+            return {"ok": True, "results": _items("first", 3)}
+        return {"ok": True, "results": _items("second", 2)}
 
-    engine, events = _engine(search, lambda *a, **k: (next(verdicts), {}))
-    text = engine._run_forced_search()
-
-    assert queries[1] == "Исмаил Сомони биография даты"
-    assert len(engine._found) == 5                     # повтор не задвоен
-    assert "[4]" in text and "[5]" in text             # нумерация сквозная
-    assert any("уточняю запрос" in e.get("text", "") for e in events if e["type"] == "step")
-    assert "данных достаточно" in text
-
-
-def test_round_limit_stops_endless_search(monkeypatch):
-    monkeypatch.setattr(engine_mod, "SEARCH_ROUNDS", 3)
-    calls = []
-
-    def search(query, limit):
-        calls.append(query)
-        return _items(f"r{len(calls)}", 2), {}
-
-    def complete(*a, **k):
-        return json.dumps({"enough": False, "query": f"запрос {len(calls)}"}), {}
-
-    engine, _ = _engine(search, complete)
-    text = engine._run_forced_search()
-
-    assert len(calls) == 3
-    assert "поиск завершён" in text and "чего именно не хватило" in text
-
-
-def test_judge_failure_answers_with_what_was_found():
-    calls = []
-
-    def search(query, limit):
-        calls.append(query)
-        return _items("a", 4), {}
-
-    def broken(*a, **k):
-        raise RuntimeError("provider down")
-
-    engine, _ = _engine(search, broken)
-    text = engine._run_forced_search()
-
-    assert len(calls) == 1 and "Результаты поиска" in text
-
-
-def test_first_search_empty_keeps_old_behaviour():
-    engine, _ = _engine(lambda q, l: ([], {}), lambda *a, **k: ('{"enough": true}', {}))
-    assert "ничего не нашёл" in engine._run_forced_search()
-
-
-def test_web_search_tool_honours_limit_from_json_payload():
     seen = []
-    tool = WebSearchTool(lambda q, n: (seen.append(n) or _items("a", 20), {}))
+    result = _run(
+        "Найди пять фактов об Исмаиле Сомони", search,
+        lambda messages, **kwargs: seen.append(str(messages)) or next(replies),
+    )
+    assert searches == ["Исмаил Сомони", "Исмаил Сомони биография даты правления"]
+    assert result.steps == 2
+    assert "first 0" in seen[1]
+    assert "Сводка" in result.answer
 
-    payload, _ = _delegated_input("web_search", json.dumps({"query": "asyncio", "limit": 15}))
-    output = tool.execute(payload)
 
-    assert seen == [15] and output.count("https://example.com/") == 15
-    tool.execute("asyncio")                              # без limit — как раньше
-    assert seen[-1] == tool.limit
+def test_max_step_budget_bounds_model_directed_search():
+    searches = []
+    replies = iter([(_call(f"запрос {index}"), {}) for index in range(5)])
+    result = _run(
+        "Исследуй тему",
+        lambda query, limit=10: searches.append(query) or
+        {"ok": True, "results": _items(query, 2)},
+        lambda *a, **k: next(replies), max_steps=3,
+    )
+    assert searches == ["запрос 0", "запрос 1", "запрос 2"]
+    assert result.status == "budget_exhausted"
+    assert result.steps == 3
+    assert "лимит шагов" in result.answer.lower()
+    assert len(result.observations) == 3
+
+
+def test_provider_failure_preserves_search_observations_for_honest_fallback():
+    searches = []
+    replies = iter([(_call("Исмаил Сомони"), {}), (None, "provider unavailable")])
+    result = _run(
+        "Найди информацию",
+        lambda query, limit=10: searches.append(query) or
+        {"ok": True, "results": _items("found", 4)},
+        lambda *a, **k: next(replies),
+    )
+    assert searches == ["Исмаил Сомони"]
+    assert result.status == "provider_error"
+    assert len(result.observations[0]["result"]["results"]) == 4
+    assert "Не удалось получить ответ модели" in result.answer
+
+
+def test_empty_search_result_is_visible_before_the_model_answers():
+    seen = []
+    replies = iter([(_call("ничего нет"), {}), ("Ничего не нашёл по этому запросу.", {})])
+    result = _run(
+        "Найди данные", lambda query, limit=10: {"ok": True, "results": []},
+        lambda messages, **kwargs: seen.append(str(messages)) or next(replies),
+    )
+    assert result.steps == 1
+    assert '"results": []' in seen[1]
+    assert "Ничего не нашёл" in result.answer
+
+
+def test_search_limit_argument_is_passed_through_the_react_schema():
+    seen = []
+    replies = iter([(_call("asyncio", 15), {}), ("Нашёл источники.", {})])
+    result = _run(
+        "Найди asyncio",
+        lambda query, limit=10: seen.append(limit) or
+        {"ok": True, "results": _items("asyncio", limit)},
+        lambda *a, **k: next(replies),
+    )
+    assert seen == [15]
+    assert result.steps == 1

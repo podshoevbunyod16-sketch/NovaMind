@@ -2,8 +2,7 @@
 
 Проблема
 --------
-Промпты агентов лежали текстовыми файлами в ``agenticseek/prompts/base`` и
-загружались по имени. Из-за этого:
+First-party промпты хранятся в ``prompts/base`` и загружаются по имени. Из-за этого:
 
 * правка промпта «на месте» меняла поведение агента без следа: нельзя было
   сказать, какой текст реально был в конкретном ходе и что изменилось после
@@ -18,7 +17,7 @@
 * **Версия = содержимое**: sha256 файла (первые 12 символов). Версия не
   зависит от даты и имени ветки, её видно в трассе каждого хода.
 * **Архив**: при первом обращении и при каждом изменении текущий текст
-  сохраняется в ``agenticseek/prompts/versions/<имя>/<версия>.txt``, а запись
+  сохраняется в ``prompts/versions/<имя>/<версия>.txt``, а запись
   о версии попадает в ``manifest.json`` (кто, когда, размер).
 * **Закрепление**: ``PROMPT_VERSION_<ИМЯ>=<версия>`` в окружении или
   ``pin()`` в манифесте заставляет агента использовать конкретную версию —
@@ -43,8 +42,8 @@ from typing import Iterable
 
 log = logging.getLogger("novamind.prompts")
 
-PROMPT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                          "agenticseek", "prompts")
+_ROOT = os.path.dirname(os.path.abspath(__file__))
+PROMPT_DIR = os.path.join(_ROOT, "prompts")
 BASE_DIR = os.path.join(PROMPT_DIR, "base")
 VERSIONS_DIR = os.path.join(PROMPT_DIR, "versions")
 MANIFEST_PATH = os.path.join(PROMPT_DIR, "manifest.json")
@@ -99,7 +98,9 @@ def _write_manifest(manifest: dict) -> None:
 
 
 def base_path(name: str) -> str:
-    return os.path.join(BASE_DIR, f"{_normalize(name)}.txt")
+    """Return the path to an independently authored first-party prompt."""
+    name = _normalize(name)
+    return os.path.join(BASE_DIR, f"{name}.txt")
 
 
 def archive_path(name: str, version: str) -> str:
@@ -108,8 +109,7 @@ def archive_path(name: str, version: str) -> str:
 
 def available() -> list[str]:
     try:
-        return sorted(item[:-4] for item in os.listdir(BASE_DIR)
-                      if item.endswith(".txt"))
+        return sorted(item[:-4] for item in os.listdir(BASE_DIR) if item.endswith(".txt"))
     except OSError:
         return []
 

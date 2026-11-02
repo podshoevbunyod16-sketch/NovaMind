@@ -26,7 +26,7 @@ def system_health():
         tools=[]
         linux["tool_registry_error"]=str(exc)
     try:
-        from routes.agent import is_enabled as agent_enabled
+        from agent.runtime import is_enabled as agent_enabled
         agent_on = bool(agent_enabled())
     except Exception:
         agent_on = os.getenv("AGENT_ENABLED", "1") == "1"

@@ -20,6 +20,7 @@ class ToolSpec:
     # risk: safe — только чтение; write — меняет данные; danger — необратимые
     # или внешние действия (публикация, отправка, установка пакетов).
     risk: str = "safe"
+    max_output_chars: int = 6000
 
     def call(self, **kwargs) -> dict:
         started = time.monotonic()
@@ -29,6 +30,13 @@ class ToolSpec:
                 result = {"ok": True, "result": result}
             result.setdefault("ok", True)
             result.setdefault("tool", self.name)
+            limit = max(200, int(self.max_output_chars or 6000))
+            # Bound potentially large tool output before it enters model context or UI.
+            for key in ("result", "content", "output", "text", "diff"):
+                value = result.get(key)
+                if isinstance(value, str) and len(value) > limit:
+                    result[key] = value[:limit] + "\\n… [вывод обрезан]"
+            result.setdefault("metadata", {"output_limit": limit})
             return result
         except Exception as exc:
             log.exception("tool=%s failed", self.name)
@@ -63,7 +71,8 @@ def tool_schemas(workspace: bool | None = None) -> list[dict]:
     """
     specs = list_tools()
     if workspace is not None:
-        specs = [t for t in specs if workspace or t.name not in WORKSPACE_TOOLS]
+        specs = [t for t in specs if workspace or
+                 ("workspace" not in getattr(t, "permissions", ()) and t.name not in WORKSPACE_TOOLS)]
     schemas = [{"name": t.name, "description": t.description, "schema": dict(t.schema),
                 "permissions": list(t.permissions), "timeout": t.timeout,
                 "risk": t.risk} for t in specs]
@@ -211,13 +220,8 @@ def native_tool_risk(name: str) -> str:
 
 
 def call_tool(name: str, **kwargs) -> dict:
-    """Единая точка исполнения инструмента реестра.
-
-    Здесь стоят три проверки, которых раньше не было в одном месте:
-    существование инструмента, ограждения аргументов (:mod:`guardrails`) и
-    права хода (:mod:`capabilities`). Все три возвращают ошибку в общем формате,
-    поэтому агент видит причину и не повторяет запрещённый вызов.
-    """
+    """Единая точка исполнения инструмента реестра с guardrails и capability."""
+    status_callback = kwargs.pop("_status_callback", None)
     spec = get_tool(name)
     if not spec:
         return {"ok": False, "error": {"type": "unknown_tool", "message": f"Unknown tool: {name}", "retryable": False}}
@@ -242,10 +246,23 @@ def call_tool(name: str, **kwargs) -> dict:
         pass
     except Exception:                         # noqa: BLE001
         log.warning("capability check failed", exc_info=True)
+    if status_callback and name in {"image", "audio", "video"}:
+        kwargs["on_status"] = status_callback
     return spec.call(**kwargs)
 
 def bootstrap_default_tools():
     _register_agent_tools()
+    if get_tool("ask_user") is None:
+        register_tool(ToolSpec(
+            "ask_user", "Задать пользователю уточняющий вопрос и приостановить запуск.",
+            {"type": "object", "properties": {
+                "question": {"type": "string"},
+                "options": {"type": "array", "items": {"type": "string"}},
+            }, "required": ["question"], "additionalProperties": False},
+            lambda question, options=None: {"ok": True, "type": "ask_user",
+                                           "question": str(question)[:2000],
+                                           "options": list(options or [])[:8]},
+            timeout=5, risk="safe"))
     if get_tool("web_search") is None:
         register_tool(ToolSpec(
             "web_search", "Search the public web and return normalized ranked sources.",
@@ -275,7 +292,7 @@ def bootstrap_default_tools():
             "shell", "Run a policy-checked command inside the workspace.",
             {"type":"object","properties":{"command":{"type":"string"},"timeout":{"type":"number"}},"required":["command"]},
             lambda command, timeout=12, cancel=None: _workspace_guard() or _shell_result(
-                run_agent(command, timeout=min(float(timeout),30), cancel=cancel)),
+                run_agent(command, timeout=min(float(timeout),120), cancel=cancel)),
             permissions=("workspace",), timeout=30, risk="write"))
     if get_tool("file_read") is None:
         from routes.terminal import safe_path
@@ -467,6 +484,17 @@ def bootstrap_default_tools():
             {"type":"object","properties":{"command":{"type":"string"},"timeout":{"type":"number"}},"required":["command"]},
             git, permissions=("workspace",), timeout=30, risk="write"))
 
+    # Stable public names for the first-party ReAct loop; aliases live in the
+    # same authoritative registry and reuse the existing guarded handlers.
+    aliases = {"web_fetch": "web_open", "file_list": "file_tree",
+               "bash": "shell", "python": "shell", "image_generate": "image"}
+    for alias, source_name in aliases.items():
+        source = get_tool(source_name)
+        if source is not None and get_tool(alias) is None:
+            register_tool(ToolSpec(alias, source.description, source.schema, source.execute,
+                                   permissions=source.permissions, timeout=source.timeout,
+                                   risk=source.risk, max_output_chars=source.max_output_chars))
+
 def _register_agent_tools():
     """Инструменты уровня агента, доступные и нативному tool calling.
 
@@ -502,12 +530,13 @@ def _register_agent_tools():
         if get_tool(name) is not None:
             continue
 
-        def media(kind=kind, prompt="", model="", size="", voice=""):
+        def media(kind=kind, prompt="", model="", size="", voice="", on_status=None):
             import media_agent
             action = {"prompt": str(prompt), "model": model, "size": size, "voice": voice}
             options = media_agent.build_options(kind, action)
             result, used_model, errors = media_agent.generate(
-                kind, str(prompt), options=options, wanted_model=str(model or ""))
+                kind, str(prompt), options=options, wanted_model=str(model or ""),
+                on_status=on_status)
             if not result:
                 return {"ok": False, "kind": kind,
                         "error": {"type": "media_failed",
@@ -632,6 +661,35 @@ def _register_agent_tools():
              "required": ["task_id"]},
             task_done, permissions=("database",), timeout=5, risk="write"))
 
+    if get_tool("schedule") is None:
+        def schedule(prompt, cron="", every=""):
+            from flask import has_request_context, session
+            import identity
+            import scheduler
+            if not has_request_context() or not session.get("admin_logged_in"):
+                return {"ok": False, "error": {"type": "unauthorized",
+                    "message": "Создавать расписания может только администратор",
+                    "retryable": False}}
+            kind, expression = ("cron", str(cron or "").strip()) if cron else (
+                "every", str(every or "").strip())
+            if not expression:
+                return {"ok": False, "error": {"type": "invalid_schedule",
+                    "message": "Укажите cron или every", "retryable": False}}
+            try:
+                owner = identity.chat_owner(session)
+                job = scheduler.create_job(owner, str(prompt), kind, expression,
+                                           chat_id=str(session.get("chat_id") or ""))
+                return {"ok": True, "job": job, "description": scheduler.describe(job)}
+            except (ValueError, RuntimeError) as exc:
+                return {"ok": False, "error": {"type": "invalid_schedule",
+                    "message": str(exc)[:400], "retryable": False}}
+        register_tool(ToolSpec(
+            "schedule", "Поставить задачу по расписанию (только администратор).",
+            {"type": "object", "properties": {
+                "prompt": {"type": "string"}, "cron": {"type": "string"},
+                "every": {"type": "string"}}, "required": ["prompt"]},
+            schedule, permissions=("database",), timeout=5, risk="write"))
+
 
 def _workspace_guard():
     """Единая проверка доступа к песочнице для инструментов реестра.
@@ -686,8 +744,21 @@ def _open_result(pair):
             "error": None if text else {"type":"fetch_failed","message":error or "empty page","retryable":True}}
 
 def _shell_result(result):
-    ok = int(result.get("exit_code", result.get("code",-1))) == 0 and not result.get("timed_out")
-    return {**result, "ok": ok, "exit_code": result.get("exit_code", result.get("code",-1)),
-            "error": None if ok else {"type":"command_failed" if not result.get("timed_out") else "timeout",
-                                      "message": result.get("stderr") or "command failed",
-                                      "retryable": bool(result.get("timed_out"))}}
+    code = int(result.get("exit_code", result.get("code", -1)))
+    timed_out = bool(result.get("timed_out"))
+    ok = code == 0 and not timed_out
+    hint = ""
+    if timed_out:
+        hint = "Команда превысила лимит времени; разделите задачу на меньшие шаги и проверьте уже сохранённые файлы."
+    elif code in {-9, 137}:
+        hint = "Процесс завершён системой, возможно из-за нехватки памяти. На Android/Termux избегайте тяжёлой сборки и устанавливайте зависимости по одной."
+    message = result.get("stderr") or ("Процесс завершён системой" if hint else "command failed")
+    if not ok and result.get("stderr"):
+        from agent.gui import gui_hint
+        display_hint = gui_hint(result.get("stderr"))
+        if display_hint:
+            hint = (hint + " " + display_hint).strip()
+            message = str(message) + "\n" + display_hint
+    return {**result, "ok": ok, "exit_code": code, "hint": hint,
+            "error": None if ok else {"type": "timeout" if timed_out else "command_failed",
+                                      "message": str(message), "retryable": timed_out}}

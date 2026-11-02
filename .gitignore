@@ -4,6 +4,7 @@ __pycache__/
 runtime_settings.json
 generated_media/
 workspace/
+workspace_data/
 user_skills/
 venv/
 *.log
