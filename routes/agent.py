@@ -1,9 +1,7 @@
 """
-routes/agent.py — HTTP-фасад над агентным движком AgenticSeek.
+routes/agent.py — совместимые Flask-маршруты для функций NovaMind.
 
-Здесь больше нет агентного цикла. Модель, планировщик, роли, инструменты и
-протокол блоков живут в пакете ``agenticseek`` (порт AgenticSeek, GPL-3.0 —
-см. ``NOTICE.md``). Этот модуль отвечает только за то, что относится к Flask:
+Цикл агента работает в first-party ReAct-реализации; этот модуль отвечает за HTTP-слой,
 
 * авторизация, лимиты запросов и заголовки ответа;
 * история чата: чтение перед ходом и сохранение после;
@@ -14,9 +12,8 @@ routes/agent.py — HTTP-фасад над агентным движком Agent
 * мост к NovaMind-возможностям (поиск, MCP, медиа, память, задачи,
   расписание, навыки) — движок получает их как функции, а не импортом Flask.
 
-Главное правило прежнее: пользователь ВСЕГДА получает ответ. Движок
-гарантирует это сам (см. ``agenticseek.engine``), а здесь остаётся
-сохранение хода и корректное закрытие запуска.
+Главное правило: честно сохранять состояние запуска и не объявлять задачу
+завершённой без подтверждающего результата.
 """
 from flask import Blueprint, Response, request, jsonify, session, stream_with_context
 import json
@@ -26,23 +23,11 @@ import re
 import secrets
 import threading
 import time
-from types import SimpleNamespace
-
-from ai_providers import chat_completion, chat_stream, resolve_target  # noqa: F401
-import capabilities
 import database
 import guardrails
 import identity as _identity
 import usage_stats
-from agenticseek import policy
-from agenticseek.policy import clip  # noqa: F401  (обрезка текста в трассе)
-from agenticseek.core.prompt_paths import prompt_path  # noqa: F401 (документация/тесты)
-import prompt_registry
-import telemetry
-from agenticseek.engine import AGENT_MAX_TOKENS, AgentEngine, EngineContext
-from agenticseek.router import looks_complex  # noqa: F401 (реэкспорт для тестов)
-from agenticseek.state import RunState  # noqa: F401
-from agenticseek.tools import sandbox
+import agent.policy as policy
 import routes.terminal as terminal_routes
 from routes.terminal import (run_agent as run_terminal, ensure_workspace,  # noqa: F401
                              nova_search, nova_read, can_use_workspace, signed_in)
@@ -56,7 +41,14 @@ def workspace_dir() -> str:
     рассинхронизировала бы агент с файловым менеджером.
     """
     return terminal_routes._ws()
-from agenticseek.core.workspace import set_context_work_dir as _set_agent_workspace
+
+
+def _read_page(url, max_chars=6000):
+    """Совместимый тонкий адаптер к единственному first-party reader."""
+    from routes.search import fetch_page_text
+    text, error = fetch_page_text(url, max_chars=max_chars)
+    return text, error or ""
+
 
 agent_bp = Blueprint("agent", __name__)
 
@@ -103,13 +95,23 @@ _RUNS_LOCK = threading.Lock()
 
 
 def _untrusted(kind, text) -> str:
-    """Помечает внешние данные как данные (см. agenticseek.policy)."""
+    """Помечает внешние данные как недоверенный контекст для ReAct."""
     return policy.wrap_untrusted(kind, text)
 
 
+def clip(text: str, limit: int = 400) -> str:
+    """Ограничить диагностический текст, не меняя короткие строки."""
+    value = str(text or "")
+    limit = max(1, int(limit))
+    return value if len(value) <= limit else value[:limit - 1] + "…"
+
+
 def is_complex_request(text: str) -> bool:
-    """Нужен ли планировщик (эвристика движка; имя сохранено для тестов)."""
-    return looks_complex(text)
+    """Conservative first-party heuristic kept for older integrations."""
+    value = str(text or "")
+    return (len(re.findall(r"[.!?]\s+", value)) >= 2 or bool(re.search(
+        r"(?iu)\b(?:and then|after that|multiple steps|step by step|compare and|"
+        r"затем|после этого|по шагам|сравни и|составь план)\b", value)))
 
 
 #: Глаголы, после которых «сгенерировать» — это ещё не медиа.
@@ -325,17 +327,9 @@ def repair_truncated_answer(text, goal=""):
 
 
 def is_enabled():
-    """Агент включён по умолчанию.
-
-    Раньше режим требовал явного `AGENT_ENABLED=1`: без него главный чат был
-    обычным текстовым, и «агент в чате» существовал только в документации.
-    Теперь агент — основной путь чата, а отключить его можно осознанно:
-    `AGENT_ENABLED=0`.
-    """
-    value = os.getenv("AGENT_ENABLED")
-    if value is None or not str(value).strip():
-        return True
-    return str(value).strip() == "1"
+    """Совместимое имя для общей first-party настройки доступности агента."""
+    from agent.runtime import is_enabled as runtime_is_enabled
+    return runtime_is_enabled()
 
 
 def strict_mcp_request(text: str) -> bool:
@@ -422,58 +416,23 @@ def tools_enabled():
 
 
 def _bool_flag(value, default=True) -> bool:
-    """Мягкий разбор булева флага из JSON/форм (true/1/«on» → True)."""
-    if isinstance(value, bool):
-        return value
-    if value is None:
-        return default
-    if isinstance(value, (int, float)):
-        return bool(value)
-    text = str(value).strip().lower()
-    if text in ("1", "true", "yes", "on", "да", "вкл"):
-        return True
-    if text in ("0", "false", "no", "off", "нет", "выкл", ""):
-        return False
-    return default
+    """Совместимое имя для общего разбора булевых флагов."""
+    from agent.runtime import parse_bool
+    return parse_bool(value, default=default)
 
 
 def request_tools_allowed(data) -> bool:
-    """Кнопка «Автопоиск» — главный выключатель ВСЕХ инструментов агента.
-
-    Фронтенд шлёт ``tools`` (и дублирует старым ``search``). Если клиент явно
-    выключил авто-поиск, движок не регистрирует ни поиск, ни терминал, ни MCP,
-    ни медиа: роутер просто отправляет запрос в ИИ-модель. Клиенты без флага
-    (Telegram, планировщик, старый API) работают как раньше — с инструментами.
-    """
-    for key in ("tools", "auto_search", "search"):
-        if key in (data or {}):
-            return _bool_flag(data[key], default=True)
-    return True
+    """Совместимое имя для общей политики opt-in инструментов."""
+    from agent.runtime import request_tools_allowed as runtime_tools_allowed
+    return runtime_tools_allowed(data)
 
 
 def bind_client_chat(data) -> None:
-    """Привязывает сессию к чату, который открыт в интерфейсе.
-
-    Фронтенд шлёт ``chat_id`` каждого хода (агент, поиск, обычный чат):
-
-    * ключа нет (Telegram, curl, старые клиенты) — сессия не трогается;
-    * ``chat_id: null`` — «новый диалог»: сессионный чат сбрасывается,
-      следующий ход начинает чистую историю;
-    * валидный id — привязываемся: ходы из разных путей (агент, поиск,
-      /send) и из разных вкладок складываются в ОДИН диалог, а после
-      перезагрузки история восстанавливается из базы, а не из пустоты.
-    """
-    if not isinstance(data, dict) or "chat_id" not in data:
-        return
-    chat_id = str(data.get("chat_id") or "").strip()
-    if not chat_id:
-        session.pop("chat_id", None)
-        return
+    """Совместимое имя для проверки владения и привязки клиентского чата."""
+    from agent.runtime import bind_client_chat as runtime_bind_client_chat
     try:
-        from database import chat_allowed
-        if chat_allowed(chat_id):
-            session["chat_id"] = chat_id
-    except Exception:  # noqa: BLE001 — без базы работаем как раньше, через сессию
+        runtime_bind_client_chat(data)
+    except Exception:  # noqa: BLE001 — старые клиенты сохраняют сессионный fallback
         log.debug("client chat binding failed", exc_info=True)
 
 
@@ -921,10 +880,11 @@ def cancel_agent_run(run_id) -> bool:
     """Сигнал «Стоп»: взводит событие отмены. False — запуск не найден."""
     with _RUNS_LOCK:
         item = _ACTIVE_RUNS.get(str(run_id or ""))
-    if not item:
-        return False
-    item["cancel"].set()
-    return True
+    if item:
+        item["cancel"].set()
+        return True
+    from routes.react_agent import cancel_active_react_run
+    return cancel_active_react_run(run_id)
 
 
 def finish_run(run_id) -> None:
@@ -951,7 +911,7 @@ def agent_status():
     return jsonify({
         "enabled": enabled,
         "available": bool(enabled),
-        "engine": "agenticseek",
+        "engine": "react",
         "tools": workspace,
         "search": bool(enabled),
         "mcp": bool(mcp_tool_count),
@@ -1158,497 +1118,14 @@ def _guarded_finalize(text: str, goal: str, notes: list) -> str:
     return verdict.text or answer
 
 
-class _TraceRecorder:
-    """Переводит события NDJSON в спаны трассы (шаг/инструмент/подтверждение)."""
-
-    SPAN_KINDS = {"tool": "tool", "step": "step", "plan": "plan", "stage": "stage",
-                  "recall": "recall", "think": "think", "thought": "thought",
-                  "confirm": "confirm", "guard": "guard", "capability": "capability",
-                  "sources": "sources", "media": "media", "error": "error"}
-
-    def __init__(self, trace, run_id: str = "", chat_id: str = ""):
-        self.trace = trace
-        self.run_id = run_id
-        self.chat_id = chat_id
-        self.last = time.time()
-        self.tokens = 0
-        self.guards = 0
-        self.tools: list[str] = []
-        self.errors: list[str] = []
-
-    def feed(self, event: dict) -> None:
-        if self.trace is None or not isinstance(event, dict):
-            return
-        kind = str(event.get("type") or "")
-        now = time.time()
-        gap = max(0.0, now - self.last)
-        self.last = now
-        if kind == "token":
-            self.tokens += len(str(event.get("token") or ""))
-            return
-        if kind == "guard":
-            self.guards += 1
-        if kind == "error":
-            self.errors.append(clip(str(event.get("text") or ""), 200))
-        span_kind = self.SPAN_KINDS.get(kind)
-        if not span_kind:
-            return
-        name = f"{span_kind}:{event.get('name')}" if kind == "tool" else span_kind
-        attributes = {
-            "text": clip(str(event.get("text") or event.get("title") or ""), _TRACE_TEXT),
-            "icon": str(event.get("icon") or "")[:8],
-        }
-        for key in ("name", "status", "scene", "phase", "tool", "severity", "allowed",
-                    "command", "path", "code", "reasons", "done"):
-            if event.get(key) is not None:
-                attributes[key] = event.get(key)
-        span = self.trace.span(name, kind=span_kind, attributes=attributes)
-        span.started = now - gap
-        span.finish("error" if (kind == "error" or event.get("status") == "error") else "ok")
-        if kind == "tool" and event.get("name"):
-            self.tools.append(str(event.get("name")))
-
-    def finish(self, result_event: dict | None, answer: str, status: str) -> None:
-        if self.trace is None:
-            return
-        result_event = result_event or {}
-        self.trace.finish(status, {
-            "answer_chars": len(answer or ""),
-            "steps": result_event.get("steps"),
-            "tools_used": self.tools[:20],
-            "sources": len(result_event.get("sources") or []),
-            "media": len(result_event.get("media") or []),
-            "tokens_streamed": self.tokens,
-            "guard_events": self.guards,
-            "errors": self.errors[:5],
-            "provider": result_event.get("provider"),
-            "model": result_event.get("model"),
-            "offline": result_event.get("offline"),
-        })
-        telemetry.save_trace(self.trace)
-
-
 @agent_bp.route("/api/agent/stream", methods=["POST"])
 def agent_stream():
-    """Ход агента: ограждения → права → план → инструменты → ответ. NDJSON."""
-    data = request.get_json(silent=True) or {}
-    goal = (data.get("message") or "").strip()
-    if not goal:
-        return jsonify({"error": "Пустое сообщение"}), 400
-    if not is_enabled():
-        return jsonify({"error": "Агентный режим выключен (AGENT_ENABLED=1)"}), 403
-    # Чат из интерфейса: следующий _turn_history читает и пишет ЕГО историю.
-    bind_client_chat(data)
-
-    # 1. Ограждение входа: нормализация текста и отказ от инъекций.
-    guard_in = guardrails.check_input(goal)
-    if not guard_in.allowed:
-        log.info("вход отклонён ограждением: %s", ",".join(guard_in.reasons))
-        return _refusal_response(guard_in, goal)
-    goal = guard_in.text
-    requested_pattern = requested_multiagent_pattern(goal)
-    if requested_pattern and re.match(r"(?i)^\s*/multi\b", goal):
-        goal = re.sub(r"(?i)^\s*/multi\b\s*", "", goal).strip()
-        if not goal:
-            return jsonify({"error": "После /multi укажите вопрос"}), 400
-
-    import security
-    signed = signed_in()
-    rate_key = str(session.get("agent_memory_key") or session.get("nova_user_email")
-                   or session.get("user_email") or session.get("username") or "")
-    limit, remaining = 0, 0
-    if security.is_internal_run(request):
-        allowed = True   # планировщик и Telegram работают внутри процесса
-    else:
-        allowed, retry_after, limit, remaining, scope = security.agent_rate_check(
-            request, signed, rate_key)
-    if not allowed:
-        response = jsonify({
-            "error": "Слишком много запросов к агенту. Попробуйте позже.",
-            "retry_after": retry_after, "limit": limit, "scope": scope,
-        })
-        response.headers["Retry-After"] = str(retry_after)
-        return response, 429
-
-    provider, model, _cfg = resolve_target()
-    # Один ответ агента должен влезать в лимит провайдера, но не быть 1200
-    # токенов: на таком потолке модель обрывалась на полуслове, а фильтр
-    # полноты ответа отбрасывал весь текст (пользователь видел одну строку).
-    answer_tokens = max(1024, min(AGENT_MAX_TOKENS, int(_cfg.get("max_tokens") or AGENT_MAX_TOKENS)))
-    tools_allowed = request_tools_allowed(data)
-    use_tools = tools_enabled() and tools_allowed
-    strict_mcp = strict_mcp_request(goal) if tools_allowed else False
-    history_key = session.get("agent_memory_key")
-    if not history_key:
-        history_key = secrets.token_hex(12)
-        session["agent_memory_key"] = history_key
-    chat_id, prior = _turn_history(history_key)
-    if use_tools:
-        ensure_workspace()
-    # Агент и песочница работают в одной папке: иначе файлы агента не видны
-    # в файловом менеджере, а команды выполняются в другом дереве.
-    cap_owner = _identity.chat_owner()
-    _identity.bind_owner(cap_owner)                # поток агента узнает своего владельца
-    _set_agent_workspace(workspace_dir())
-    # Инструменты движка исполняют команды только через эту песочницу.
-    # При выключенном автопоиске песочница вообще не подключается к запуску.
-    if tools_allowed:
-        sandbox.set_runner(_sandbox_runner)
-
-    run_id, cancel = register_run()
-    media_kind = requested_media_kind(goal) if tools_allowed else ""
-    owner = _owner_name()
-    from routes.terminal import is_admin as _is_admin
-    admin_flag = bool(_is_admin())
-    memory_key = ""
-    try:
-        import memory as memory_module
-        memory_key = memory_module.user_key(session, signed_in())
-    except Exception:  # noqa: BLE001
-        memory_key = ""
-
-    # 2. Криптографические права хода: подписанный токен с least-privilege.
-    role = "admin" if admin_flag else ("user" if signed else "guest")
-    media_ready = {kind: _media_ready(kind) for kind in ("image", "audio", "video")}
-    tool_scope = _run_tool_scope(tools_allowed=tools_allowed, use_tools=use_tools,
-                                 signed=signed, admin=admin_flag, media_ready=media_ready)
-    _cap_token, capability = capabilities.mint(owner=cap_owner, run_id=run_id,
-                                               role=role, tools=tool_scope)
-
-    # 3. Трасса: один ход — одна трасса, со всеми шагами и решениями.
-    pattern = requested_pattern or (os.getenv("AGENT_PATTERN") or "off").strip().lower()
-    trace = telemetry.start_trace(
-        "agent.turn", run_id=run_id, chat_id=chat_id or "", provider=provider,
-        model=model, engine="agenticseek", role=role, tools=use_tools,
-        pattern=pattern, goal=clip(goal, 200), goal_chars=len(goal),
-        prompt_versions=prompt_registry.record_use_all(),
-        guardrails={"severity": guard_in.severity, "reasons": list(guard_in.reasons)},
-        capability={"role": role, "tools": sorted(capability.tools),
-                    "dropped": list(capability.dropped)})
-    recorder = _TraceRecorder(trace, run_id=run_id, chat_id=chat_id or "")
-    output_guards: list = []
-
-    @stream_with_context
-    def generate():
-        started = time.time()
-        cap_context = capabilities.activate(capability)
-        cap_event = guard_in.event("input")
-        if cap_event["severity"] != guardrails.OK:
-            yield _ndjson(cap_event)
-
-        if tools_allowed:
-            tools_ctx = NovaToolsContext(goal, chat_id or "", emit=lambda event: None,
-                                         signed=signed, owner=owner, memory_key=memory_key)
-            tools_ctx.is_admin = admin_flag
-        else:
-            # Ни перечисления MCP, ни проверки медиа-бэкендов: в прямом режиме
-            # capability-контекст не нужен и не должен ничего трогать.
-            tools_ctx = SimpleNamespace(task_id="", emit=lambda event: None,
-                                        generate_media=None, is_admin=False,
-                                        knowledge_available=False,
-                                        knowledge_owner=cap_owner)
-        memory_block = ""
-        if memory_key:
-            try:
-                import memory as memory_module
-                memory_block = memory_module.prompt_block(memory_key, goal) or ""
-            except Exception:  # noqa: BLE001 — память не должна ломать ход
-                log.debug("memory block failed", exc_info=True)
-        # 4. RAG: фрагменты внутренних документов с цитатами [K1].
-        knowledge_block, knowledge_items = "", []
-        if str(os.getenv("KNOWLEDGE_IN_PROMPT", "1")).strip() != "0":
-            try:
-                import knowledge as knowledge_module
-                knowledge_block, knowledge_items = knowledge_module.default_base().context_block(
-                    goal, limit=4, owner=cap_owner, max_chars=3000)
-            except Exception:  # noqa: BLE001 — база знаний необязательна
-                log.debug("knowledge block failed", exc_info=True)
-        # События о найденных фрагментах отправляет движок сразу после первого
-        # шага: ход должен начинаться со ``stage`` (см. Engine._knowledge_stage).
-        skill_block = ""
-        if tools_allowed:
-            try:
-                import skills_registry
-                skill_block = skills_registry.prompt_context() or ""
-            except Exception:  # noqa: BLE001
-                log.debug("skills block failed", exc_info=True)
-
-        engine = AgentEngine(EngineContext(
-            goal=goal, complete=chat_completion, emit=lambda event: None,
-            provider=provider, model=model, cancel=cancel,
-            history=prior, workspace=use_tools,
-            search=(nova_search if tools_allowed else None),
-            read_page=(_read_page if tools_allowed else None),
-            runner=(_sandbox_runner if tools_allowed else None),
-            tools_ctx=(tools_ctx if tools_allowed else None),
-            memory_prompt=memory_block,
-            knowledge_prompt=knowledge_block,
-            knowledge_items=list(knowledge_items),
-            skills_prompt=(skill_block if tools_allowed else ""),
-            tools_allowed=tools_allowed,
-            strict_mcp=strict_mcp,
-            pattern=pattern,
-            finalize=lambda text: _guarded_finalize(text, goal, output_guards),
-            salvage_answer=lambda text: salvage_quoted_answer(text, goal),
-            repair_answer=lambda text: repair_truncated_answer(text, goal),
-            max_tokens=answer_tokens,
-            chat_id=chat_id or "",
-            run_id=run_id, force_role=("files" if media_kind else ""),
-            media_kind=media_kind or "",
-            media_generate=(tools_ctx.generate_media if media_kind else None),
-            local_model=_local_model,
-            offline=(provider == "local_demo"),
-            force_search=(bool(data.get("search")) and tools_allowed and not strict_mcp),
-            save_research=(terminal_routes._save_research if use_tools else None),
-            max_steps=MAX_STEPS,
-        ))
-        tools_ctx.emit = getattr(engine, "emit", getattr(engine, "_emit", lambda *args, **kwargs: None))
-        result_event = None
-        try:
-            for event in engine.stream():
-                if isinstance(event, dict) and event.get("type") == "result":
-                    result_event = event
-                yield _ndjson(event)
-        finally:
-            capabilities.deactivate(cap_context)
-            finish_run(run_id)
-
-        answer = engine.answer
-        state = engine.state
-        # 5. Выходные ограждения: секреты и эхо системного промпта.
-        for verdict in output_guards:
-            yield _ndjson(verdict.event("output"))
-        markers = _media_markers(state.media)
-        _save_turn(chat_id, history_key, goal, answer, extra_messages=markers)
-        usage = usage_stats.record_turn(
-            chat_id, provider, model, prompt_text=_history_text(prior),
-            answer_text=answer, usage=engine.provider.usage or None)
-        yield _ndjson({"type": "usage", "usage": usage})
-        result = {
-            "type": "result", "reply": answer, "steps": state.steps,
-            "usage": usage, "task_id": tools_ctx.task_id or None,
-            "model": model, "provider": provider,
-            "sources": state.sources, "searched": bool(state.sources),
-            "media": state.media_results, "linux": bool(state.tools and use_tools),
-            "tools": state.tools, "offline": provider == "local_demo",
-            "chat_id": chat_id, "run_id": run_id, "engine": "agenticseek",
-            "trace_id": trace.trace_id, "role": role,
-            "knowledge": knowledge_items,
-            "guard": {"severity": guard_in.severity,
-                      "reasons": list(guard_in.reasons),
-                      "output": [violation.event("output")["reasons"]
-                                 for violation in output_guards]},
-            "stopped": state.status == "stopped",
-            "status": "stopped" if state.status == "stopped" else
-                      ("error" if state.status == "error" else "ok"),
-            "error": state.error, "seconds": round(time.time() - started, 1),
-        }
-        # Права хода объявляем перед итогом: интерфейс показывает их в карточке
-        # хода, а поток начинается с шагов агента, как и раньше.
-        yield _ndjson({"type": "capability", **capability.event(), "scope": tool_scope})
-        yield _ndjson(result)
-        yield _ndjson({"type": "done"})
-        guard_error = (guard_in.severity == guardrails.BLOCK
-                       or any(violation.severity == guardrails.BLOCK
-                              for violation in output_guards))
-        recorder.finish(result, answer,
-                        "error" if state.status == "error" else
-                        ("guard" if guard_error else "ok"))
-
-    def traced(stream):
-        """Копия потока: пишет трассу шагов в базу и спаны в телеметрию."""
-        collected = []
-        try:
-            for chunk in stream:
-                collected.extend(_trace_entries(chunk))
-                try:
-                    recorder.feed(json.loads(chunk))
-                except (TypeError, ValueError):
-                    pass
-                yield chunk
-        finally:
-            try:
-                database.save_trace(chat_id, run_id, collected)
-            except Exception:  # noqa: BLE001
-                log.warning("Не удалось сохранить трассу шагов", exc_info=True)
-            if trace.status == "running":
-                # Клиент оборвал поток: трасса всё равно должна закрыться.
-                recorder.finish(None, "", "cancelled")
-
-    return Response(traced(generate()), mimetype="application/x-ndjson",
-                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no",
-                             "X-Agent-Run-Id": run_id,
-                             "X-Agent-Engine": "agenticseek",
-                             "X-Trace-Id": trace.trace_id,
-                             "X-Agent-Role": role,
-                             "X-RateLimit-Limit": str(limit),
-                             "X-RateLimit-Remaining": str(remaining)})
-
-
-def _local_model(messages):
-    """Офлайн-ответчик NovaMind (local_llm) — только при provider=local_demo."""
-    import local_llm
-    return local_llm.complete(messages)
-
-
-_GITHUB_URL_RE = re.compile(
-    r"^https?://github\.com/([^/\s?#]+)/([^/\s?#]+?)(?:\.git)?"
-    r"(?:/(tree|blob)/([^/\s?#]+)(?:/([^\s?#]*))?)?/?(?:\?.*)?(?:#.*)?$",
-    re.I,
-)
-
-
-def _format_github_tree(entries: list[dict], subpath: str = "", max_entries: int = 180) -> str:
-    """Формирует компактное ASCII-дерево файлов и папок из ответа GitHub git/trees API."""
-    prefix = (subpath.strip("/") + "/") if subpath.strip("/") else ""
-    items: list[tuple[str, str]] = []
-    for entry in entries or []:
-        if not isinstance(entry, dict):
-            continue
-        raw_path = str(entry.get("path") or "").strip("/")
-        kind = str(entry.get("type") or "blob")
-        if not raw_path:
-            continue
-        if prefix:
-            if not raw_path.startswith(prefix):
-                continue
-            raw_path = raw_path[len(prefix):]
-            if not raw_path:
-                continue
-        items.append((raw_path, kind))
-    if not items:
-        return ""
-
-    # Если файлов очень много — сначала приоритет верхним уровням (глубина <= 2).
-    omitted = 0
-    if len(items) > max_entries:
-        shallow = [it for it in items if it[0].count("/") <= 1]
-        deep = [it for it in items if it[0].count("/") > 1]
-        selected = shallow[:max_entries]
-        if len(selected) < max_entries:
-            selected.extend(deep[: max_entries - len(selected)])
-        omitted = len(items) - len(selected)
-        items = selected
-
-    tree: dict[str, dict] = {}
-    dirs: set[str] = set()
-    for rel_path, kind in items:
-        parts = [p for p in rel_path.split("/") if p]
-        node = tree
-        cur = ""
-        for idx, part in enumerate(parts):
-            cur = f"{cur}/{part}" if cur else part
-            is_last = idx == len(parts) - 1
-            if not is_last or kind == "tree":
-                dirs.add(cur)
-            node = node.setdefault(part, {})
-
-    lines: list[str] = []
-
-    def _walk(node: dict[str, dict], parent_path: str, indent: str) -> None:
-        def _sort_key(name: str):
-            full = f"{parent_path}/{name}" if parent_path else name
-            return (0 if full in dirs else 1, name.lower())
-
-        keys = sorted(node.keys(), key=_sort_key)
-        for idx, name in enumerate(keys):
-            is_last = idx == len(keys) - 1
-            full = f"{parent_path}/{name}" if parent_path else name
-            is_dir = full in dirs or bool(node[name])
-            connector = "└── " if is_last else "├── "
-            lines.append(f"{indent}{connector}{name}{'/' if is_dir else ''}")
-            if node[name]:
-                next_indent = indent + ("    " if is_last else "│   ")
-                _walk(node[name], full, next_indent)
-
-    _walk(tree, "", "")
-    if omitted > 0:
-        lines.append(f"└── … (ещё {omitted} элементов опущено для компактности)")
-    return "\n".join(lines)
-
-
-def _read_page(url, max_chars=8000):
-    """Чтение страницы для веб-агента (с поддержкой дерева файлов и файлов GitHub)."""
-    gh = _GITHUB_URL_RE.match(str(url or "").strip())
-    if gh:
-        try:
-            import httpx
-            owner, repo, view_kind, ref, subpath = (
-                gh.group(1),
-                gh.group(2),
-                (gh.group(3) or "").lower(),
-                gh.group(4) or "",
-                (gh.group(5) or "").strip("/"),
-            )
-            head = {"User-Agent": "NovaMind", "Accept": "application/vnd.github+json"}
-            gh_token = (os.getenv("GITHUB_TOKEN") or "").strip()
-            if gh_token:
-                head["Authorization"] = f"Bearer {gh_token}"
-
-            if view_kind == "blob" and ref and subpath:
-                raw_resp = httpx.get(
-                    f"https://api.github.com/repos/{owner}/{repo}/contents/{subpath}",
-                    params={"ref": ref},
-                    headers={**head, "Accept": "application/vnd.github.raw+json"},
-                    timeout=15,
-                    follow_redirects=True,
-                )
-                if raw_resp.status_code == 200:
-                    header = f"GitHub файл {owner}/{repo} ({ref}) · {subpath}\n\n"
-                    return (header + raw_resp.text)[:max_chars], ""
-
-            meta_resp = httpx.get(
-                f"https://api.github.com/repos/{owner}/{repo}",
-                headers=head,
-                timeout=15,
-            )
-            meta = meta_resp.json() if meta_resp.status_code == 200 else {}
-            branch = ref or str(meta.get("default_branch") or "main")
-            title = (
-                f"GitHub {owner}/{repo} (ветка: {branch}) · "
-                f"звёзд: {meta.get('stargazers_count', '?')} · "
-                f"язык: {meta.get('language') or '—'} · "
-                f"{meta.get('description') or ''}"
-            ).strip()
-
-            sections = [title]
-            tree_resp = httpx.get(
-                f"https://api.github.com/repos/{owner}/{repo}/git/trees/{branch}",
-                params={"recursive": "1"},
-                headers=head,
-                timeout=15,
-            )
-            if tree_resp.status_code == 200:
-                tree_json = tree_resp.json()
-                rendered_tree = _format_github_tree(tree_json.get("tree") or [], subpath=subpath)
-                if rendered_tree:
-                    root_label = f"{repo}/{subpath}" if subpath else f"{repo}/"
-                    sections.append(f"Структура репозитория (дерево файлов):\n{root_label}\n{rendered_tree}")
-
-            readme_url = (
-                f"https://api.github.com/repos/{owner}/{repo}/readme/{subpath}"
-                if subpath else f"https://api.github.com/repos/{owner}/{repo}/readme"
-            )
-            readme_params = {"ref": branch} if ref else None
-            readme = httpx.get(
-                readme_url,
-                params=readme_params,
-                headers={**head, "Accept": "application/vnd.github.raw+json"},
-                timeout=15,
-                follow_redirects=True,
-            )
-            if readme.status_code == 200 and readme.text.strip():
-                sections.append("README:\n" + readme.text.strip()[:3000])
-
-            if len(sections) > 1 or meta:
-                return "\n\n".join(sections)[:max_chars], ""
-        except Exception:
-            pass
-    from routes.search import fetch_page_text
-    fetched = fetch_page_text(url, max_chars=max_chars)
-    if isinstance(fetched, tuple):
-        return fetched[0], fetched[1]
-    return fetched, ""
+    """Compatibility endpoint; all agent turns use the first-party ReAct runner."""
+    from routes.react_agent import start_react_run
+    payload = request.get_json(silent=True) or {}
+    if "workspace" not in payload:
+        payload["workspace"] = bool(can_use_workspace())
+    return start_react_run(payload)
 
 
 @agent_bp.route("/api/usage", methods=["GET"])

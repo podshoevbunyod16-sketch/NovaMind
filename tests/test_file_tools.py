@@ -49,8 +49,8 @@ def _stub(monkeypatch, answers):
     def completion(messages, **kwargs):
         return (queue.pop(0) if queue else "готово"), {}
 
-    monkeypatch.setattr(agent_routes, "chat_completion", completion)
-    monkeypatch.setattr(agent_routes, "chat_stream", lambda *a, **k: iter(()))
+    import ai_providers
+    monkeypatch.setattr(ai_providers, "chat_completion", completion)
     return queue
 
 
@@ -148,7 +148,8 @@ def test_agent_edits_file_via_file_edit(admin_client, sandbox, monkeypatch):
                                        json={"message": "обнови версию в app.py до 2.0"}))
     assert "VERSION = '2.0'" in (sandbox / "app.py").read_text(encoding="utf-8")
     tool = next(event for event in events if event["type"] == "tool" and event["name"] == "file_edit")
-    assert "- VERSION = '1.0'" in tool["output"] and "+ VERSION = '2.0'" in tool["output"]
+    diff = tool["result"]["diff"]
+    assert "-VERSION = '1.0'" in diff and "+VERSION = '2.0'" in diff
     assert "Обновил версию" in _answer(events)
 
 
@@ -165,9 +166,9 @@ def test_file_edit_refuses_ambiguous_or_missing_fragment(admin_client, sandbox, 
                                        json={"message": "поправь переменную в файле app.py"}))
     assert (sandbox / "app.py").read_text(encoding="utf-8") == "x = 1\nx = 1\n"
     tools = events_of(events, "tool")
-    assert [tool["code"] for tool in tools] == [1, 1]
-    assert "неоднозначна" in tools[0]["output"]
-    assert "нет фрагмента" in tools[1]["output"]
+    assert [tool["result"]["error"]["type"] for tool in tools] == ["ambiguous", "not_found"]
+    assert "2 раз" in tools[0]["result"]["error"]["message"]
+    assert "не найдено" in tools[1]["result"]["error"]["message"]
 
 
 def test_agent_write_existing_file_returns_hint(admin_client, sandbox, monkeypatch):
@@ -182,7 +183,9 @@ def test_agent_write_existing_file_returns_hint(admin_client, sandbox, monkeypat
                                        json={"message": "перепиши файл app.py"}))
     assert (sandbox / "app.py").read_text(encoding="utf-8") == "старое содержимое\n"
     tool = events_of(events, "tool")[0]
-    assert tool["code"] == 1 and "file_edit" in tool["output"]
+    assert tool["name"] == "file_write"
+    assert tool["result"]["error"]["type"] == "file_exists"
+    assert "file_edit" in tool["result"]["error"]["message"]
     assert "Нужна точечная правка" in _answer(events)
 
 
@@ -195,25 +198,26 @@ def test_agent_creates_new_file_and_lists_it(admin_client, sandbox, monkeypatch)
 
     events = _ndjson(admin_client.post("/api/agent/stream",
                                        json={"message": "создай файл со списком задач в папке notes"}))
-    assert (sandbox / "notes" / "todo.md").read_text(encoding="utf-8") == "- первая задача\n"
+    assert (sandbox / "notes" / "todo.md").read_text(encoding="utf-8") == "- первая задача"
     tools = events_of(events, "tool")
-    assert tools[0]["name"] == "python" and "todo.md" in tools[0]["command"]
-    assert "todo.md" in tools[1]["output"]
+    assert tools[0]["name"] == "file_write"
+    assert json.loads(tools[0]["command"])["path"] == "notes/todo.md"
+    assert "todo.md" in tools[1]["result"]["stdout"]
 
 
 def test_agent_greps_and_lists_tree(admin_client, sandbox, monkeypatch):
-    """Поиск по содержимому и структура папки — через песочницу (bash)."""
+    """Поиск содержимого и дерево идут через отдельные first-party инструменты."""
     (sandbox / "main.py").write_text("def hello():\n    return 1\n", encoding="utf-8")
     script(monkeypatch, [
-        "```bash\ngrep -n hello main.py\n```",
-        "```bash\nls -R\n```",
+        '```json\n{"tool":"file_search","arguments":{"pattern":"hello","path":"."}}\n```',
+        '```json\n{"tool":"file_tree","arguments":{"path":"."}}\n```',
         "Нашёл функцию",
     ])
 
     events = _ndjson(admin_client.post("/api/agent/stream",
                                        json={"message": "найди функцию hello в коде проекта"}))
-    tools = [event["name"] for event in events if event["type"] == "tool"]
-    assert tools == ["terminal", "terminal"]
-    assert "1:def hello():" in events_of(events, "tool")[0]["output"]
-    assert "main.py" in events_of(events, "tool")[1]["output"]
+    tools = events_of(events, "tool")
+    assert [event["name"] for event in tools] == ["file_search", "file_tree"]
+    assert tools[0]["result"]["matches"][0]["path"] == "main.py"
+    assert "main.py" in tools[1]["result"]["tree"]
     assert "Нашёл функцию" in _answer(events)

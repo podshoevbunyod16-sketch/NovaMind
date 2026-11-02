@@ -65,33 +65,35 @@ ISSUER = "novamind"
 DEFAULT_TTL = int(os.getenv("AGENT_CAP_TTL", "1800"))
 CLOCK_SKEW = 30
 
-#: Роли и максимум их прав. Имена инструментов — как в движке AgenticSeek
-#: (``_build_tools``) и в мосте NovaMind (``nova_tools``).
+#: Роли и максимум прав для единого first-party реестра инструментов.
 ROLE_SCOPES: dict[str, frozenset[str]] = {
     "guest": frozenset({
-        "web_search", "web_open", "knowledge_search", "recall", "remember",
-        "forget", "task", "task_done", "skill_create", "image", "audio", "video",
+        "web_search", "web_open", "web_fetch", "knowledge_search", "recall", "remember",
+        "forget", "task", "task_done", "skill_create", "image", "image_generate", "audio", "video",
+        "ask_user",
     }),
     "user": frozenset({
-        "web_search", "web_open", "knowledge_search", "recall", "remember",
-        "forget", "task", "task_done", "skill_create", "image", "audio", "video",
+        "web_search", "web_open", "web_fetch", "knowledge_search", "recall", "remember",
+        "forget", "task", "task_done", "skill_create", "image", "image_generate", "audio", "video",
+        "ask_user",
         # рабочая папка
-        "terminal", "python", "file_read", "file_write", "file_edit", "file_find",
-        "shell", "git", "file_delete",
+        "terminal", "python", "file_read", "file_write", "file_edit", "file_find", "file_list", "file_tree", "file_search",
+        "shell", "bash", "git", "file_delete",
     }),
     "admin": frozenset({
-        "web_search", "web_open", "knowledge_search", "recall", "remember",
-        "forget", "task", "task_done", "skill_create", "image", "audio", "video",
-        "terminal", "python", "file_read", "file_write", "file_edit", "file_find",
-        "shell", "git", "file_delete",
+        "web_search", "web_open", "web_fetch", "knowledge_search", "recall", "remember",
+        "forget", "task", "task_done", "skill_create", "image", "image_generate", "audio", "video",
+        "ask_user",
+        "terminal", "python", "file_read", "file_write", "file_edit", "file_find", "file_list", "file_tree", "file_search",
+        "shell", "bash", "git", "file_delete",
         "mcp_call", "schedule",
     }),
 }
 
 #: Инструменты, которым нужна рабочая папка. Проверяются дополнительно:
 #: даже с ролью ``user`` вызов требует активного токена именно этого хода.
-WORKSPACE_TOOLS = frozenset({"terminal", "python", "file_read", "file_write",
-                             "file_edit", "file_find", "shell", "git", "file_delete"})
+WORKSPACE_TOOLS = frozenset({"terminal", "python", "file_read", "file_write", "file_list", "file_tree", "file_search",
+                             "file_edit", "file_find", "shell", "bash", "git", "file_delete"})
 
 _ALIASES = {"bash": "terminal", "shell": "terminal", "files": "file_read",
             "file_finder": "file_find"}

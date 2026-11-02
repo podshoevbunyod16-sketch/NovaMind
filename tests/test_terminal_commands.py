@@ -1,87 +1,112 @@
+import json
 import pytest
-from types import SimpleNamespace
-from agenticseek.tools.terminal_commands import parse_command, dispatch
+
+from routes.terminal import _python_command, _run_python_gateway
 
 
-@pytest.mark.parametrize('command,target,body', [
-    ("nova web search 'python docs'", 'web_search', 'python docs'),
-    ("nova web open 'https://example.com'", 'web_open', 'https://example.com'),
-    ('nova mcp call \'{"server_id":"github","tool":"search"}\'',
-     'mcp_call', '{"server_id":"github","tool":"search"}'),
-    ('nova call file_read \'{"path":"README.md"}\'',
-     'file_read', '{"path":"README.md"}'),
-    ('python3 -m novamind_cli call file_read \'{"path":"README.md"}\'',
-     'file_read', '{"path":"README.md"}'),
-    ('python -m novamind_cli mcp call \'{"server_id":"github","tool":"search"}\'',
-     'mcp_call', '{"server_id":"github","tool":"search"}'),
+@pytest.mark.parametrize(("command", "expected"), [
+    (["python3", "-m", "novamind_cli", "tools"], ("__tools__", "{}")),
+    (["python", "-m", "novamind_cli", "mcp", "tools"], ("__mcp_tools__", "{}")),
+    (["python3", "-m", "novamind_cli", "call", "web_search", '{"query":"weather"}'],
+     ("web_search", '{"query":"weather"}')),
+    (["python", "-m", "novamind_cli", "mcp", "call", '{"server_id":"github","tool":"search"}'],
+     ("mcp_call", '{"server_id":"github","tool":"search"}')),
 ])
-def test_parse(command, target, body):
-    assert parse_command(command) == (target, body)
+def test_native_cli_parser_accepts_only_registered_tool_calls(command, expected):
+    target, body = _python_command(command)
+    assert target == expected[0]
+    assert json.loads(body) == json.loads(expected[1])
 
 
-@pytest.mark.parametrize('command', [
-    'nova call terminal ls', 'nova call python print',
-    'nova web search query ; rm -rf data', 'nova mcp call \'[]\'',
-    'nova call missing',
-    'python3 -m novamind_cli call terminal ls',
-    'python3 -m novamind_cli mcp call \'[]\'',
-    'python3 -m novamind_cli call web_search \'{"query":\'',
+@pytest.mark.parametrize(("command", "message"), [
+    (["python3", "-m", "novamind_cli", "call", "shell", "[]"], "JSON-объект"),
+    (["python3", "-m", "novamind_cli", "call", "web_search", "{"], "invalid JSON"),
+    (["python3", "-m", "novamind_cli", "mcp", "call", "[]"], "JSON-объект"),
+    (["python3", "-m", "novamind_cli", "exec", "rm", "-rf"], "Ожидается"),
 ])
-def test_reject(command):
-    with pytest.raises(ValueError):
-        parse_command(command)
+def test_native_cli_parser_rejects_malformed_or_arbitrary_commands(command, message):
+    with pytest.raises(ValueError, match=message):
+        _python_command(command)
 
 
-def test_normal_shell_unchanged():
-    assert parse_command('python3 report.py') is None
-    assert parse_command('nova search example') is None
+def test_regular_python_script_is_not_intercepted():
+    assert _python_command(["python3", "report.py"]) is None
+    assert _python_command(["python3", "-c", "print(1)"]) is None
+    assert _python_command(["python3", "-m", "other_cli", "call", "web_search", "{}"] ) is None
 
 
-def test_delegation_uses_target_policy_path():
+def test_gateway_routes_validated_arguments_to_unified_tool_registry(monkeypatch):
+    import tool_registry
+    monkeypatch.setattr(tool_registry, "bootstrap_default_tools", lambda: None)
+    monkeypatch.setattr(tool_registry, "_workspace_guard", lambda: None)
+    seen = []
+    monkeypatch.setattr(tool_registry, "call_tool", lambda name, **kwargs:
+                        seen.append((name, kwargs)) or {"ok": True, "result": "done"})
+    result = _run_python_gateway(["python3", "-m", "novamind_cli", "call",
+                                  "web_search", '{"query":"Khujand"}'])
+    assert result["exit_code"] == 0
+    assert json.loads(result["stdout"]) == {"ok": True, "result": "done"}
+    assert seen == [("web_search", {"query": "Khujand"})]
+
+
+def test_gateway_produces_error_without_executing_malformed_tool_call(monkeypatch):
+    import tool_registry
     calls = []
-    agent = SimpleNamespace(
-        all_tools=lambda: {'mcp_call': object()},
-        run_tool=lambda *args: calls.append(args) or (False, 'denied'),
-    )
-    result = dispatch(agent, 'nova mcp call \'{"tool":"push"}\'')
-    assert result == (False, 'denied')
-    assert calls == [('mcp_call', '{"tool":"push"}')]
+    monkeypatch.setattr(tool_registry, "bootstrap_default_tools", lambda: None)
+    monkeypatch.setattr(tool_registry, "call_tool", lambda *a, **kw: calls.append((a, kw)))
+    result = _run_python_gateway(["python3", "-m", "novamind_cli", "call", "web_search", "[]"])
+    assert result["exit_code"] == 2
+    assert "JSON-объект" in result["stderr"]
+    assert calls == []
 
 
-def test_python_gateway_adapts_json_to_legacy_tool_payloads():
-    calls = []
-    agent = SimpleNamespace(
-        all_tools=lambda: {"web_search": object(), "web_open": object(),
-                           "file_find": object(), "file_write": object()},
-        run_tool=lambda *args: calls.append(args) or (True, "[success] ok"),
-    )
-    assert dispatch(agent, "python3 -m novamind_cli call web_search "
-                           "'{\"query\":\"weather Khujand\"}'")[0] is True
-    assert dispatch(agent, "python3 -m novamind_cli call web_open "
-                           "'{\"url\":\"https://example.com\"}'")[0] is True
-    assert dispatch(agent, "python3 -m novamind_cli call file_find "
-                           "'{\"name\":\"app.py\"}'")[0] is True
-    assert dispatch(agent, "python3 -m novamind_cli call file_write "
-                           "'{\"path\":\"note.txt\",\"content\":\"hello\"}'")[0] is True
-    assert calls == [
-        ("web_search", "weather Khujand"),
-        ("web_open", "https://example.com"),
-        ("file_find", "action=find\nname=app.py"),
-        ("file_write", "hello", "note.txt"),
-    ]
+def test_gateway_refuses_workspace_tool_when_access_check_fails(monkeypatch):
+    import tool_registry
+    tool_registry.bootstrap_default_tools()
+    denied = {"ok": False, "error": {"type": "unauthorized", "message": "login required"}}
+    monkeypatch.setattr(tool_registry, "_workspace_guard", lambda: denied)
+    result = _run_python_gateway(["python3", "-m", "novamind_cli", "call",
+                                  "file_read", '{"path":"secret.txt"}'])
+    assert result["exit_code"] == 1
+    assert "unauthorized" in result["stderr"]
 
 
-def test_unavailable_not_called():
-    agent = SimpleNamespace(all_tools=lambda: {})
-    assert dispatch(agent, "nova call file_read README.md")[0] is False
+def test_gateway_tool_failure_keeps_structured_failure(monkeypatch):
+    import tool_registry
+    monkeypatch.setattr(tool_registry, "bootstrap_default_tools", lambda: None)
+    monkeypatch.setattr(tool_registry, "_workspace_guard", lambda: None)
+    monkeypatch.setattr(tool_registry, "call_tool", lambda *_a, **_kw:
+                        {"ok": False, "error": {"type": "upstream", "message": "offline"}})
+    result = _run_python_gateway(["python3", "-m", "novamind_cli", "call",
+                                  "web_search", '{"query":"x"}'])
+    assert result["exit_code"] == 1
+    assert json.loads(result["stderr"])["error"]["type"] == "upstream"
 
 
-def test_catalog_is_request_local():
-    steps = []
-    agent = SimpleNamespace(
-        all_tools=lambda: {'web_open': SimpleNamespace(tag='web_open', description='Read')},
-        take_step=lambda: steps.append(1),
-    )
-    assert 'web_open' in dispatch(agent, 'nova tools')[1]
-    assert steps == [1]
-    assert dispatch(agent, 'nova mcp tools')[0] is False
+def test_tools_catalog_uses_the_single_registry(monkeypatch):
+    import tool_registry
+    monkeypatch.setattr(tool_registry, "bootstrap_default_tools", lambda: None)
+    monkeypatch.setattr(tool_registry, "tool_schemas", lambda: [{"name": "web_search"}])
+    result = _run_python_gateway(["python3", "-m", "novamind_cli", "tools"])
+    assert result["exit_code"] == 0
+    assert json.loads(result["stdout"]) == {"web_search": ""}
+
+
+def test_mcp_catalog_is_read_only_and_request_local(monkeypatch):
+    import mcp_registry
+    import tool_registry
+    monkeypatch.setattr(tool_registry, "bootstrap_default_tools", lambda: None)
+    monkeypatch.setattr(mcp_registry, "connected_tools", lambda: [{"server_id": "demo", "name": "search"}])
+    result = _run_python_gateway(["python3", "-m", "novamind_cli", "mcp", "tools"])
+    assert result["exit_code"] == 0
+    assert json.loads(result["stdout"]) == [{"server_id": "demo", "name": "search"}]
+
+
+@pytest.mark.parametrize(("alias", "canonical"), [
+    ("web_fetch", "web_fetch"), ("file_list", "file_list"),
+    ("bash", "bash"), ("python", "python"), ("image_generate", "image_generate"),
+])
+def test_gateway_preserves_registry_alias_names(alias, canonical):
+    target, body = _python_command(["python3", "-m", "novamind_cli", "call", alias, "{}"])
+    assert target == canonical
+    assert json.loads(body) == {}

@@ -1,118 +1,76 @@
-"""Модель отвечает тегами `<bash>` вместо блоков — движок должен их понять.
-
-Реальный случай с телефона: на просьбу «создай интернет-магазин» модель
-ответила `<bash>pip install flask_sqlalchemy</bash>`, движок команду не
-выполнил, а теги и придуманный «вывод» попали в ответ пользователю. Здесь
-проверяется, что такие ответы нормализуются, выполняются и не протекают в
-текст для пользователя.
-"""
-
-import json
-
-from agenticseek.core.markup import has_legacy_tags, normalize_answer, sanitize_answer
-from tests.agent_helpers import answer_of, events_of, model_text, ndjson, script
+"""Agent tool calls use the explicit ReAct JSON contract, never markup lookalikes."""
+from agent.loop import AgentContext, run_react
+from guardrails import check_output
+from tool_registry import ToolSpec
 
 
-def _post(client, message):
-    return ndjson(client.post("/api/agent/stream", json={"message": message}))
+LOOKUP = ToolSpec(
+    "lookup", "Return a fixture value for a query.",
+    {"type": "object", "properties": {"query": {"type": "string"}},
+     "required": ["query"], "additionalProperties": False},
+    lambda **kwargs: {"ok": True, "result": ""}, risk="safe")
 
 
-# ══════════════ чистые функции ══════════════
-
-def test_legacy_bash_tags_become_blocks():
-    text = "Ставлю пакет.<bash>\npip install flask\n</bash>Готово."
-    normalized = normalize_answer(text)
-    assert "```bash\npip install flask\n```" in normalized
-    assert "<bash>" not in normalized
-
-
-def test_invented_output_is_dropped():
-    """`<bash code_output>` — выдумка модели, показывать её нельзя."""
-    text = ("<bash>pip install x</bash>"
-            "<bash code_output>Successfully installed x-1.0</bash_output>"
-            "Готово.")
-    assert "Successfully installed" not in sanitize_answer(text)
-    assert "Successfully installed" not in normalize_answer(text)
+def test_markup_like_command_is_plain_text_not_an_action():
+    calls = []
+    result = run_react(AgentContext(
+        "Explain this example", complete=lambda *a, **k: ("<bash>echo should-not-run</bash>", {}),
+        tools=[LOOKUP], call_tool=lambda *a, **k: calls.append((a, k))))
+    assert calls == []
+    assert "echo should-not-run" in result.answer
+    assert result.steps == 0
 
 
-def test_plain_answers_are_untouched():
-    plain = "```bash\nls -la\n```\nСписок файлов выше."
-    assert normalize_answer(plain) == plain
-    assert sanitize_answer(plain) == plain
-    assert has_legacy_tags(plain) is False
-
-
-def test_tags_are_on_their_own_lines():
-    """Склейка «Ставлю пакет.```bash» ломает разбор блока."""
-    normalized = normalize_answer("Ставлю.<bash>\nls\n</bash>Готово.")
-    assert "Ставлю.\n```bash\nls\n```\nГотово." == normalized.strip()
-
-
-# ══════════════ в потоке агента ══════════════
-
-def test_legacy_bash_tag_actually_runs(admin_client, sandbox, monkeypatch):
-    seen = []
-    script(monkeypatch, [
-        "Записываю файл.<bash>\nprintf 'shop' > legacy.txt\n</bash>",
-        "Готово.",
-    ], seen)
-
-    events = _post(admin_client, "создай сайт на flask")
-
-    tool = events_of(events, "tool")[0]
-    assert tool["name"] == "terminal" and "printf" in tool["command"]
-    assert (sandbox / "legacy.txt").read_text(encoding="utf-8") == "shop"
-    # Пользователь не видит XML-протокол.
-    assert "<bash" not in answer_of(events)
-
-
-def test_invented_output_never_reaches_the_user(admin_client, sandbox, monkeypatch):
-    script(monkeypatch, [
-        'Устанавливаю.<bash>\necho real\n</bash>'
-        '<bash code_output>Successfully installed flask</bash_output>',
-        "Готово: пакет установлен.",
+def test_fenced_json_uses_only_the_declared_tool_and_arguments():
+    responses = iter([
+        ('```json\n{"tool":"lookup","arguments":{"query":"real"}}\n```', {}),
+        ("Команда вернула реальный вывод real.", {"model": "mock"}),
     ])
-
-    events = _post(admin_client, "поставь flask")
-
-    reply = answer_of(events)
-    assert "Successfully installed" not in reply
-    assert "bash_output" not in reply and "<bash" not in reply
-    assert events_of(events, "tool")[0]["name"] == "terminal"
-
-
-def test_written_python_file_is_not_executed(admin_client, sandbox, monkeypatch):
-    """`python:app.py` — запись файла. Запуск отдельным блоком, иначе сервер висит."""
-    answered = []
-    script(monkeypatch, [
-        "```python:app.py\n"
-        "from flask import Flask\napp = Flask(__name__)\n"
-        "print('этот print не должен выполниться')\n"
-        "if __name__ == '__main__':\n    app.run()\n"
-        "```",
-        "Создал app.py",
-    ], answered)
-
-    events = _post(admin_client, "создай сайт на flask")
-
-    assert (sandbox / "app.py").is_file()
-    tool = events_of(events, "tool")[0]
-    assert "не выполнялся" in tool["output"]
-    # Приложение не запускалось: сервер не занимал терминал.
-    assert "этот print не должен выполниться" not in tool["output"]
-    assert "test client" in model_text(answered, 1)
+    calls = []
+    result = run_react(AgentContext(
+        "Выполни команду printf real", complete=lambda *a, **k: next(responses),
+        tools=[LOOKUP], call_tool=lambda name, **kwargs:
+            calls.append((name, kwargs)) or {"ok": True, "result": "real"}))
+    assert calls == [("lookup", {"query": "real"})]
+    assert result.steps == 1
+    assert "real" in result.answer
 
 
-def test_empty_python_output_gets_a_hint(admin_client, sandbox, monkeypatch):
-    """Блок из одних import — «успех» без результата; модель должна узнать почему."""
-    answered = []
-    script(monkeypatch, [
-        "```python\nfrom flask import Flask, render_template\n```",
-        "Готово.",
-    ], answered)
+def test_model_cannot_forge_successful_shell_output_with_markup():
+    calls = []
+    result = run_react(AgentContext(
+        "Создай файл report.txt", complete=lambda *a, **k:
+            ("<bash>touch report.txt</bash><bash code_output>created</bash_output>", {}),
+        tools=[LOOKUP], call_tool=lambda *a, **k: calls.append((a, k))))
+    assert calls == []
+    assert result.steps == 0
+    assert "не могу честно подтвердить завершение" in result.answer.lower()
 
-    _post(admin_client, "создай сайт на flask")
 
-    feedback = model_text(answered, 1)
-    assert "ничего не вывел" in feedback
-    assert "python:app.py" in feedback
+def test_output_guard_removes_dangerous_html_and_redacts_secrets():
+    secret = "sk-" + "a" * 36
+    verdict = check_output(f"Итог {secret} <script>alert(1)</script>")
+    assert verdict.allowed
+    assert secret not in verdict.text
+    assert "<script>" not in verdict.text
+    assert "[скрыто:" in verdict.text
+
+
+def test_clean_text_answer_is_unchanged():
+    text = "Работа не запускалась; это только пример команды echo hello."
+    verdict = check_output(text)
+    assert verdict.text == text
+    assert not verdict.meta.get("changed")
+
+
+def test_malformed_or_non_json_tool_text_does_not_execute():
+    calls = []
+    responses = iter([
+        ('```json\n{"tool":"lookup","arguments": {broken}}\n```', {}),
+        ("Аргументы некорректны; команда не выполнялась.", {}),
+    ])
+    result = run_react(AgentContext("Проверь", complete=lambda *a, **k: next(responses),
+                                    tools=[LOOKUP], call_tool=lambda *a, **k: calls.append(a)))
+    assert calls == []
+    assert result.steps == 0
+    assert "arguments" in result.answer and "broken" in result.answer

@@ -753,7 +753,7 @@ def delete_task(task_id):
 
 
 # ══════════════════════════════════════════════════════════════
-# ЗАПУСКИ АГЕНТА (движок AgenticSeek)
+# Запуски первого-party ReAct агента
 #
 # Один ход агента = запись в agent_runs + шаги в agent_run_steps. Это
 # отдельная сущность, а не часть истории сообщений: история чата не
@@ -776,7 +776,7 @@ def init_agent_runs():
                     chat_id TEXT DEFAULT '',
                     run_id TEXT DEFAULT '',
                     goal TEXT NOT NULL DEFAULT '',
-                    engine TEXT NOT NULL DEFAULT 'agenticseek',
+                    engine TEXT NOT NULL DEFAULT 'react',
                     status TEXT NOT NULL DEFAULT 'running',
                     route TEXT DEFAULT '',
                     provider TEXT DEFAULT '',
@@ -785,6 +785,9 @@ def init_agent_runs():
                     steps INTEGER NOT NULL DEFAULT 0,
                     answer TEXT DEFAULT '',
                     error TEXT DEFAULT '',
+                    context TEXT NOT NULL DEFAULT '{}',
+                    pending_question TEXT NOT NULL DEFAULT '',
+                    outcome TEXT NOT NULL DEFAULT '',
                     started_at REAL NOT NULL,
                     finished_at REAL
                 );
@@ -823,6 +826,9 @@ def _ensure_agent_columns(conn):
             "model": "TEXT DEFAULT ''", "plan": "TEXT NOT NULL DEFAULT '[]'",
             "steps": "INTEGER NOT NULL DEFAULT 0", "answer": "TEXT DEFAULT ''",
             "error": "TEXT DEFAULT ''", "finished_at": "REAL",
+            "context": "TEXT NOT NULL DEFAULT '{}'",
+            "pending_question": "TEXT NOT NULL DEFAULT ''",
+            "outcome": "TEXT NOT NULL DEFAULT ''",
         },
         "agent_run_steps": {
             "label": "TEXT DEFAULT ''", "ok": "INTEGER NOT NULL DEFAULT 1",
@@ -837,7 +843,7 @@ def _ensure_agent_columns(conn):
 
 
 def create_agent_run(goal, chat_id="", run_id="", provider="", model="",
-                     engine="agenticseek"):
+                     engine="react"):
     """Регистрирует запуск агента. Возвращает id записи ("" при ошибке)."""
     init_agent_runs()
     record_id = str(uuid.uuid4())
@@ -848,7 +854,7 @@ def create_agent_run(goal, chat_id="", run_id="", provider="", model="",
                 " provider, model, plan, steps, answer, error, started_at, finished_at)"
                 " VALUES (?, ?, ?, ?, ?, 'running', ?, ?, '[]', 0, '', '', ?, NULL)",
                 (record_id, str(chat_id or ""), str(run_id or ""),
-                 str(goal or "")[:4000], str(engine or "agenticseek"),
+                 str(goal or "")[:4000], str(engine or "react"),
                  str(provider or ""), str(model or ""), time.time()),
             )
     return record_id
@@ -860,7 +866,8 @@ def update_agent_run(record_id, **fields):
         return None
     init_agent_runs()
     allowed = ("status", "route", "plan", "steps", "answer", "error",
-               "provider", "model", "finished_at", "chat_id")
+               "provider", "model", "finished_at", "chat_id", "context",
+               "pending_question", "outcome")
     values = {key: fields[key] for key in allowed if key in fields}
     if not values:
         return get_agent_run(record_id)
@@ -870,6 +877,12 @@ def update_agent_run(record_id, **fields):
         values["answer"] = str(values["answer"] or "")[:20000]
     if "error" in values:
         values["error"] = str(values["error"] or "")[:2000]
+    if "context" in values and not isinstance(values["context"], str):
+        values["context"] = json.dumps(values["context"], ensure_ascii=False, default=str)[:200000]
+    if "pending_question" in values and not isinstance(values["pending_question"], str):
+        values["pending_question"] = json.dumps(values["pending_question"], ensure_ascii=False)[:10000]
+    if "outcome" in values:
+        values["outcome"] = str(values["outcome"] or "")[:40]
     sets = ", ".join(f"{key}=?" for key in values)
     with _db_lock:
         with get_db() as conn:

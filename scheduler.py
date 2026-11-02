@@ -238,12 +238,13 @@ def _run_agent_prompt(job):
     """
     from flask import session
     from app import app
-    import routes.agent as agent_routes
+    from routes.react_agent import start_react_run
 
     result = {"reply": "", "error": "", "saved": True}
     import security
     with app.test_request_context(
-            "/api/agent/stream", method="POST", json={"message": job["prompt"]},
+            "/api/agent/react", method="POST",
+            json={"message": job["prompt"], "chat_id": job["result_chat_id"]},
             headers={"X-Internal-Token": security.INTERNAL_RUN_TOKEN}):
         session["chat_id"] = job["result_chat_id"]
         # Личность восстанавливается из владельца задания (его строка - в таблице чатов):
@@ -264,7 +265,7 @@ def _run_agent_prompt(job):
         if job.get("owner_admin"):
             session["admin_logged_in"] = True
             session["admin_username"] = who[6:] if who.startswith("admin:") else "admin"
-        response = agent_routes.agent_stream()
+        response = start_react_run()
         for raw in response.response:
             try:
                 import json

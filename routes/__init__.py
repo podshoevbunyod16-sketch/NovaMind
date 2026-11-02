@@ -7,7 +7,6 @@ from .settings import settings_bp
 from .admin import admin_bp
 from .media import media_bp
 from .search import search_bp
-from .coding_agent import coding_agent_bp
 from .composio import composio_bp
 from .terminal import terminal_bp, tasks_bp
 from .agent import agent_bp
@@ -16,12 +15,14 @@ from .memory import memory_bp
 from .ops import ops_bp
 from .schedule import schedule_bp
 from .tts import tts_bp
+from .workspace import workspace_bp
+from .react_agent import react_bp
+from .github_agent import github_agent_bp
 
 ALL_BLUEPRINTS = [
     chat_bp,
     commands_bp,
     settings_bp,
-    coding_agent_bp,
     admin_bp,
     media_bp,
     search_bp,
@@ -34,4 +35,7 @@ ALL_BLUEPRINTS = [
     ops_bp,
     schedule_bp,
     tts_bp,
+    workspace_bp,
+    react_bp,
+    github_agent_bp,
 ]

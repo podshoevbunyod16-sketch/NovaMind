@@ -13,11 +13,10 @@
 let isRecording    = false;
 let recognition    = null;
 let isTyping       = false;
-// Автопоиск ВКЛЮЧЁН по умолчанию: это и есть «агент с инструментами» —
-// MCP-серверы, скиллы, поиск, терминал. Явно сохранённый '0' уважается,
-// но пустое хранилище больше не отключает инструменты молча: раньше
-// свежий браузер ходил в обход MCP и скиллов, и агент «не использовал» их.
-let webSearchOn    = localStorage.getItem('nova_web_search') !== '0';
+// Инструменты включаются по явному выбору пользователя. При чистом хранилище
+// запрос уходит без инструментов; это соответствует least-privilege и делает
+// согласие на поиск/терминал явным. Выбор сохраняется для следующих ходов.
+let webSearchOn    = localStorage.getItem('nova_web_search') === '1';
 let reasoningOn    = localStorage.getItem('nova_reasoning') === '1';
 // webSearchOn — это и есть кнопка «Автопоиск» (#btn-web-search). Один флаг на
 // всё: включён → агент может работать инструментами (в т.ч. терминалом Linux),
@@ -1291,6 +1290,97 @@ function createAssistantTurn(options = {}) {
       scrollToBottom();
     },
 
+    askUser(event = {}) {
+      if (!event.run_id || bubble.querySelector('.agent-question')) return;
+      const card = document.createElement('form');
+      card.className = 'agent-question';
+      const title = document.createElement('strong');
+      title.textContent = event.question || 'Нужно уточнение';
+      card.appendChild(title);
+      const submit = async (payload) => {
+        const buttons = card.querySelectorAll('button');
+        buttons.forEach((button) => { button.disabled = true; });
+        finished = false;
+        wrap.classList.add('is-working');
+        answerText = '';
+        answerEl.textContent = '';
+        card.remove();
+        try {
+          const response = await fetch('/api/agent/answer', { method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ run_id: event.run_id, ...payload }) });
+          if (!response.ok) throw new Error('Ответ не принят сервером');
+          const final = await consumeReactResponse(response, api);
+          api.finish(final);
+        } catch (error) {
+          api.appendText((answerText ? answerText + '\\n\\n' : '') + (error.message || 'Продолжить не удалось.'));
+          api.finish();
+        }
+      };
+      if (event.type === 'confirmation') {
+        const approve = document.createElement('button'); approve.type = 'button'; approve.textContent = 'Разрешить';
+        const deny = document.createElement('button'); deny.type = 'button'; deny.textContent = 'Отклонить';
+        approve.addEventListener('click', () => submit({ approved: true }));
+        deny.addEventListener('click', () => submit({ approved: false }));
+        card.append(approve, deny);
+      } else {
+        const options = Array.isArray(event.options) ? event.options : [];
+        options.slice(0, 8).forEach((option) => {
+          const button = document.createElement('button'); button.type = 'button';
+          button.textContent = String(option);
+          button.addEventListener('click', () => submit({ answer: String(option) }));
+          card.appendChild(button);
+        });
+        const input = document.createElement('input'); input.type = 'text';
+        input.placeholder = 'Ваш ответ…'; input.maxLength = 4000;
+        const button = document.createElement('button'); button.type = 'submit'; button.textContent = 'Ответить';
+        card.addEventListener('submit', (submitEvent) => {
+          submitEvent.preventDefault(); if (input.value.trim()) submit({ answer: input.value.trim() });
+        });
+        card.append(input, button);
+      }
+      bubble.insertBefore(card, answerEl);
+    },
+
+    completion(runId) {
+      if (!runId || bubble.querySelector('.agent-completion')) return;
+      const box = document.createElement('div');
+      box.className = 'agent-completion';
+      box.innerHTML = '<span>Результат работы</span><button type="button" data-outcome="confirmed">Готово</button><button type="button" data-outcome="continued">Продолжай работать</button>';
+      bubble.appendChild(box);
+      box.addEventListener('click', async (event) => {
+        const button = event.target.closest('button[data-outcome]');
+        if (!button || button.disabled) return;
+        const outcome = button.dataset.outcome;
+        if (outcome === 'continued') {
+          finished = false;
+          wrap.classList.add('is-working');
+          actionsEl.innerHTML = '';
+          box.remove();
+          try {
+            const response = await fetch('/api/agent/finish', { method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ run_id: runId, outcome: 'continued' }) });
+            if (!response.ok) throw new Error('Не удалось продолжить запуск');
+            const final = await consumeReactResponse(response, api);
+            api.finish({ ...final, runId: final.runId || runId });
+          } catch (error) {
+            api.appendText((answerText ? answerText + '\\n\\n' : '') + (error.message || 'Продолжение не удалось.'));
+            api.finish({ runId });
+          }
+          return;
+        }
+        try {
+          const response = await fetch('/api/agent/finish', { method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ run_id: runId, outcome: 'confirmed' }) });
+          if (!response.ok) throw new Error('Не удалось сохранить подтверждение');
+          button.textContent = 'Готово ✓';
+          box.querySelectorAll('button').forEach((item) => { item.disabled = true; });
+        } catch (error) { button.title = error.message || 'Ошибка'; }
+      });
+    },
+
     finish(meta = {}) {
       if (finished) return;
       finished = true;
@@ -1336,6 +1426,7 @@ function createAssistantTurn(options = {}) {
       actionsEl.querySelector('[data-act="regen"]').addEventListener('click', () => {
         if (lastUserMessage) sendMessage(lastUserMessage);
       });
+      if (meta.runId) api.completion(meta.runId);
 
       // Автоозвучка: ровно один раз на завершённый ответ, никогда — для
       // истории, ошибки или остановленной генерации (проверяется в контроллере).
@@ -1548,6 +1639,33 @@ function lastAssistantText() {
 // ══════════════════════════════════════════
 // ПОТОКОВАЯ ОБРАБОТКА NDJSON
 // ══════════════════════════════════════════
+async function consumeReactResponse(response, api) {
+  let result = {};
+  let runId = '';
+  await consumeNdjson(response, (event) => {
+    switch (event.type) {
+      case 'stage': api.setStage(event.scene || 'agent', event.title, event.text); break;
+      case 'plan': api.plan(event); break;
+      case 'step': api.step(event.icon, event.text); break;
+      case 'tool': api.tool(event); break;
+      case 'think': api.think(event); break;
+      case 'thought': api.thought(event); break;
+      case 'reasoning': api.reasoningToken(event.token || ''); break;
+      case 'sources': api.setSources(event.sources || []); break;
+      case 'media': api.addMedia(event.media || {}); break;
+      case 'token': api.appendToken(event.token || ''); break;
+      case 'ask_user':
+      case 'confirmation': api.askUser(event); break;
+      case 'completion': runId = event.run_id || runId; break;
+      case 'error': api.step('⚠️', event.text || 'Ошибка агента'); break;
+      case 'guard': api.step('🛡️', `Проверка безопасности: ${(event.reasons || []).join(', ')}`); break;
+      case 'result': result = event; break;
+      default: break;
+    }
+  });
+  return { ...result, runId };
+}
+
 async function consumeNdjson(response, onEvent) {
   if (!response.body) throw new Error('Браузер не поддерживает потоковый ответ');
   const reader = response.body.getReader();
@@ -1582,8 +1700,14 @@ function setSendBusy(busy) {
 
 function stopGeneration() {
   if (!isTyping) return;
-  // Агент работает на сервере: без run_id он продолжил бы шаги после
-  // закрытия соединения. Поэтому сначала просим его остановиться.
+  // ReAct работает на сервере: попросим его остановиться и оставим NDJSON
+  // открытым, чтобы получить честный итог и кнопки исхода. Обычный поток
+  // можно отменить сразу.
+  if (window.Linux?.state?.runId && typeof window.Linux.stopRun === 'function') {
+    window.Linux.stopRun();
+    showNotification('Останавливаю агент…', 'warn');
+    return;
+  }
   if (window.Linux && typeof window.Linux.stopRun === 'function') window.Linux.stopRun();
   if (activeAbort) {
     activeAbort.abort();

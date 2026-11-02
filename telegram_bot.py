@@ -16,6 +16,7 @@
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -126,6 +127,14 @@ def confirm_keyboard(confirm_id: str) -> dict:
     ]}
 
 
+def react_confirm_keyboard(run_id: str) -> dict:
+    """Per-run approval only; persistent allow rules stay out of the bridge."""
+    return {"inline_keyboard": [
+        [{"text": "✅ Разрешить", "callback_data": f"confirm:{run_id}:yes"}],
+        [{"text": "🚫 Отклонить", "callback_data": f"confirm:{run_id}:no"}],
+    ]}
+
+
 def parse_callback(data: str):
     """'confirm:<id>:yes' → (id, True, False); ':always' → (id, True, True).
 
@@ -141,16 +150,27 @@ def parse_callback(data: str):
 
 # ══════════════ чат пользователя ══════════════
 
+def _telegram_sid(user_id) -> str:
+    """Stable opaque session id; Telegram numeric IDs are not exposed as owners."""
+    digest = hashlib.sha256(str(user_id).encode("utf-8")).hexdigest()[:32]
+    return "tg-" + digest
+
+
+def _telegram_owner(user_id) -> str:
+    return "anon:" + _telegram_sid(user_id)
+
+
 def chat_for(user_id, name="") -> str:
     """Свой чат в базе на каждого telegram-пользователя."""
     title = f"TG {user_id}"
     try:
         for chat in database.list_chats(limit=200):
-            if chat.get("title") == title:
+            if chat.get("title") == title and chat.get("owner") == _telegram_owner(user_id):
                 return chat["id"]
     except Exception:
         pass
-    return database.create_chat(f"{title} · {name}" if name else title)
+    return database.create_chat(f"{title} · {name}" if name else title,
+                                owner=_telegram_owner(user_id))
 
 
 def owner_key(user_id) -> str:
@@ -160,19 +180,23 @@ def owner_key(user_id) -> str:
 # ══════════════ запуск агента ══════════════
 
 def agent_events(user_id, chat_id, text):
-    """Генератор событий агента для одного сообщения из Telegram."""
-    import security
+    """Start the same first-party ReAct runner used by the browser."""
     from app import app
-    import routes.agent as agent_routes
+    from flask import session
+    from routes.react_agent import start_react_run
 
     with app.test_request_context(
-            "/api/agent/stream", method="POST", json={"message": text},
-            headers={"X-Internal-Token": security.INTERNAL_RUN_TOKEN}):
-        from flask import session
+            "/api/agent/react", method="POST",
+            json={"message": text, "chat_id": chat_id}):
         session["chat_id"] = chat_id
+        session["nova_sid"] = _telegram_sid(user_id)
         session["nova_user_nick"] = owner_key(user_id)
         session["nova_signed_in"] = True
-        response = agent_routes.agent_stream()
+        response = start_react_run()
+        if isinstance(response, tuple):
+            body = response[0].get_json(silent=True) or {}
+            yield {"type": "error", "text": body.get("error", "Ошибка запуска агента")}
+            return
         for raw in response.response:
             try:
                 event = json.loads(raw)
@@ -182,13 +206,44 @@ def agent_events(user_id, chat_id, text):
                 yield event
 
 
+def continue_react_run(user_id, run_id, *, answer=None, approved=None):
+    """Resume a durable ReAct pause on behalf of the owning Telegram identity."""
+    from app import app
+    from flask import session
+    from routes.react_agent import answer_react_question
+
+    payload = {"run_id": str(run_id)}
+    if answer is not None:
+        payload["answer"] = str(answer)
+    if approved is not None:
+        payload["approved"] = bool(approved)
+    with app.test_request_context("/api/agent/answer", method="POST", json=payload):
+        session["nova_sid"] = _telegram_sid(user_id)
+        session["nova_user_nick"] = owner_key(user_id)
+        session["nova_signed_in"] = True
+        response = answer_react_question()
+        if isinstance(response, tuple):
+            body = response[0].get_json(silent=True) or {}
+            return [{"type": "error", "text": body.get("error", "Не удалось продолжить запуск")}]
+        events = []
+        for raw in response.response:
+            try:
+                event = json.loads(raw)
+            except (TypeError, ValueError):
+                continue
+            if isinstance(event, dict):
+                events.append(event)
+        return events
+
+
 class Bridge:
     """Мост Telegram ↔ агент. Все внешние вызовы — через self.api."""
 
     def __init__(self, api=None, events_factory=None):
         self.api = api or api_call
         self.events_factory = events_factory or agent_events
-        self.confirms = {}          # confirm_id → (chat_id, message_id)
+        self.confirms = {}          # confirm id → ReAct run / legacy confirmation
+        self.pending_questions = {} # Telegram user id → paused ReAct run
 
     # ── вспомогательное ──
     def send(self, chat_id, text, reply_markup=None):
@@ -219,8 +274,50 @@ class Bridge:
             self.send(chat_id, "Привет! Я NovaMind. Напишите задачу — найду, посчитаю, "
                                "поработаю с кодом. Опасные шаги спрошу кнопками.")
             return True
+        pending = self.pending_questions.pop(user_id, None)
+        if pending:
+            run_id, pending_chat_id = pending
+            self._deliver_react_events(pending_chat_id, user_id,
+                                       continue_react_run(user_id, run_id, answer=text))
+            return True
         self.run_turn(chat_id, user_id, text, name=user.get("first_name") or "")
         return True
+
+    def _deliver_react_events(self, chat_id, user_id, events):
+        answer = ""
+        steps = []
+        for event in events or []:
+            kind = event.get("type")
+            if kind in {"stage", "step"}:
+                label = event.get("text") or event.get("title") or "Работаю над задачей"
+                steps.append(f"{event.get('icon') or '•'} {label}")
+            elif kind == "tool":
+                steps.append(f"🔧 {event.get('name') or 'инструмент'}")
+            elif kind == "confirmation":
+                run_id = str(event.get("run_id") or "")
+                self.confirms[run_id] = {"kind": "react", "user_id": user_id,
+                                         "chat_id": chat_id}
+                self.send(chat_id, f"⚠️ Разрешить действие «{event.get('tool') or 'инструмент'}»?",
+                          reply_markup=react_confirm_keyboard(run_id))
+            elif kind == "ask_user":
+                run_id = str(event.get("run_id") or "")
+                if run_id:
+                    self.pending_questions[user_id] = (run_id, chat_id)
+                question = str(event.get("question") or "Уточните, пожалуйста.")
+                options = event.get("options") if isinstance(event.get("options"), list) else []
+                if options:
+                    question += "\n\nВарианты: " + " · ".join(str(item)[:100] for item in options[:8])
+                self.send(chat_id, question)
+            elif kind == "result":
+                if event.get("status") != "paused":
+                    answer = str(event.get("reply") or "")
+            elif kind == "error":
+                answer = answer or f"❌ {event.get('text') or 'ошибка'}"
+        if steps:
+            self.send(chat_id, "🧭 Что делал агент:\n" + "\n".join(steps[-TRACE_LIMIT:]))
+        if answer:
+            self.send(chat_id, answer)
+        return answer
 
     def run_turn(self, chat_id, user_id, text, name=""):
         """Полный ход агента: события → сообщения Telegram."""
@@ -239,16 +336,25 @@ class Bridge:
                         steps.append(f"{event.get('icon') or '•'} {event.get('text') or ''}")
                     elif kind == "tool" and event.get("command"):
                         steps.append(f"⌨️ {event['command']}")
-                    elif kind == "confirm":
-                        sent = self.api("sendMessage", chat_id=chat_id,
-                                        text=("⚠️ Нужно разрешение\n"
-                                              f"{event.get('tool') or 'действие'}: "
-                                              f"{event.get('command') or ''}"),
-                                        reply_markup=confirm_keyboard(event.get("id")))
-                        self.confirms[event.get("id")] = (
-                            chat_id, (sent or {}).get("message_id"))
+                    elif kind == "confirmation":
+                        run_id = str(event.get("run_id") or "")
+                        self.confirms[run_id] = {"kind": "react", "user_id": user_id,
+                                                 "chat_id": chat_id}
+                        self.send(chat_id,
+                                  f"⚠️ Разрешить действие «{event.get('tool') or 'инструмент'}»?",
+                                  reply_markup=react_confirm_keyboard(run_id))
+                    elif kind == "ask_user":
+                        run_id = str(event.get("run_id") or "")
+                        if run_id:
+                            self.pending_questions[user_id] = (run_id, chat_id)
+                        question = str(event.get("question") or "Уточните, пожалуйста.")
+                        options = event.get("options") if isinstance(event.get("options"), list) else []
+                        if options:
+                            question += "\n\nВарианты: " + " · ".join(str(item)[:100] for item in options[:8])
+                        self.send(chat_id, question)
                     elif kind == "result":
-                        answer = str(event.get("reply") or "")
+                        if event.get("status") != "paused":
+                            answer = str(event.get("reply") or "")
                     elif kind == "error":
                         answer = answer or f"❌ {event.get('text') or 'ошибка'}"
             except Exception as exc:                    # бот не должен падать
@@ -272,25 +378,22 @@ class Bridge:
             self.api("answerCallbackQuery", callback_query_id=callback_id,
                      text="Неизвестное действие")
             return False
-        import routes.agent as agent_routes
-        ok, reason = agent_routes.resolve_confirmation(confirm_id, approve, always=always)
-        if ok:
-            if approve and always:
-                text = "Разрешено всегда — выполняю"
-            else:
-                text = "Разрешено — выполняю" if approve else "Отклонено"
-        elif reason == "already_resolved":
-            text = "Решение уже принято"
-        else:
-            text = "Время ожидания истекло"
-        try:
+        pending = self.confirms.get(confirm_id)
+        if isinstance(pending, dict) and pending.get("kind") == "react":
+            actor = (callback.get("from") or {}).get("id")
+            if actor is None or str(actor) != str(pending.get("user_id")):
+                self.api("answerCallbackQuery", callback_query_id=callback_id,
+                         text="Это подтверждение принадлежит другому пользователю")
+                return False
+            self.confirms.pop(confirm_id, None)
+            events = continue_react_run(actor, confirm_id, approved=approve)
+            self._deliver_react_events(pending["chat_id"], actor, events)
+            text = "Разрешено — продолжаю" if approve else "Отклонено"
             self.api("answerCallbackQuery", callback_query_id=callback_id, text=text)
-        except TelegramError:
-            pass
-        chat_id = ((callback.get("message") or {}).get("chat") or {}).get("id")
-        if chat_id:
-            self.send(chat_id, f"✓ {text}")
-        return ok
+            return True
+        self.api("answerCallbackQuery", callback_query_id=callback_id,
+                 text="Подтверждение не найдено или уже обработано")
+        return False
 
     # ── обновления ──
     def handle_update(self, update, sync=False):

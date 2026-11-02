@@ -1,0 +1,44 @@
+name: ReAct workspace checks
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "agent/loop.py"
+      - "agent/workspace.py"
+      - "routes/react_agent.py"
+      - "routes/__init__.py"
+      - "tool_registry.py"
+      - "static/linux.js"
+      - "tests/test_agent_workspace_api.py"
+      - "tests/test_react_loop.py"
+      - "tests/test_file_tools.py"
+      - ".github/workflows/react-workspace.yml"
+  push:
+    branches: [main]
+    paths:
+      - "agent/loop.py"
+      - "agent/workspace.py"
+      - "routes/react_agent.py"
+      - "routes/__init__.py"
+      - "tool_registry.py"
+      - "static/linux.js"
+      - "tests/test_agent_workspace_api.py"
+      - "tests/test_react_loop.py"
+      - "tests/test_file_tools.py"
+      - ".github/workflows/react-workspace.yml"
+
+jobs:
+  react-workspace:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install test dependencies
+        run: pip install -r requirements-dev.txt
+      - name: Compile first-party agent and workspace modules
+        run: python -m py_compile agent/loop.py agent/workspace.py routes/react_agent.py routes/__init__.py tool_registry.py
+      - name: Run ReAct and workspace tests
+        run: pytest -q tests/test_react_loop.py tests/test_agent_workspace_api.py tests/test_file_tools.py

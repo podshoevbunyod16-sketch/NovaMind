@@ -3,7 +3,6 @@ import json
 
 import pytest
 
-import routes.agent as agent_routes
 import telegram_bot
 
 
@@ -11,9 +10,6 @@ import telegram_bot
 def no_token(monkeypatch):
     monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
     monkeypatch.delenv("TELEGRAM_ALLOWED_USERS", raising=False)
-    agent_routes.forget_always_allowed()
-    yield
-    agent_routes.forget_always_allowed()
 
 
 class FakeApi:
@@ -147,6 +143,65 @@ def test_blocked_user_gets_refusal(monkeypatch):
     assert "ограничен" in api.first("sendMessage")["params"]["text"]
 
 
+def test_telegram_agent_events_use_react_with_a_stable_owned_chat(client, monkeypatch):
+    import ai_providers
+    import database
+
+    monkeypatch.setattr(ai_providers, "chat_completion",
+                        lambda *args, **kwargs: ("Ответ из ReAct.", {"model": "mock"}))
+    chat_id = telegram_bot.chat_for(711, "Test")
+    events = list(telegram_bot.agent_events(711, chat_id, "Ответь кратко"))
+    result = next(event for event in events if event.get("type") == "result")
+    assert result["reply"] == "Ответ из ReAct."
+    assert any(event.get("type") == "completion" for event in events)
+    with __import__("app").app.test_request_context("/"):
+        from flask import session
+        session["nova_sid"] = telegram_bot._telegram_sid(711)
+        assert database.chat_allowed(chat_id)
+
+
+def test_telegram_react_question_resumes_durable_run(client, monkeypatch):
+    import ai_providers
+
+    answers = iter([
+        ('```json\n{"tool":"ask_user","arguments":{"question":"Какой формат?","options":["CSV","JSON"]}}\n```', {}),
+        ("Пользователь выбрал CSV; продолжаю с этим форматом.", {"model": "mock"}),
+    ])
+    monkeypatch.setattr(ai_providers, "chat_completion", lambda *args, **kwargs: next(answers))
+    chat_id = telegram_bot.chat_for(712, "Question")
+    paused = list(telegram_bot.agent_events(712, chat_id, "Подготовь файл"))
+    question = next(event for event in paused if event.get("type") == "ask_user")
+    resumed = telegram_bot.continue_react_run(712, question["run_id"], answer="CSV")
+    result = next(event for event in resumed if event.get("type") == "result")
+    assert "CSV" in result["reply"]
+    assert any(event.get("type") == "completion" for event in resumed)
+
+
+def test_telegram_react_confirmation_callback_is_bound_to_requesting_user(monkeypatch):
+    resumed = []
+    monkeypatch.setattr(telegram_bot, "continue_react_run",
+                        lambda user_id, run_id, **kwargs: resumed.append((user_id, run_id, kwargs))
+                        or [{"type": "result", "status": "completed", "reply": "Готово после одобрения."}])
+    api = FakeApi()
+    bridge = telegram_bot.Bridge(api=api, events_factory=lambda *_: iter([
+        {"type": "confirmation", "run_id": "react-run-1", "tool": "file_write"},
+        {"type": "result", "status": "paused", "reply": "Жду подтверждения."},
+    ]))
+    bridge.run_turn(90, 5, "Создай файл")
+    denied = bridge.handle_callback({"id": "cb-bad", "data": "confirm:react-run-1:yes",
+                                     "from": {"id": 6}, "message": {"chat": {"id": 90}}})
+    assert denied is False and not resumed
+    approved = bridge.handle_callback({"id": "cb-ok", "data": "confirm:react-run-1:yes",
+                                       "from": {"id": 5}, "message": {"chat": {"id": 90}}})
+    assert approved is True
+    assert resumed == [(5, "react-run-1", {"approved": True})]
+    repeat = bridge.handle_callback({"id": "cb-repeat", "data": "confirm:react-run-1:yes",
+                                     "from": {"id": 5}, "message": {"chat": {"id": 90}}})
+    assert repeat is False and len(resumed) == 1
+    assert any(call["method"] == "sendMessage" and "Готово после одобрения" in call["params"]["text"]
+               for call in api.calls)
+
+
 def test_run_turn_sends_trace_and_answer(client):
     """Ход агента: шаг, ответ — и всё это уходит в Telegram."""
     def events(user_id, chat_id, text):
@@ -163,62 +218,6 @@ def test_run_turn_sends_trace_and_answer(client):
     assert any("Что делал агент" in text for text in texts)
     assert texts[-1] == "Завтра солнечно."
     assert "sendChatAction" in api.methods()
-
-
-def test_run_turn_marks_confirmation(client):
-    """Опасный шаг приходит кнопками, решение уходит в агента."""
-    record = agent_routes.register_confirmation("run", {"command": "rm -rf tmp"})
-
-    def events(user_id, chat_id, text):
-        yield {"type": "confirm", "id": record["id"], "tool": "run",
-               "command": "rm -rf tmp", "risk": "danger"}
-        yield {"type": "result", "reply": "Не выполнял: отменено."}
-
-    api = FakeApi()
-    bridge = telegram_bot.Bridge(api=api, events_factory=events)
-    bridge.run_turn(10, 5, "удали tmp")
-    confirm_call = api.first("sendMessage")
-    assert confirm_call["params"]["reply_markup"]["inline_keyboard"][0][0]["callback_data"] \
-        == f"confirm:{record['id']}:yes"
-
-    # Пользователь нажал «Разрешить»
-    handled = bridge.handle_callback({
-        "id": "cb-1", "data": f"confirm:{record['id']}:yes",
-        "message": {"chat": {"id": 10}}})
-    assert handled is True
-    assert agent_routes.await_confirmation(record, timeout=0.1) is True
-
-
-def test_always_callback_remembers_rule(client):
-    """Кнопка «Всегда» разрешает шаг и запоминает класс действия."""
-    action = {"command": "git push origin main"}
-    record = agent_routes.register_confirmation("run", action)
-    api = FakeApi()
-    bridge = telegram_bot.Bridge(api=api)
-
-    handled = bridge.handle_callback({
-        "id": "cb-always", "data": f"confirm:{record['id']}:always",
-        "message": {"chat": {"id": 10}}})
-
-    assert handled is True
-    assert agent_routes.await_confirmation(record, timeout=0.1) is True
-    assert agent_routes.confirmation_needed("run", {"command": "git push origin dev"}) is False
-    texts = [call["params"].get("text") for call in api.calls
-             if call["method"] == "answerCallbackQuery"]
-    assert any("всегда" in str(text).lower() for text in texts)
-
-
-def test_second_click_is_reported_as_resolved(client):
-    record = agent_routes.register_confirmation("run", {"command": "ls"})
-    api = FakeApi()
-    bridge = telegram_bot.Bridge(api=api)
-    callback = {"id": "cb", "data": f"confirm:{record['id']}:no",
-                "message": {"chat": {"id": 10}}}
-    assert bridge.handle_callback(callback) is True
-    assert bridge.handle_callback(callback) is False
-    texts = [call["params"].get("text") for call in api.calls
-             if call["method"] == "answerCallbackQuery"]
-    assert any("уже принято" in str(text) for text in texts)
 
 
 def test_unknown_callback_is_answered():

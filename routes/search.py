@@ -17,7 +17,7 @@ import time
 import threading
 import concurrent.futures
 from concurrent.futures import ThreadPoolExecutor
-from urllib.parse import urlparse, quote_plus, urlencode
+from urllib.parse import urlparse, quote_plus, urlencode, quote
 
 import httpx
 import requests
@@ -780,10 +780,85 @@ def _html_to_text(html):
     return text.strip()
 
 
+def _github_page_text(url, max_chars=6000):
+    """Читает страницу репозитория через публичный GitHub API без токена."""
+    parsed = urlparse(url)
+    parts = [part for part in parsed.path.strip("/").split("/") if part]
+    if parsed.netloc.lower() not in {"github.com", "www.github.com"} or len(parts) < 2:
+        return None
+    owner, repo = parts[0], parts[1].removesuffix(".git")
+    mode = parts[2] if len(parts) > 2 and parts[2] in {"tree", "blob"} else "tree"
+    branch = parts[3] if len(parts) > 3 and parts[2] in {"tree", "blob"} else ""
+    subpath = "/".join(parts[4:]) if len(parts) > 4 and parts[2] in {"tree", "blob"} else ""
+    api = f"https://api.github.com/repos/{quote(owner, safe='')}/{quote(repo, safe='')}"
+    headers = {**_HEADERS, "Accept": "application/vnd.github+json"}
+    try:
+        metadata_response = httpx.get(api, headers=headers, timeout=READER_TIMEOUT)
+        if int(getattr(metadata_response, "status_code", 500)) >= 400:
+            return "", "GitHub API не вернул репозиторий"
+        metadata = metadata_response.json() if hasattr(metadata_response, "json") else {}
+        if not isinstance(metadata, dict):
+            metadata = {}
+        branch = branch or str(metadata.get("default_branch") or "main")
+        if mode == "blob" and subpath:
+            content_url = f"{api}/contents/{quote(subpath, safe='/')}"
+            response = httpx.get(content_url, headers=headers, params={"ref": branch}, timeout=READER_TIMEOUT)
+            if int(getattr(response, "status_code", 500)) >= 400:
+                return "", "GitHub API не смог прочитать файл"
+            payload = response.json() if hasattr(response, "json") else {}
+            if isinstance(payload, dict) and payload.get("content"):
+                import base64
+                text = base64.b64decode(payload["content"]).decode("utf-8", errors="replace")
+            else:
+                text = str(getattr(response, "text", "") or "")
+            return text[:max_chars], None if text else "пустой файл"
+        tree_url = f"{api}/git/trees/{quote(branch, safe='')}"
+        response = httpx.get(tree_url, headers=headers, params={"recursive": "1"}, timeout=READER_TIMEOUT)
+        if int(getattr(response, "status_code", 500)) >= 400:
+            return "", "GitHub API не смог прочитать дерево"
+        payload = response.json() if hasattr(response, "json") else {}
+        items = payload.get("tree", []) if isinstance(payload, dict) else []
+        prefix = subpath.strip("/")
+        children = set()
+        for item in items:
+            path = str(item.get("path") or "") if isinstance(item, dict) else ""
+            if prefix:
+                if not path.startswith(prefix + "/"):
+                    continue
+                path = path[len(prefix) + 1:]
+            if not path:
+                continue
+            head, separator, _tail = path.partition("/")
+            is_directory = bool(separator) or (isinstance(item, dict) and item.get("type") == "tree")
+            children.add(head + "/" if is_directory else head)
+        rows = [f"{owner}/{repo}" + (f"/{prefix}" if prefix else "") + "/"]
+        all_paths = sorted(children, key=lambda path: (not path.endswith("/"), path))
+        for index, path in enumerate(all_paths[:300]):
+            rows.append(("└── " if index == len(all_paths[:300]) - 1 else "├── ") + path)
+        if not all_paths:
+            rows.append("(пустое дерево)")
+        summary = []
+        if metadata.get("description"):
+            summary.append(str(metadata["description"]))
+        if metadata.get("language"):
+            summary.append("Язык: " + str(metadata["language"]))
+        if metadata.get("stargazers_count") is not None:
+            summary.append("Звёзд: " + str(metadata["stargazers_count"]))
+        if summary:
+            rows[0] += " — " + "; ".join(summary)
+        return "\n".join(rows)[:max_chars], None
+    except Exception as exc:
+        return "", f"GitHub API: {type(exc).__name__}"
+
+
 def fetch_page_text(url, max_chars=6000):
     """Читает HTML-страницу напрямую через httpx и очищает её BeautifulSoup4."""
     if not url or not url.lower().startswith(("http://", "https://")):
         return None, "некорректный URL"
+    if urlparse(url).netloc.lower() in {"github.com", "www.github.com"}:
+        github_result = _github_page_text(url, max_chars)
+        if github_result is not None:
+            return github_result
 
     try:
         resp = httpx.get(url, headers=_HEADERS, timeout=READER_TIMEOUT,
@@ -1155,7 +1230,7 @@ def auto_search_stream():
     force_search = bool(data.get("force", True))
     reasoning = bool(data.get("reasoning", False))
 
-    from routes.agent import bind_client_chat
+    from agent.runtime import bind_client_chat
     bind_client_chat(data)
     chat_id, prior = "", []
     try:

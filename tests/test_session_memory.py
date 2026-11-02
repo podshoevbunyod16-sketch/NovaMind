@@ -191,37 +191,50 @@ def test_agent_stream_without_chat_id_keeps_legacy_session_flow(admin_client, sa
     assert first["chat_id"] == second["chat_id"]
 
 
-# ══════════════ офлайн-ход не теряет разговор ══════════════
+# ══════════════ ReAct-ход не теряет разговор ══════════════
 
-def test_offline_turn_passes_history_to_local_model():
-    from agenticseek.offline import OfflineTurn
+def test_react_passes_history_to_offline_or_online_completion():
+    from agent.loop import AgentContext, run_react
 
     captured = []
-    turn = OfflineTurn(
+    result = run_react(AgentContext(
         "а сколько он весит?",
-        local_model=lambda messages: captured.append(messages) or "Около 73 кг.",
+        complete=lambda messages, **kwargs: captured.append(messages) or ("Около 73 тонн.", {}),
+        tools=[],
         history=[{"role": "user", "content": "Расскажи про кита"},
                  {"role": "assistant", "content": "Синий кит весит около 73 тонн."}],
-    )
-    assert turn.run() == "Около 73 кг."
-    roles = [item["role"] for item in captured[0]]
-    assert roles == ["user", "assistant", "user"]
-    assert "кит" in captured[0][0]["content"]
-    assert captured[0][-1]["content"] == "а сколько он весит?"
+    ))
+    assert result.answer == "Около 73 тонн."
+    transcript = str(captured[0])
+    assert "кит" in transcript
+    assert "а сколько он весит?" in transcript
 
 
-def test_offline_search_query_includes_previous_user_message():
-    from agenticseek.offline import OfflineTurn
+def test_react_keeps_followup_context_available_when_selecting_search_query():
+    from agent.loop import AgentContext, run_react
+    from tool_registry import ToolSpec
 
     queries = []
-    turn = OfflineTurn(
-        "а где он живёт?",
-        search=lambda query, limit: (queries.append(query) or ([], {})),
+    spec = ToolSpec("web_search", "Search", {
+        "type": "object", "properties": {"query": {"type": "string"}},
+        "required": ["query"], "additionalProperties": False,
+    }, lambda **kwargs: {"ok": True, "results": []}, permissions=("network",))
+    replies = iter([
+        ('```json\n{"tool":"web_search","arguments":{"query":"места обитания синего кита"}}\n```', {}),
+        ("Синий кит обитает в океанах.", {}),
+    ])
+
+    def complete(messages, **kwargs):
+        queries.append(str(messages))
+        return next(replies)
+
+    result = run_react(AgentContext(
+        "а где он живёт?", complete=complete, tools=[spec],
         history=[{"role": "user", "content": "Что такое синий кит?"}],
-        force_search=True,
-    )
-    turn.run()
-    assert queries and "синий кит" in queries[0]
+        call_tool=lambda name, **kwargs: {"ok": True, "results": []}))
+    assert result.steps == 1
+    assert "синий кит" in queries[0].lower()
+    assert "синий кит" in result.answer.lower()
 
 
 # ══════════════ MCP: флаг чтения действует и в агентном ходе ══════════════
@@ -259,10 +272,10 @@ def test_run_tool_scope_requests_mcp_for_users_only_with_flag(monkeypatch):
 
 # ══════════════ фронтенд: инструменты по умолчанию, chat_id в каждом пути ════
 
-def test_frontend_disables_agent_tools_only_when_explicitly_off():
-    """Свежий браузер должен ходить с инструментами (MCP, скиллы, поиск)."""
+def test_frontend_requires_explicit_tools_opt_in():
+    """Свежий браузер не получает поиск/терминал без явного выбора пользователя."""
     source = (ROOT / "static" / "app.js").read_text(encoding="utf-8")
-    assert "localStorage.getItem('nova_web_search') !== '0'" in source
+    assert "localStorage.getItem('nova_web_search') === '1'" in source
 
 
 def test_frontend_sends_chat_id_from_every_chat_path():

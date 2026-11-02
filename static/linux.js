@@ -1,11 +1,11 @@
 /**
  * static/linux.js — ИИ-агент внутри главного чата.
- * Файловые запросы на анализ/исправление маршрутизируются в Auto Coding Agent.
+ * Работа с файлами выполняется основным ReAct-агентом в изолированном workspace.
  */
 (() => {
   'use strict';
 
-  const state = { status: null, ready: null, runId: '' };
+  const state = { status: null, ready: null, runId: '', stopping: false };
 
   function notify(message, kind) {
     if (typeof window.showNotification === 'function') window.showNotification(message, kind);
@@ -101,8 +101,8 @@
     // options.tools — кнопка «Автопоиск». false => вообще без инструментов:
     // ни кодинг-агента, ни поиска, ни терминала — только прямой запрос к модели.
     const tools = options.tools !== false;
+    const search = !!options.search && tools;
     const coding = tools && isCodingRequest(message);
-    const search = !!options.search && tools && !coding;
     const turn = createAssistantTurn();
     if (coding) turn.beginIdle('Исследую исходный код…');
     // Не показываем «Поищу в интернете» заранее: флаг поиска только
@@ -113,8 +113,9 @@
     const controller = new AbortController();
     activeAbort = controller;
     let result = {};
+    let completionRunId = '';
     let failure = null;
-    const endpoint = coding ? '/api/agent/coding/stream' : '/api/agent/stream';
+    const endpoint = '/api/agent/react';
     // chat_id открытого диалога — сервер пишет ходы в него же (иначе агент,
     // поиск и обычный чат разъезжаются по разным серверным чатам).
     const chatRef = (typeof window.serverChatRequest === 'function')
@@ -123,7 +124,7 @@
       const response = await fetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message, search, tools, reasoning: !!options.reasoning,
+        body: JSON.stringify({ message, search, tools, workspace: tools, reasoning: !!options.reasoning,
                                ...chatRef }),
         signal: controller.signal,
       });
@@ -164,6 +165,10 @@
           case 'token': turn.appendToken(event.token); break;
           case 'retract': turn.appendText(''); break;
           case 'error': failure = event.text; turn.step('⚠️', event.text); break;
+          case 'guard': turn.step('🛡️', `Проверка безопасности: ${(event.reasons || []).join(', ')}`); break;
+          case 'completion': completionRunId = event.run_id || completionRunId; break;
+          case 'ask_user': if (turn.askUser) turn.askUser(event); break;
+          case 'confirmation': if (turn.askUser) turn.askUser(event); break;
           case 'result':
             result = event;
             if (Array.isArray(event.sources) && event.sources.length) turn.setSources(event.sources);
@@ -173,6 +178,8 @@
         }
       });
       activeAbort = null;
+      state.runId = '';
+      state.stopping = false;
       if (!turn.text) throw new Error(failure || 'ИИ не вернул ответ');
       if (typeof window.refreshUsage === 'function') window.refreshUsage(true);
       turn.finish({
@@ -186,10 +193,13 @@
         searched: result.searched,
         steps: result.steps,
         stopped: !!result.stopped,
+        runId: completionRunId,
         linux: coding ? false : (result.linux === undefined ? (result.steps > 0 || result.searched) : !!result.linux),
       });
     } catch (error) {
       activeAbort = null;
+      state.runId = '';
+      state.stopping = false;
       if (error.name === 'AbortError') {
         turn.collapseStage();
         turn.appendText(turn.text || '_Остановлено._');
@@ -236,12 +246,13 @@
   /** Кнопка «Стоп»: сервер прекращает шаги по run_id. */
   async function stopRun() {
     const runId = state.runId;
-    if (!runId) return false;
-    state.runId = '';
+    if (!runId || state.stopping) return false;
+    state.stopping = true;
     try {
-      await getJson('/api/agent/stop', { method: 'POST', body: JSON.stringify({ run_id: runId }) });
+      await getJson('/api/agent/react/stop', { method: 'POST', body: JSON.stringify({ run_id: runId }) });
       return true;
     } catch (_) {
+      state.stopping = false;
       return false;      // запуск уже завершился — это нормально
     }
   }
