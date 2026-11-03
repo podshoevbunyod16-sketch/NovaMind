@@ -613,8 +613,10 @@ def _free_models(provider: str, selected: str = "") -> list[str]:
 
 
 def free_failover_targets(provider: str | None = None, model: str | None = None) -> list[tuple[str, str]]:
-    """Compatibility helper: returns only the explicitly selected target."""
+    """Compatibility helper: returns the selected target only when it is free."""
     selected_provider, selected_model, _cfg = resolve_target(provider, model)
+    if not is_free_ai_model(selected_provider, selected_model):
+        return []
     return [(selected_provider, selected_model)]
 
 def _chat_completion_once(messages, provider=None, model=None, system=None,
@@ -691,6 +693,11 @@ def chat_completion(messages, provider=None, model=None, system=None,
                     tools=None, tool_choice=None):
     """Complete a request using only the selected provider; no provider failover."""
     target_provider, target_model, _cfg = resolve_target(provider, model)
+    if not is_free_ai_model(target_provider, target_model):
+        return None, (
+            f"Выбранная модель {target_model} провайдера {target_provider} "
+            "не подтверждена как бесплатная. Выберите модель с пометкой Free."
+        )
     text, meta = _chat_completion_once(
         messages, provider=target_provider, model=target_model, system=system,
         temperature=temperature, max_tokens=max_tokens, timeout=timeout,
@@ -810,6 +817,13 @@ def chat_stream(messages, provider=None, model=None, system=None, temperature=0.
                 max_tokens=None, timeout=90, reasoning=False, reasoning_effort="low"):
     """Stream from the selected provider only. Never replay through another provider."""
     target_provider, target_model, _cfg = resolve_target(provider, model)
+    if not is_free_ai_model(target_provider, target_model):
+        yield "error", (
+            f"Выбранная модель {target_model} провайдера {target_provider} "
+            "не подтверждена как бесплатная. Выберите модель с пометкой Free."
+        )
+        yield "done", ""
+        return
     done_seen = False
     for kind, chunk in _chat_stream_once(
         messages, provider=target_provider, model=target_model, system=system,
