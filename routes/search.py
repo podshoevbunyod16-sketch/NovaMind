@@ -221,8 +221,35 @@ def _normalize_and_rank(results, query="", limit=8):
     return ranked[:max(1, min(int(limit), 20))]
 
 
+def _mcp_search_allowed():
+    """MCP search shares owner credentials; guests need explicit read opt-in."""
+    try:
+        import identity
+        if identity.is_admin_owner(identity.chat_owner()):
+            return True
+    except Exception:
+        return False
+    return os.getenv("MCP_ALLOW_USER_READ", "0") == "1"
+
+
+def _mcp_tool_readonly_allowed(server_id, tool_name):
+    try:
+        import identity
+        if identity.is_admin_owner(identity.chat_owner()):
+            return True
+        if os.getenv("MCP_ALLOW_USER_READ", "0") != "1":
+            return False
+        import mcp_registry
+        annotations = mcp_registry.cached_tool_annotations(server_id, tool_name)
+        return bool(annotations and annotations.get("readOnlyHint") is True)
+    except Exception:
+        return False
+
+
 def _find_exa_mcp_tool():
-    """Найти Exa search tool среди подключённых MCP-серверов."""
+    """Найти Exa search tool среди разрешённых MCP-подключений."""
+    if not _mcp_search_allowed():
+        return None
     try:
         import mcp_registry
         tools = mcp_registry.connected_tools()
@@ -240,6 +267,8 @@ def _find_exa_mcp_tool():
 
 def _find_mcp_search_tool():
     """Exa first; otherwise use an explicitly named generic MCP web-search tool."""
+    if not _mcp_search_allowed():
+        return None
     exa = _find_exa_mcp_tool()
     if exa:
         return exa
@@ -298,8 +327,11 @@ def search_web_exa_mcp(query, num=8, tool=None):
     if not tool:
         return [], "MCP search не подключён"
     import mcp_registry
+    server_id, tool_name = str(tool.get("server_id") or ""), str(tool.get("name") or "")
+    if not _mcp_tool_readonly_allowed(server_id, tool_name):
+        return [], "MCP search недоступен: инструмент не подтверждён как read-only"
     result = mcp_registry.call_tool(
-        str(tool.get("server_id") or ""), str(tool.get("name") or ""),
+        server_id, tool_name,
         _exa_mcp_arguments(tool, query, num))
     results = _exa_mcp_results(result)
     if not results:

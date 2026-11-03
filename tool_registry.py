@@ -2,7 +2,7 @@
 from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping
-import logging, time
+import logging, os, time
 
 log = logging.getLogger("novamind.agent")
 
@@ -504,19 +504,26 @@ def _register_agent_tools():
     """
     if get_tool("mcp_call") is None:
         def mcp_call(server_id, tool, arguments=None):
+            import identity
             import mcp_registry
-            if not str(server_id or "").strip() or not str(tool or "").strip():
+            server_id, tool = str(server_id or "").strip(), str(tool or "").strip()
+            if not server_id or not tool:
                 return {"ok": False, "error": {"type": "bad_arguments",
                                                "message": "нужны server_id и tool",
                                                "retryable": False}}
-            result = mcp_registry.call_tool(str(server_id), str(tool), arguments or {})
-            if isinstance(result, dict) and result.get("error"):
-                return {"ok": False, "result": result,
-                        "error": {"type": "mcp_error", "message": str(result.get("error"))[:500],
-                                  "retryable": True}}
+            if not identity.is_admin_owner(identity.chat_owner()):
+                if os.getenv("MCP_ALLOW_USER_READ", "0") != "1":
+                    return {"ok": False, "error": {"type": "permission_denied",
+                        "message": "Вызов MCP разрешён только администратору", "retryable": False}}
+                annotations = mcp_registry.cached_tool_annotations(server_id, tool)
+                if not annotations or annotations.get("readOnlyHint") is not True:
+                    return {"ok": False, "error": {"type": "permission_denied",
+                        "message": "Пользователям разрешены только MCP-инструменты с readOnlyHint=true",
+                        "retryable": False}}
+            result = mcp_registry.call_tool(server_id, tool, arguments or {})
             return {"ok": True, "result": result}
         register_tool(ToolSpec(
-            "mcp_call", "Вызвать инструмент подключённого MCP-сервера.",
+            "mcp_call", "Вызвать внешний MCP-инструмент. Сначала используйте mcp_list, чтобы узнать точную схему аргументов; после вызова проверьте наблюдение и не заявляйте успех при ошибке.",
             {"type": "object",
              "properties": {"server_id": {"type": "string"},
                             "tool": {"type": "string"},
@@ -524,6 +531,21 @@ def _register_agent_tools():
              "required": ["server_id", "tool"]},
             mcp_call, permissions=("network", "external_service"), timeout=30,
             risk="danger"))
+
+    if get_tool("mcp_list") is None:
+        def mcp_list(server_id="", offset=0, limit=20):
+            import mcp_registry
+            result = mcp_registry.tools_page(str(server_id or ""), int(offset or 0), int(limit or 20))
+            return {"ok": True, "result": result}
+        register_tool(ToolSpec(
+            "mcp_list", "Обнаружить настроенные MCP-серверы либо получить список инструментов и точные JSON Schema одного сервера. Для длинного списка используйте offset/next_offset.",
+            {"type": "object",
+             "properties": {"server_id": {"type": "string", "description": "Необязательно: id или уникальная часть имени сервера"},
+                            "offset": {"type": "integer", "minimum": 0},
+                            "limit": {"type": "integer", "minimum": 1, "maximum": 50}},
+             "additionalProperties": False},
+            mcp_list, permissions=("network", "external_service"), timeout=30,
+            risk="safe", max_output_chars=6000))
 
     for kind, title in (("image", "изображение"), ("audio", "аудио"), ("video", "видео")):
         name = kind

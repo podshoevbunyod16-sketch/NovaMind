@@ -269,8 +269,6 @@ def run_react(ctx: AgentContext) -> AgentResult:
     answer_retries = 0
     answer_prefix = ""
     approvals = set(ctx.approvals or [])
-    mcp_search_count = 0
-    mcp_identity_checked: set[str] = set()
     steps = max(0, int(ctx.step_offset or 0))
     status = "completed"
     fallback = "Не удалось завершить задачу: цикл агента остановился до получения итогового ответа."
@@ -382,7 +380,53 @@ def run_react(ctx: AgentContext) -> AgentResult:
                                 "workspace": ctx.workspace,
                                 "tool_names": [spec.name for spec in specs],
                                 "tools_enabled": ctx.tools is None or bool(ctx.tools)})
-        for call in calls:
+        parallel_results = {}
+        if len(calls) > 1 and not (ctx.cancel and ctx.cancel.is_set()):
+            # Independent MCP operations can overlap. Only pre-run calls that
+            # pass schema/duplicate checks and need no confirmation; all other
+            # actions retain the normal sequential safety path below.
+            eligible = []
+            batch_keys = set()
+            import contextvars
+            import agent.policy as batch_policy
+            remaining_steps = max(0, int(ctx.max_steps) - steps)
+            for call_index, candidate in enumerate(calls):
+                if ctx.cancel and ctx.cancel.is_set():
+                    break
+                if call_index >= remaining_steps:
+                    continue
+                tool_name = str(candidate.get("tool") or "")
+                tool_args = candidate.get("arguments") if isinstance(candidate.get("arguments"), dict) else {}
+                spec_for_batch = by_name.get(tool_name)
+                if tool_name not in {"mcp_call", "mcp_list"} or spec_for_batch is None:
+                    continue
+                if _valid(tool_args, dict(spec_for_batch.schema or {})):
+                    continue
+                payload_for_batch = json.dumps(tool_args, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+                if batch_policy.needs_confirmation(spec_for_batch, payload_for_batch):
+                    continue
+                duplicate_key = json.dumps([tool_name, tool_args, 0], ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+                if duplicate_key in seen or duplicate_key in batch_keys:
+                    continue
+                batch_keys.add(duplicate_key)
+                eligible.append((call_index, tool_name, tool_args, spec_for_batch, duplicate_key))
+            if len(eligible) > 1 and not (ctx.cancel and ctx.cancel.is_set()):
+                from concurrent.futures import ThreadPoolExecutor, as_completed
+                with ThreadPoolExecutor(max_workers=min(8, len(eligible)), thread_name_prefix="mcp-call") as pool:
+                    pending_calls = {}
+                    for call_index, tool_name, tool_args, spec_for_batch, duplicate_key in eligible:
+                        call_context = contextvars.copy_context()
+                        future = pool.submit(call_context.run, _call, ctx, tool_name, tool_args, spec_for_batch)
+                        pending_calls[future] = (call_index, duplicate_key)
+                        seen.add(duplicate_key)
+                    for future in as_completed(pending_calls):
+                        call_index, _duplicate_key = pending_calls[future]
+                        try:
+                            parallel_results[call_index] = future.result()
+                        except Exception as exc:
+                            parallel_results[call_index] = {"ok": False, "error": {
+                                "type": type(exc).__name__, "message": str(exc)}}
+        for call_index, call in enumerate(calls):
             if steps >= max(1, int(ctx.max_steps)):
                 fallback = "Достигнут лимит шагов. Выполненные действия сохранены; оставшуюся часть задачи выполнить не удалось."
                 status = "budget_exhausted"
@@ -412,11 +456,11 @@ def run_react(ctx: AgentContext) -> AgentResult:
             import hashlib
             import agent.policy as tool_policy
             payload = json.dumps(args, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-            risk = tool_policy.risk_of(name, payload)
+            risk = tool_policy.risk_of(spec, payload)
             approval_key = hashlib.sha256(
                 json.dumps([name, args], ensure_ascii=False, sort_keys=True,
                            separators=(",", ":")).encode("utf-8")).hexdigest()
-            confirmation_required = tool_policy.needs_confirmation(name, payload)
+            confirmation_required = tool_policy.needs_confirmation(spec, payload)
             if invalid:
                 event = {"ok": False, "error": {"type": "invalid_arguments", "message": invalid}}
             elif confirmation_required and approval_key not in approvals:
@@ -442,63 +486,29 @@ def run_react(ctx: AgentContext) -> AgentResult:
             else:
                 key = json.dumps([name, args, workspace_revision if name == "shell" else 0],
                                  sort_keys=True, ensure_ascii=False, separators=(",", ":"))
-                if key in seen:
+                if key in seen and call_index not in parallel_results:
                     event = {"ok": False, "error": {"type": "repeat_call", "message": "Одинаковый вызов уже выполнялся без новых данных. Смените стратегию и используйте наблюдения."}}
                 else:
-                    seen.add(key)
+                    if call_index not in parallel_results:
+                        seen.add(key)
+                    if name == "mcp_call":
+                        # Resolve human-friendly server labels against the unified
+                        # registry; transport-specific quirks stay out of ReAct.
+                        try:
+                            import mcp_registry
+                            args["server_id"] = mcp_registry.resolve_server_id(
+                                str(args.get("server_id") or ""), str(args.get("tool") or ""),
+                                catalog_list=mcp_registry.connected_tools())
+                        except Exception:
+                            pass
                     if name in {"image", "audio", "video"}:
                         ctx.emit({"type": "stage", "scene": "media",
                                   "title": "Создаю медиа", "text": "Отправка запроса на генерацию…"})
                     if name == "web_search" and (meta.get("forced_search") or meta.get("offline_action")):
                         ctx.emit({"type": "stage", "scene": "search",
                                   "title": "Ищу источники", "text": "Выполняю веб-поиск…"})
-                    if name == "mcp_call":
-                        mcp_tool = str(args.get("tool") or "")
-                        mcp_arguments = args.get("arguments") if isinstance(args.get("arguments"), dict) else {}
-                        is_search = "search" in mcp_tool.lower()
-                        if is_search and mcp_search_count >= 3:
-                            event = {"ok": False, "error": {"type": "search_limit",
-                                     "message": "В одном запуске разрешено не более 3 поисковых вызовов MCP."}}
-                        else:
-                            try:
-                                import mcp_registry
-                                server_id = str(args.get("server_id") or "")
-                                connection_tools = mcp_registry.connected_tools()
-                                server_entries = [item for item in connection_tools
-                                    if str(item.get("server_id") or "") == server_id]
-                                if not server_entries and server_id:
-                                    requested_server = server_id.lower().replace("_", " ").replace("-", " ")
-                                    matches = [item for item in connection_tools
-                                        if requested_server in str(item.get("server_name") or "").lower()
-                                        or requested_server in str(item.get("server_id") or "").lower()]
-                                    if matches:
-                                        server_id = str(matches[0].get("server_id") or server_id)
-                                        args["server_id"] = server_id
-                                        server_entries = [item for item in connection_tools
-                                            if str(item.get("server_id") or "") == server_id]
-                                server_label = " ".join(str(item.get("server_name") or "")
-                                    for item in server_entries).lower()
-                                is_github = "github" in (server_id + " " + server_label).lower()
-                                if is_github and mcp_tool == "search_code" and any(
-                                        str(item.get("name") or "") == "search_repositories"
-                                        for item in server_entries):
-                                    mcp_tool = "search_repositories"
-                                    args["tool"] = mcp_tool
-                                if is_github and is_search:
-                                    if any(str(item.get("name") or "") == "get_me"
-                                           for item in server_entries) and server_id not in mcp_identity_checked:
-                                        try:
-                                            mcp_registry.call_tool(server_id, "get_me", {})
-                                        finally:
-                                            mcp_identity_checked.add(server_id)
-                                    mcp_arguments["minimal_output"] = True
-                                    args["arguments"] = mcp_arguments
-                            except Exception:
-                                pass
-                            event = _call(ctx, name, args, spec)
-                            if is_search:
-                                mcp_search_count += 1
-                    else:
+                    event = parallel_results.pop(call_index, None)
+                    if event is None:
                         event = _call(ctx, name, args, spec)
             import guardrails
             serialized = json.dumps({"arguments": args, "result": event},

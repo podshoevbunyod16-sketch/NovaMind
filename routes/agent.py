@@ -748,7 +748,7 @@ class NovaToolsContext:
         # показывать чужие документы, но и гость имеет право на свои.
         self.knowledge_owner = _identity.chat_owner() or owner
         self.knowledge_available = self._knowledge_ready(self.knowledge_owner)
-        self.mcp_tools = self._mcp_tools()
+        self.mcp_tools = self._mcp_tools(self.owner)
         self.memory_available = self._memory_key() != ""
         self.tasks_available = True
         self.schedule_available = bool(owner)
@@ -758,7 +758,9 @@ class NovaToolsContext:
 
     # ── что доступно ─────────────────────────────────────────────────────
     @staticmethod
-    def _mcp_tools():
+    def _mcp_tools(owner=""):
+        if not _identity.is_admin_owner(owner) and os.getenv("MCP_ALLOW_USER_READ", "0") != "1":
+            return []
         try:
             import mcp_registry
             return mcp_registry.connected_tools()
@@ -902,11 +904,14 @@ def active_run(run_id):
 @agent_bp.route("/api/agent/status")
 def agent_status():
     enabled = is_enabled()
-    try:
-        import mcp_registry
-        mcp_tool_count = len(mcp_registry.connected_tools())
-    except Exception:  # noqa: BLE001
-        mcp_tool_count = 0
+    mcp_tool_count = 0
+    mcp_access = bool(session.get("admin_logged_in")) or os.getenv("MCP_ALLOW_USER_READ", "0") == "1"
+    if mcp_access:
+        try:
+            import mcp_registry
+            mcp_tool_count = len(mcp_registry.connected_tools())
+        except Exception:  # noqa: BLE001
+            mcp_tool_count = 0
     workspace = tools_enabled()
     return jsonify({
         "enabled": enabled,

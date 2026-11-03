@@ -14,9 +14,13 @@
   const t = (text) => (window.I18N && window.I18N.translateText ? window.I18N.translateText(text) : text);
   const toast = (message, type = '') => (window.showToast ? window.showToast(message, type) : console.log(message));
   const authLabel = (auth) => (Array.isArray(auth) ? auth.join(', ') : String(auth || 'none'));
-  const transportLabel = (transport) => (String(transport || 'http').toLowerCase() === 'http'
-    ? 'HTTP (Streamable)'
-    : String(transport || '').toUpperCase());
+  const transportLabel = (transport) => {
+    const value = String(transport || 'streamable_http').toLowerCase().replaceAll('-', '_');
+    if (['http', 'streamable', 'streamable_http'].includes(value)) return 'HTTP (Streamable)';
+    if (['sse', 'http/sse', 'http_sse', 'legacy_sse'].includes(value)) return 'HTTP/SSE';
+    if (value === 'stdio') return 'STDIO';
+    return value.toUpperCase();
+  };
 
   const state = { connections: [], catalog: [], tools: {}, errors: {} };
 
@@ -31,7 +35,7 @@
         <span class="model-id">${esc(transportLabel(item.transport))}</span>
       </div>
       <h3>${esc(item.name || item.id)}</h3>
-      <p><code>${esc(item.url || '')}</code></p>
+      <p>${String(item.transport).toLowerCase() === 'stdio' ? t('Локальный STDIO-процесс') : `<code>${esc(item.url || '')}</code>`}</p>
       <div class="model-stats">
         <span>Авторизация <b>${esc(authLabel(item.auth))}</b></span>
         <span>Статус <b>${connected ? t('подключён') : t('не подключён')}</b></span>
@@ -160,15 +164,41 @@
 
   function init() {
     if (!$('mcpGrid')) return;
+    const syncTransportFields = () => {
+      const stdio = $('mcpTransport')?.value === 'stdio';
+      ['mcpUrl', 'mcpAuth', 'mcpSecret'].forEach((id) => {
+        if ($(id)) $(id).style.display = stdio ? 'none' : '';
+      });
+      if ($('mcpUsername')) $('mcpUsername').style.display = !stdio && $('mcpAuth')?.value === 'basic' ? '' : 'none';
+      ['mcpCommand', 'mcpArgs', 'mcpEnv'].forEach((id) => {
+        if ($(id)) $(id).style.display = stdio ? '' : 'none';
+      });
+    };
+    $('mcpTransport')?.addEventListener('change', syncTransportFields);
+    $('mcpAuth')?.addEventListener('change', syncTransportFields);
+    syncTransportFields();
     $('refreshMcp')?.addEventListener('click', () => loadMcp().catch((error) => toast(error.message, 'error')));
     $('connectMcp')?.addEventListener('click', async () => {
-      const url = $('mcpUrl').value.trim();
-      if (!url) return toast(t('Укажите URL MCP-сервера'), 'error');
+      const transport = $('mcpTransport')?.value || 'streamable_http';
       const auth = $('mcpAuth').value;
-      const payload = { name: $('mcpName').value.trim() || 'MCP server', url, auth };
-      if (auth === 'api_key') payload.api_key = $('mcpSecret').value;
-      else if (auth === 'basic') { payload.username = $('mcpName').value.trim(); payload.password = $('mcpSecret').value; }
-      else if (auth !== 'none') payload.token = $('mcpSecret').value;
+      const payload = { name: $('mcpName').value.trim() || 'MCP server', transport, auth };
+      if (transport === 'stdio') {
+        payload.command = $('mcpCommand').value.trim();
+        if (!payload.command) return toast(t('Укажите команду STDIO MCP'), 'error');
+        try {
+          payload.args = JSON.parse($('mcpArgs').value || '[]');
+          payload.env = JSON.parse($('mcpEnv').value || '{}');
+        } catch (_error) {
+          return toast(t('Аргументы и переменные STDIO должны быть корректным JSON'), 'error');
+        }
+        payload.auth = 'none';
+      } else {
+        payload.url = $('mcpUrl').value.trim();
+        if (!payload.url) return toast(t('Укажите URL MCP-сервера'), 'error');
+        if (auth === 'api_key') payload.api_key = $('mcpSecret').value;
+        else if (auth === 'basic') { payload.username = $('mcpUsername').value; payload.password = $('mcpSecret').value; }
+        else if (auth !== 'none') payload.token = $('mcpSecret').value;
+      }
       const button = $('connectMcp');
       button.disabled = true;
       try {
@@ -182,6 +212,7 @@
         await loadMcp();
       } catch (error) {
         toast(error.message, 'error');
+        await loadMcp().catch(() => {});
       } finally {
         button.disabled = false;
       }

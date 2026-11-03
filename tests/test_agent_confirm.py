@@ -38,7 +38,14 @@ def _mode(monkeypatch, value):
 
 # ══════════════ оценка риска ══════════════
 
-def test_risk_by_tool_and_command():
+def test_risk_by_tool_and_command(tmp_path, monkeypatch):
+    import json
+    import mcp_registry
+    store = tmp_path / "mcp.json"
+    store.write_text(json.dumps({"issues": {"name": "Issues", "url": "https://mcp.test"}}), encoding="utf-8")
+    monkeypatch.setattr(mcp_registry, "STORE", store)
+    monkeypatch.setattr(mcp_registry, "_TOOL_CACHE", {"issues": (time.monotonic() + 60,
+        [{"name": "list_issues", "annotations": {"readOnlyHint": True}}])})
     assert policy.risk_of("web_search", "asyncio") == "safe"
     assert policy.risk_of("web_open", "https://example.org") == "safe"
     assert policy.risk_of("file_finder", "name=notes.md") == "safe"
@@ -48,7 +55,8 @@ def test_risk_by_tool_and_command():
     assert policy.risk_of("bash", "pip install requests") == "danger"
     assert policy.risk_of("bash", "rm -rf build") == "danger"
     assert policy.risk_of("mcp_call", '{"tool": "create_issue"}') == "danger"
-    assert policy.risk_of("mcp_call", '{"tool": "list_issues"}') == "safe"
+    assert policy.risk_of("mcp_call", '{"server_id": "issues", "tool": "list_issues"}') == "safe"
+    assert policy.risk_of("mcp_call", '{"server_id": "issues", "tool": "unknown"}') == "danger"
 
 
 def test_only_danger_asks_by_default(monkeypatch):

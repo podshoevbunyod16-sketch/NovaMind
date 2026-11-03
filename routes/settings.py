@@ -192,10 +192,8 @@ def settings_mcp_connect():
     try:
         server_id = mcp_registry.save_connection(request.get_json(silent=True) or {})
         result = mcp_registry.test_connection(server_id)
-        if not result.get("connected"):
-            # Не оставляем в каталоге разовые неудачные попытки подключения.
-            # Подробная причина уже возвращается клиенту в result["error"].
-            mcp_registry.remove_connection(server_id)
+        # Неудачное подключение сохраняем как OFFLINE: владелец должен видеть
+        # настоящую ошибку и иметь возможность проверить сервер повторно.
         return jsonify({"id": server_id, **result}), (200 if result.get("connected") else 502)
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
@@ -215,8 +213,11 @@ def settings_mcp_test(server_id):
 
 @settings_bp.route('/api/settings/mcp/<server_id>/tools')
 def settings_mcp_tools(server_id):
+    denied = _admin_only()
+    if denied:
+        return denied
     try:
-        return jsonify(mcp_registry.request(server_id, "tools/list"))
+        return jsonify({"result": {"tools": mcp_registry.list_tools(server_id, force=True)}})
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 404
     except Exception as exc:

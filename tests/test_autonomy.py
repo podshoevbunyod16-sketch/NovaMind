@@ -127,6 +127,11 @@ def test_autonomous_mcp_selection_without_mentioning_mcp_and_with_random_server_
         return {"content": [{"type": "text", "text": "1. Купить молоко\n2. Проверить PR"}]}
 
     monkeypatch.setattr(mcp_registry, "call_tool", fake_call_tool)
+    monkeypatch.setattr(mcp_registry, "cached_tool_annotations",
+                        lambda _sid, _tool: {"readOnlyHint": True})
+
+    import agent.policy as mcp_policy
+    assert mcp_policy.risk_of("mcp_call", '{"server_id":"todoist","tool":"list_active_tasks"}') == "safe"
 
     seen = []
     # Модель передаёт человекочитаемое имя "todoist" вместо случайного "xK9_mP2q"
@@ -148,7 +153,7 @@ def test_autonomous_mcp_selection_without_mentioning_mcp_and_with_random_server_
     assert "Todoist Tasks" in prompt_seen
     assert "Получить активные задачи" in prompt_seen
     # Вызов автоматически разрешился в реальный server_id = "xK9_mP2q"
-    assert called == [("xK9_mP2q", "list_active_tasks", {})]
+    assert called == [("xK9_mP2q", "list_active_tasks", {})], events
     assert "Купить молоко" in answer_of(events)
 
 
@@ -171,6 +176,8 @@ def test_freeform_request_without_keywords_still_autonomously_uses_tools(
         "call_tool",
         lambda sid, tool, args=None: {"login": "podshoevbunyod16-sketch", "id": 101},
     )
+    monkeypatch.setattr(mcp_registry, "cached_tool_annotations",
+                        lambda _sid, _tool: {"readOnlyHint": True})
 
     seen = []
     # Фраза без слов «mcp», «github», «файл», «найди» — попадает в talk, но имеет mcp_call

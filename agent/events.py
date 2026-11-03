@@ -20,6 +20,7 @@ def tool_presentation(name: str, arguments=None, result=None, *, status="ok") ->
         "web_search": ("Поиск в интернете", "search"),
         "web_open": ("Открыл страницу", "fetch"),
         "mcp_call": ("Вызвал подключённый сервис", "mcp"),
+        "mcp_list": ("Обнаружил инструменты MCP", "mcp"),
         "image": ("Создал изображение" if not failed else "Не создал изображение", "media"),
         "audio": ("Создал аудио" if not failed else "Не создал аудио", "media"),
         "video": ("Создал видео" if not failed else "Не создал видео", "media"),

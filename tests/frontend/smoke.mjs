@@ -1100,6 +1100,20 @@ check('MCP: проверка connection не теряет карточку',
   Boolean(sdoc.querySelector('[data-mcp-card="docs"]')));
 check('MCP: секрет вводится только в скрытое поле',
   sdoc.getElementById('mcpSecret').type === 'password');
+const mcpTransport = sdoc.getElementById('mcpTransport');
+check('MCP: доступны современные HTTP, legacy SSE и STDIO',
+  ['streamable_http', 'http_sse', 'stdio'].every((value) =>
+    [...mcpTransport.options].some((option) => option.value === value)));
+mcpTransport.value = 'stdio';
+mcpTransport.dispatchEvent(new settingsDom.window.Event('change', { bubbles: true }));
+check('MCP: форма STDIO показывает команду и скрывает HTTP URL',
+  sdoc.getElementById('mcpCommand').style.display !== 'none'
+    && sdoc.getElementById('mcpUrl').style.display === 'none');
+mcpTransport.value = 'streamable_http';
+mcpTransport.dispatchEvent(new settingsDom.window.Event('change', { bubbles: true }));
+check('MCP: форма возвращается к HTTP авторизации',
+  sdoc.getElementById('mcpUrl').style.display !== 'none'
+    && sdoc.getElementById('mcpSecret').style.display !== 'none');
 
 // ── 8д) Скиллы ──────────────────────────────────────────────────────────
 console.log('\n8д) Скиллы: отдельная категория, включение и выключение');

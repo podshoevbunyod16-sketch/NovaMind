@@ -29,10 +29,8 @@ class _FakeResp:
         return self._json
 
 
-def test_github_mcp_rewrites_search_code_sets_minimal_output_and_calls_get_me_once(
-    admin_client, sandbox, monkeypatch
-):
-    """Запрос «найди программы/репозитории»: get_me 1 раз, search_repositories + minimal_output=true."""
+def test_mcp_calls_preserve_server_tool_names_and_arguments(admin_client, sandbox, monkeypatch):
+    """MCP tool names and arguments are passed through without GitHub-specific rewriting."""
     calls: list[tuple[str, str, dict]] = []
 
     monkeypatch.setattr(mcp_registry, "connected_tools", lambda: [
@@ -64,10 +62,9 @@ def test_github_mcp_rewrites_search_code_sets_minimal_output_and_calls_get_me_on
     ))
 
     assert answer_of(events) == "Нашёл репозиторий demo/mt5-bot."
-    # get_me вызван ровно один раз перед первым поиском, а не перед каждым
-    assert [c[1] for c in calls] == ["get_me", "search_repositories", "search_repositories"]
-    assert calls[1][2].get("minimal_output") is True
-    assert calls[2][2].get("minimal_output") is True
+    assert [c[1] for c in calls] == ["search_code", "search_repositories"]
+    assert calls[0][2] == {"query": "пожалуйста найди на github несколько программ торговых ботов python"}
+    assert calls[1][2] == {"query": "mt5 trading bot", "minimal_output": False}
 
 
 def test_mcp_only_request_exposes_registry_tools_without_shell(
@@ -105,7 +102,7 @@ def test_mcp_only_request_exposes_registry_tools_without_shell(
     }))
 
     assert calls == [
-        ("github-real-id", "search_repositories", {"query": "flask", "minimal_output": True}),
+        ("github-real-id", "search_repositories", {"query": "flask"}),
     ]
     tool = events_of(events, "tool")[0]
     assert tool["name"] == "mcp_call" and tool["status"] == "ok"
@@ -128,8 +125,8 @@ def test_mcp_only_request_refuses_ordinary_shell(admin_client, sandbox, monkeypa
     assert "недоступен в этом запуске" in tool["output"]
 
 
-def test_github_mcp_limits_search_calls_to_three_per_run(admin_client, sandbox, monkeypatch):
-    """Не более 3 поисковых вызовов MCP за один запуск агента."""
+def test_mcp_search_calls_have_no_arbitrary_three_call_cap(admin_client, sandbox, monkeypatch):
+    """MCP searches can exceed three calls while the global ReAct step budget remains bounded."""
     search_invocations = []
 
     monkeypatch.setattr(mcp_registry, "connected_tools", lambda: [
@@ -158,39 +155,59 @@ def test_github_mcp_limits_search_calls_to_three_per_run(admin_client, sandbox, 
         json={"message": "найди репозитории на github"},
     ))
 
-    assert len(search_invocations) == 3
+    assert len(search_invocations) == 4
     tool_events = events_of(events, "tool")
     assert len(tool_events) == 4
-    assert tool_events[3]["status"] == "error"
-    assert "не более 3" in tool_events[3]["output"]
+    assert all(event["status"] == "ok" for event in tool_events)
     assert answer_of(events) == "Отвечаю по трём выполненным поискам."
 
 
-def test_mcp_registry_retries_on_403_and_429(tmp_path, monkeypatch):
-    """При кодах 403 и 429 MCP делает паузу и повторяет запрос."""
+def test_mcp_registry_retries_only_safe_discovery_requests(tmp_path, monkeypatch):
+    """Rate-limit retries are bounded and limited to idempotent MCP discovery."""
     store = tmp_path / "mcp_connections.json"
     store.write_text(json.dumps({
         "github": {"name": "GitHub", "url": "https://mcp.example.test/mcp",
-                   "auth": "bearer", "token": "secret", "connected": True, "initialized": True}
+                   "auth": "bearer", "token": "secret", "transport": "streamable_http",
+                   "connected": True, "initialized": True}
     }), encoding="utf-8")
     monkeypatch.setattr(mcp_registry, "STORE", store)
     monkeypatch.setenv("MCP_MAX_RETRIES", "2")
-    monkeypatch.setenv("MCP_RETRY_DELAY", "0.25")
-
-    slept: list[float] = []
-    monkeypatch.setattr(mcp_registry.time, "sleep", lambda s: slept.append(s))
-
+    slept = []
+    monkeypatch.setattr(mcp_registry.time, "sleep", lambda delay: slept.append(delay))
+    calls = []
     responses = iter([
         _FakeResp(429, {"message": "Too Many Requests"}, headers={"Retry-After": "1"}),
         _FakeResp(403, {"message": "You have triggered a secondary rate limit"}),
-        _FakeResp(200, {"jsonrpc": "2.0", "id": 1, "result": {"content": [{"type": "text", "text": "ok"}]}}),
+        _FakeResp(200, {"jsonrpc": "2.0", "id": 1, "result": {"tools": []}}),
     ])
-    monkeypatch.setattr(mcp_registry.requests, "post", lambda *a, **kw: next(responses))
+    monkeypatch.setattr(mcp_registry.requests, "post", lambda *a, **kw: calls.append(kw) or next(responses))
 
-    result = mcp_registry.call_tool("github", "search_repositories", {"query": "flask"})
-    assert result["content"][0]["text"] == "ok"
-    assert len(slept) == 2
-    assert slept[0] == 1.0
+    result = mcp_registry.request("github", "tools/list")
+    assert result["result"]["tools"] == []
+    assert len(calls) == 3
+    assert slept == [1.0, pytest.approx(.4)]
+
+
+def test_mcp_registry_never_retries_non_idempotent_tool_calls(tmp_path, monkeypatch):
+    store = tmp_path / "mcp_connections.json"
+    store.write_text(json.dumps({
+        "notes": {"name": "Notes", "url": "https://mcp.example.test/mcp",
+                  "transport": "streamable_http", "auth": "none",
+                  "connected": True, "initialized": True}
+    }), encoding="utf-8")
+    monkeypatch.setattr(mcp_registry, "STORE", store)
+    monkeypatch.setenv("MCP_MAX_RETRIES", "3")
+    monkeypatch.setattr(mcp_registry, "_TOOL_CACHE", {
+        "notes": (mcp_registry.time.monotonic() + 60, [{
+            "name": "create_note", "inputSchema": {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]},
+            "annotations": {"readOnlyHint": False, "destructiveHint": False},
+        }])
+    })
+    calls = []
+    monkeypatch.setattr(mcp_registry.requests, "post", lambda *a, **kw: calls.append(kw) or _FakeResp(503, {"message": "unavailable"}))
+    with pytest.raises(mcp_registry.MCPError, match="503"):
+        mcp_registry.call_tool("notes", "create_note", {"text": "hello"})
+    assert len(calls) == 1
 
 
 def test_mcp_error_surfaces_real_server_message_and_logs_status_to_nova_log(

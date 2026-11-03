@@ -27,6 +27,7 @@ boundary. This module decides *whether a human said yes*, and it fails closed
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 import threading
@@ -101,13 +102,13 @@ _POLICY_ALIASES = {"terminal": "bash", "shell": "bash", "web_fetch": "web_open",
 
 def _tag_of(tool) -> str:
     """Тег для логики: настройки риска и шаблоны написаны на старых именах."""
-    tag = getattr(tool, "tag", str(tool)) if not isinstance(tool, str) else tool
+    tag = (getattr(tool, "tag", None) or getattr(tool, "name", None) or str(tool)) if not isinstance(tool, str) else tool
     return _POLICY_ALIASES.get(tag, tag)
 
 
 def _display_tag(tool) -> str:
     """Тег для пользователя: то, что он видит в шаге и карточке."""
-    return getattr(tool, "tag", str(tool)) if not isinstance(tool, str) else tool
+    return (getattr(tool, "tag", None) or getattr(tool, "name", None) or str(tool)) if not isinstance(tool, str) else tool
 
 
 # ── risk ──────────────────────────────────────────────────────────────────
@@ -133,12 +134,32 @@ def risk_of(tool, payload: str = "") -> str:
     if tag in ("web_search", "web_open", "recall"):
         return RISK_SAFE
     if tag == "mcp_call":
-        name = str(text or "").lower()
-        # Любой инструмент, меняющий состояние на сервисе, спрашивает разрешение:
-        # «создать issue» так же необратимо, как «удалить» — это видит третья сторона.
-        if any(hint in name for hint in _DANGER_TOOLS + _WRITE_TOOLS):
+        try:
+            payload_data = json.loads(text) if text else {}
+            server_id = str(payload_data.get("server_id") or "") if isinstance(payload_data, dict) else ""
+            tool_name = str(payload_data.get("tool") or "") if isinstance(payload_data, dict) else ""
+        except (ValueError, TypeError):
+            server_id = tool_name = ""
+        lowered = tool_name.lower()
+        # Любой известный изменяющий инструмент требует подтверждения.
+        if any(hint in lowered for hint in _DANGER_TOOLS + _WRITE_TOOLS):
             return RISK_DANGER
-        return RISK_SAFE
+        # MCP annotations are authoritative. Unknown or unannotated tools fail
+        # closed; a suggestive tool name is not proof that it has no side effects.
+        if server_id and tool_name:
+            try:
+                import mcp_registry
+                annotations = mcp_registry.cached_tool_annotations(server_id, tool_name)
+            except Exception:
+                annotations = None
+            if annotations is not None:
+                return RISK_SAFE if annotations.get("readOnlyHint") is True else RISK_DANGER
+        # First-party mcp_call defaults to danger. Explicit per-tool risk on a
+        # test or specialized registry spec remains authoritative when metadata
+        # is unavailable.
+        if isinstance(tool, str):
+            return RISK_DANGER
+        return level if level in (RISK_SAFE, RISK_WRITE, RISK_DANGER) else RISK_DANGER
     if level not in (RISK_SAFE, RISK_WRITE, RISK_DANGER):
         return RISK_WRITE
     return level
@@ -336,7 +357,7 @@ def reset_confirmations() -> None:
 
 
 # ── untrusted content ─────────────────────────────────────────────────────
-UNTRUSTED_TOOLS = {"web_search", "web_open", "file_finder", "file_read", "mcp_call",
+UNTRUSTED_TOOLS = {"web_search", "web_open", "file_finder", "file_read", "mcp_call", "mcp_list",
                    "bash", "python", "image", "audio", "video", "media"}
 
 

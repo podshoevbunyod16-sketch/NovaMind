@@ -59,6 +59,8 @@ def _run(goal, record_id, *, chat_id="", history=None, observations=None,
                  and spec.name not in getattr(tool_registry, "WORKSPACE_TOOLS", set())]
     if tool_names is not None:
         requested = set(str(name) for name in tool_names)
+        if "mcp_call" in requested:
+            requested.add("mcp_list")
         specs = [spec for spec in specs if spec.name in requested]
     owner = identity.chat_owner()
     is_admin = identity.is_admin_owner(owner)
@@ -69,10 +71,19 @@ def _run(goal, record_id, *, chat_id="", history=None, observations=None,
         if role == "admin" or str(os.getenv("MCP_ALLOW_USER_READ", "0")) == "1":
             import mcp_registry
             connected = mcp_registry.connected_tools()
-            integration_context = "\n".join(
-                f"server_id={item.get('server_id','')} · server={item.get('server_name','')} · "
-                f"tool={item.get('name','')} · description={str(item.get('description') or '')[:300]}"
-                for item in connected[:80] if isinstance(item, dict))
+            servers = mcp_registry.server_summaries(connected)
+            tool_catalog = [{"server_id": item.get("server_id"), "server_name": item.get("server_name"),
+                             "name": item.get("name"), "description": item.get("description"),
+                             "inputSchema": item.get("inputSchema"), "annotations": item.get("annotations")}
+                            for item in connected]
+            integration_context = (
+                "Подключённые MCP-серверы и обнаруженные инструменты: "
+                + json.dumps({"servers": servers, "tools": tool_catalog}, ensure_ascii=False,
+                             separators=(",", ":"))
+                + "\nЕсли нужного инструмента нет в списке или контекст обрезан, вызови mcp_list с server_id; "
+                "для большого каталога продолжай по next_offset. Выполняй только требуемое действие, "
+                "проверяй isError/ошибку и не объявляй задачу успешной без полноценного итогового ответа."
+            )
     except Exception:
         current_app.logger.warning("Не удалось перечислить MCP-инструменты", exc_info=True)
     try:

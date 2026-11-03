@@ -97,13 +97,21 @@
             <div class="catalog-heading">
               <div>
                 <h2>Каталог MCP-серверов</h2>
-                <p>Подключайте Streamable HTTP MCP-серверы: API-ключ, Bearer/OAuth, Basic Auth или без авторизации. Секреты хранятся только на сервере. Подключение происходит лишь по вашей команде и с проверкой initialize.</p>
+                <p>Подключайте Streamable HTTP, legacy HTTP/SSE или локальные STDIO MCP-серверы. Для HTTP доступны API-ключ, Bearer/OAuth, Basic Auth или без авторизации; секреты остаются на сервере. STDIO запускается без shell, с указанными аргументами и переменными окружения.</p>
               </div>
               <button class="outline-btn" id="refreshMcp" type="button">↻ Обновить каталог</button>
             </div>
             <div class="mcp-connect-form">
               <input id="mcpName" placeholder="Название сервера" maxlength="80">
-              <input id="mcpUrl" type="url" placeholder="https://example.com/mcp" required>
+              <select id="mcpTransport" aria-label="Транспорт MCP">
+                <option value="streamable_http">Streamable HTTP</option>
+                <option value="http_sse">HTTP/SSE (legacy)</option>
+                <option value="stdio">STDIO (локальный процесс)</option>
+              </select>
+              <input id="mcpUrl" type="url" placeholder="https://example.com/mcp">
+              <input id="mcpCommand" placeholder="Команда STDIO, например npx" autocomplete="off">
+              <input id="mcpArgs" placeholder='Аргументы JSON, например ["-y","package"]' autocomplete="off">
+              <input id="mcpEnv" type="password" placeholder='Переменные STDIO JSON, например {"TOKEN":"…"}' autocomplete="off">
               <select id="mcpAuth" aria-label="Авторизация MCP">
                 <option value="none">Без авторизации</option>
                 <option value="api_key">API-ключ (X-API-Key)</option>
@@ -112,10 +120,11 @@
                 <option value="oauth">OAuth 2.0 token</option>
                 <option value="basic">Basic Auth</option>
               </select>
+              <input id="mcpUsername" placeholder="Имя пользователя Basic Auth" autocomplete="off">
               <input id="mcpSecret" type="password" placeholder="Ключ или токен (не показывается)" autocomplete="off">
               <button class="refresh-btn" id="connectMcp" type="button">Подключить и проверить</button>
             </div>
-            <div class="catalog-meta"><span id="mcpStatus">Загружаю каталог…</span><span>Транспорт: Streamable HTTP</span></div>
+            <div class="catalog-meta"><span id="mcpStatus">Загружаю каталог…</span><span>Транспорты: Streamable HTTP · HTTP/SSE · STDIO</span></div>
             <div class="model-grid" id="mcpGrid"><div class="empty-card loading-card">Загрузка MCP-каталога…</div></div>
           </div>
         </div>

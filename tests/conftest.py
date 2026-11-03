@@ -37,6 +37,13 @@ def isolated_env(tmp_path, monkeypatch):
     # Подтверждение опасных действий в тестах не ждёт 120 секунд:
     # тест, которому нужен таймаут, выставляет своё значение сам.
     monkeypatch.setenv("AGENT_CONFIRM_TIMEOUT", "0.05")
+    import agent.policy as agent_policy
+    agent_policy.reset_cache()
+    agent_policy.reset_confirmations()
+    import mcp_registry
+    mcp_registry._TOOL_CACHE.clear()
+    mcp_registry._FAILURE_UNTIL.clear()
+    mcp_registry._close_stdio_sessions()
     import media_generation as mg
     media_dir = tmp_path / "generated_media"
     monkeypatch.setattr(mg, "MEDIA_DIR", str(media_dir))
@@ -79,6 +86,11 @@ def isolated_env(tmp_path, monkeypatch):
 
     config.save_selected_media_model({})
     reset_speech_settings()
+    agent_policy.reset_confirmations()
+    agent_policy.reset_cache()
+    mcp_registry._TOOL_CACHE.clear()
+    mcp_registry._FAILURE_UNTIL.clear()
+    mcp_registry._close_stdio_sessions()
     mg.reset_catalog_cache()
     mg.reset_tts_catalog_cache()
 

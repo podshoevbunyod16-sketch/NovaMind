@@ -96,7 +96,7 @@ WORKSPACE_TOOLS = frozenset({"terminal", "python", "file_read", "file_write", "f
                              "file_edit", "file_find", "shell", "bash", "git", "file_delete"})
 
 _ALIASES = {"bash": "terminal", "shell": "terminal", "files": "file_read",
-            "file_finder": "file_find"}
+            "file_finder": "file_find", "mcp_list": "mcp_call"}
 
 #: Секрет процесса. Если ``AGENT_CAP_SECRET`` не задан, генерируется случайный:
 #: токены живут только внутри процесса и не переживают перезапуск (это
