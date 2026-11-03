@@ -47,8 +47,8 @@ def script(monkeypatch, answers, seen=None, module=None):
     if module is None:
         import routes.agent as module
     queue = list(answers)
-    # Скрипт изображает рабочую модель: без этого resolve_target() вернул бы
-    # local_demo (ключей в тестах нет), и движок ушёл бы в офлайн-ветку.
+    # Скрипт явно закрепляет тестовый cloud-target, чтобы не зависеть от
+    # конфигурации провайдера и ключей в окружении тестов.
     monkeypatch.setattr(module, "resolve_target",
                         lambda provider=None, model=None: (provider or "groq",
                                                            model or "test-model", {}))

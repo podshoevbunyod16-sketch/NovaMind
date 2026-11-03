@@ -63,7 +63,7 @@ split:
 ## Preserve
 
 - Flask routes and NDJSON transport, chat/history/auth/Google login.
-- provider catalog, free-model enforcement and failover.
+- provider catalog, free-model enforcement and strict single-provider selection (no automatic failover).
 - AgenticSeek prompt/adapter compatibility and existing planner/coding roles.
 - terminal/filesystem sandbox and confirmation policy.
 - memory, knowledge, media, scheduler, Skills creator and MCP UI.
