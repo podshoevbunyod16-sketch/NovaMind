@@ -72,8 +72,27 @@ class ToolSpec:
 MAX_RESULT_CHARS = max(1000, int(os.getenv("AGENT_TOOL_RESULT_CHARS", "20000")))
 
 
+def _slim(value):
+    """Укорачивает inputSchema и description, чтобы список инструментов влез целиком."""
+    if isinstance(value, dict):
+        out = {}
+        for key, item in value.items():
+            if key == "inputSchema" and isinstance(item, dict):
+                props = item.get("properties") or {}
+                out[key] = {"required": item.get("required", []),
+                            "params": list(props)[:8]}
+            elif key == "description" and isinstance(item, str):
+                out[key] = item[:120]
+            else:
+                out[key] = _slim(item)
+        return out
+    if isinstance(value, list):
+        return [_slim(i) for i in value]
+    return value
+
+
 def _limit_result(value: dict) -> dict:
-    """Bound persisted/model-visible results without changing structured errors."""
+    """Bound persisted/model-visible results; сначала сжимает, и только потом режет."""
     import json
     try:
         raw = json.dumps(value, ensure_ascii=False, default=str)
@@ -81,8 +100,13 @@ def _limit_result(value: dict) -> dict:
         return value
     if len(raw) <= MAX_RESULT_CHARS:
         return value
+    slim = _slim(value)
+    raw2 = json.dumps(slim, ensure_ascii=False, default=str)
+    if len(raw2) <= MAX_RESULT_CHARS:
+        slim["slimmed"] = True
+        return slim
     return {"ok": bool(value.get("ok")), "tool": value.get("tool"),
-            "result": raw[:MAX_RESULT_CHARS] + "…", "truncated": True}
+            "result": raw2[:MAX_RESULT_CHARS] + "…", "truncated": True}
 
 
 def validate_arguments(schema: Mapping[str, Any], arguments: Any) -> list[str]:
