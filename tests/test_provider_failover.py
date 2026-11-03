@@ -74,3 +74,20 @@ def test_startup_provider_check_does_not_change_provider(monkeypatch):
 
     assert config.current_provider == "groq"
     assert config.current_model == "openai/gpt-oss-120b"
+
+
+
+def test_chat_completion_does_not_replace_selected_paid_model(monkeypatch):
+    monkeypatch.setattr(ai_providers, "resolve_target", lambda *a, **k: (
+        "openrouter", "vendor/paid-model", config.PROVIDERS["openrouter"]))
+    monkeypatch.setattr(
+        ai_providers, "_chat_completion_once",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("paid model must not be called")),
+    )
+
+    text, error = ai_providers.chat_completion(
+        [{"role": "user", "content": "вопрос"}]
+    )
+
+    assert text is None
+    assert "не подтверждена как бесплатная" in error
