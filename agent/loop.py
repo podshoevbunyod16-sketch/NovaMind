@@ -165,6 +165,8 @@ def _call(ctx: AgentContext, name: str, args: dict, spec):
         result = {"ok": False, "error": {"type": type(error).__name__, "message": str(error)}}
     if not isinstance(result, dict):
         result = {"ok": True, "result": result}
+    elif "ok" not in result:
+        result = {**result, "ok": not bool(result.get("isError") or result.get("error"))}
     return result
 
 
@@ -269,6 +271,21 @@ def run_react(ctx: AgentContext) -> AgentResult:
     answer_retries = 0
     answer_prefix = ""
     approvals = set(ctx.approvals or [])
+    consecutive_tool_errors = 0
+    force_final_response = False
+
+    def record_tool_outcome(failed: bool) -> None:
+        nonlocal consecutive_tool_errors, force_final_response
+        consecutive_tool_errors = consecutive_tool_errors + 1 if failed else 0
+        if consecutive_tool_errors >= 3 and not force_final_response:
+            force_final_response = True
+            messages.append({"role": "user", "content": (
+                "Три последовательных вызова инструмента завершились ошибкой. "
+                "Больше не вызывай инструменты: дай краткий ответ только по уже "
+                "полученным данным, ясно назови ограничение и не утверждай, что "
+                "непроверенная часть выполнена. Если есть полученные результаты "
+                "другого источника, используй их с соответствующей оговоркой.")})
+
     steps = max(0, int(ctx.step_offset or 0))
     status = "completed"
     fallback = "Не удалось завершить задачу: цикл агента остановился до получения итогового ответа."
@@ -303,7 +320,7 @@ def run_react(ctx: AgentContext) -> AgentResult:
                     messages, provider=ctx.provider, model=ctx.model,
                     system=_system_prompt() + warning, temperature=0.2,
                     max_tokens=token_budget, timeout=max(.2, min(45.0, deadline - ctx.clock())),
-                    tools=schemas or None,
+                    tools=None if force_final_response else schemas or None,
                 )
             except Exception as error:
                 response, meta = None, f"{type(error).__name__}: {error}"
@@ -324,6 +341,10 @@ def run_react(ctx: AgentContext) -> AgentResult:
         if not calls:
             call, text = _extract_fenced(text)
             calls = [call] if call else []
+        if force_final_response and calls:
+            calls = []
+            if not text.strip():
+                text = "Не удалось продолжить: повторные вызовы инструмента завершились ошибкой."
         if not calls:
             from .output import (append_continuation, clean_final_answer,
                                  is_truncated_answer, partial_answer_prefix,
@@ -451,6 +472,9 @@ def run_react(ctx: AgentContext) -> AgentResult:
                                  {"role": "user", "content": "Наблюдение (ошибка инструмента): " + json.dumps(event, ensure_ascii=False)}])
                 ctx.emit({"type": "tool", "name": name, "status": "error",
                           "error_type": "unknown_tool", "output": event["error"]["message"]})
+                record_tool_outcome(True)
+                if force_final_response:
+                    break
                 continue
             invalid = _valid(args, dict(spec.schema or {}))
             import hashlib
@@ -578,6 +602,10 @@ def run_react(ctx: AgentContext) -> AgentResult:
                 error = event.get("error") if isinstance(event.get("error"), dict) else {}
                 tool_event["output"] = "Веб-поиск не удался: " + str(error.get("message") or clean)[:1000]
             ctx.emit(tool_event)
+            tool_failed = (event.get("ok") is False or bool(event.get("error")))
+            record_tool_outcome(tool_failed)
+            if force_final_response:
+                break
             if name in {"web_search", "search"} and isinstance(event.get("results"), list):
                 sources = [dict(item) for item in event["results"] if isinstance(item, dict)
                            and item.get("url")]

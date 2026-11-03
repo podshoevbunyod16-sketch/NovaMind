@@ -452,6 +452,43 @@ def test_mcp_failure_cannot_become_an_unverified_success_claim(monkeypatch, tmp_
     assert result.answer.startswith("Не могу честно подтвердить завершение задачи")
 
 
+def test_react_stops_repeated_mcp_failures_and_requests_final_answer(monkeypatch, tmp_path):
+    from agent.loop import AgentContext, run_react
+    from tool_registry import ToolSpec
+
+    store_server(monkeypatch, tmp_path, sid="wiki")
+    monkeypatch.setattr(mcp, "_TOOL_CACHE", {"wiki": (time.monotonic() + 60,
+        [{"name": "read_wiki_structure", "annotations": {"readOnlyHint": True}}])})
+    calls = []
+    tool_definitions = []
+    def complete(_messages, **kwargs):
+        tool_definitions.append(kwargs.get("tools", "missing"))
+        if len(tool_definitions) <= 3:
+            return "", {"tool_calls": [{"function": {"name": "mcp_call", "arguments": {
+                "server_id": "wiki", "tool": "read_wiki_structure", "arguments": {"repo": "owner/repo"}}}}]}
+        return "DeepWiki сообщает, что репозиторий не проиндексирован; повторять запрос не следует.", {"model": "mock"}
+
+    def failed_call(*_args, **_kwargs):
+        calls.append(1)
+        return {"ok": False, "error": {"type": "MCPError", "message": "Repository not indexed"}}
+
+    spec = ToolSpec("mcp_call", "MCP call", {"type": "object", "properties": {
+        "server_id": {"type": "string"}, "tool": {"type": "string"}, "arguments": {"type": "object"}},
+        "required": ["server_id", "tool"]}, lambda **_kwargs: {"ok": True}, risk="safe")
+    result = run_react(AgentContext(goal="Изучи структуру репозитория", complete=complete, tools=[spec],
+                                    call_tool=failed_call, max_steps=8, timeout=4))
+
+    assert len(tool_definitions) == 4
+    assert all(definitions for definitions in tool_definitions[:3])
+    assert tool_definitions[3] is None
+    assert len(calls) == 1  # repeated identical calls are blocked by the loop
+    assert len(result.observations) == 3
+    assert result.observations[0]["result"]["ok"] is False
+    assert all(item["result"]["error"]["type"] == "repeat_call"
+               for item in result.observations[1:])
+    assert "индекс" in result.answer.lower() or "заверш" in result.answer.lower()
+
+
 def test_settings_tools_endpoint_requires_admin_before_stdio_discovery(client, sandbox, monkeypatch):
     def forbidden(*_args, **_kwargs):
         pytest.fail("unauthenticated settings request must not start MCP discovery")
