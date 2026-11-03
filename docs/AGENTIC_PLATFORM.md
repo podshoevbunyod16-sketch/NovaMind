@@ -17,8 +17,10 @@ provider. `AgentEngine` then runs:
 6. output verification and final response.
 
 The model chooses subsequent actions from prior tool observations. Tool blocks
-are not pre-scripted. Provider calls continue through `ai_providers.py`, so free
-model filtering and provider failover remain active.
+are not pre-scripted. Provider calls continue through `ai_providers.py`. Only
+the explicitly selected free model is called: failed requests are returned to
+the caller without switching providers or silently choosing another model.
+Groq may rotate among its configured API keys while remaining on Groq.
 
 ## Unified tools
 
