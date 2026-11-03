@@ -9,7 +9,9 @@ import logging
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 import requests
-from groq_rotation import get_groq_key, mark_groq_key_exhausted, GROQ_KEY_COOLDOWN, mark_groq_key_success
+from groq_rotation import (get_groq_key, mark_groq_key_exhausted,
+                           GROQ_KEY_COOLDOWN, GROQ_RATE_LIMIT_COOLDOWN,
+                           mark_groq_key_success)
 
 logger = logging.getLogger(__name__)
 
