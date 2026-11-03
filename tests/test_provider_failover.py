@@ -1,87 +1,76 @@
-"""Free-only provider failover for sync and streaming chat."""
+"""Regression tests: provider selection is strict and never fails over."""
 import ai_providers
 import config
 
 
-def test_failover_switches_provider_and_keeps_failure_trace(monkeypatch):
-    monkeypatch.setattr(ai_providers, "free_failover_targets", lambda *a, **k: [
-        ("groq", "openai/gpt-oss-120b"),
-        ("google_ai_studio", "gemini-2.0-flash"),
-        ("local_demo", "nova-local-1"),
-    ])
+def test_failover_targets_contains_only_selected_provider(monkeypatch):
+    monkeypatch.setattr(ai_providers, "resolve_target", lambda *a, **k: (
+        "groq", "openai/gpt-oss-120b", config.PROVIDERS["groq"]))
+    assert ai_providers.free_failover_targets() == [
+        ("groq", "openai/gpt-oss-120b")
+    ]
+
+
+def test_chat_completion_does_not_switch_after_provider_error(monkeypatch):
     calls = []
 
-    def fake_once(messages, provider=None, model=None, **kwargs):
+    def fail_selected(messages, provider=None, model=None, **kwargs):
         calls.append((provider, model))
-        if provider == "groq":
-            return None, "timeout"
-        return "Ответ резервной бесплатной модели", {"provider": provider, "model": model}
+        return None, "Groq HTTP 429: rate limit"
 
-    monkeypatch.setattr(ai_providers, "_chat_completion_once", fake_once)
-    text, meta = ai_providers.chat_completion([{"role": "user", "content": "вопрос"}])
-
-    assert text == "Ответ резервной бесплатной модели"
-    assert calls == [
-        ("groq", "openai/gpt-oss-120b"),
-        ("google_ai_studio", "gemini-2.0-flash"),
-    ]
-    assert meta["provider"] == "google_ai_studio"
-    assert meta["failover_count"] == 1 and meta["free_model"] is True
-    assert meta["failover"][0]["error"] == "timeout"
-
-
-def test_failover_never_selects_paid_openrouter_model(monkeypatch):
     monkeypatch.setattr(ai_providers, "resolve_target", lambda *a, **k: (
-        "openrouter", "vendor/paid-model", config.PROVIDERS["openrouter"]))
-    monkeypatch.setattr(config, "has_credentials", lambda provider: provider == "openrouter")
+        "groq", "openai/gpt-oss-120b", config.PROVIDERS["groq"]))
+    monkeypatch.setattr(ai_providers, "_chat_completion_once", fail_selected)
 
-    targets = ai_providers.free_failover_targets("openrouter", "vendor/paid-model")
+    text, error = ai_providers.chat_completion(
+        [{"role": "user", "content": "вопрос"}]
+    )
 
-    assert ("openrouter", "vendor/paid-model") not in targets
-    assert any(provider == "openrouter" and model.endswith(":free")
-               for provider, model in targets)
-    assert all(ai_providers.is_free_ai_model(provider, model)
-               for provider, model in targets)
+    assert text is None
+    assert "Groq HTTP 429" in error
+    assert calls == [("groq", "openai/gpt-oss-120b")]
 
 
-def test_stream_retries_before_first_token_without_mixing_answers(monkeypatch):
-    monkeypatch.setattr(ai_providers, "free_failover_targets", lambda *a, **k: [
-        ("groq", "free-a"), ("cerebras", "free-b")])
+def test_chat_stream_does_not_switch_after_error(monkeypatch):
+    calls = []
 
-    def fake_stream(messages, provider=None, model=None, **kwargs):
-        if provider == "groq":
-            yield "reasoning", "черновик не должен показываться"
-            yield "error", "connection reset"
-            yield "done", ""
-            return
-        yield "reasoning", "проверяю"
-        yield "token", "Готовый "
-        yield "token", "ответ"
+    def selected_stream(messages, provider=None, model=None, **kwargs):
+        calls.append((provider, model))
+        yield "error", "Groq HTTP 429: rate limit"
         yield "done", ""
 
-    monkeypatch.setattr(ai_providers, "_chat_stream_once", fake_stream)
-    events = list(ai_providers.chat_stream([{"role": "user", "content": "вопрос"}]))
+    monkeypatch.setattr(ai_providers, "resolve_target", lambda *a, **k: (
+        "groq", "openai/gpt-oss-120b", config.PROVIDERS["groq"]))
+    monkeypatch.setattr(ai_providers, "_chat_stream_once", selected_stream)
 
-    assert ("reasoning", "черновик не должен показываться") not in events
-    assert ("reasoning", "проверяю") in events
-    assert "".join(value for kind, value in events if kind == "token") == "Готовый ответ"
+    events = list(ai_providers.chat_stream(
+        [{"role": "user", "content": "вопрос"}]
+    ))
+
+    assert calls == [("groq", "openai/gpt-oss-120b")]
+    assert ("error", "Groq HTTP 429: rate limit") in events
     assert events[-1] == ("done", "")
 
 
-def test_stream_does_not_switch_after_partial_answer(monkeypatch):
-    monkeypatch.setattr(ai_providers, "free_failover_targets", lambda *a, **k: [
-        ("groq", "free-a"), ("cerebras", "free-b")])
-    calls = []
+def test_resolve_target_keeps_selected_provider_without_credentials(monkeypatch):
+    monkeypatch.setattr(config, "current_provider", "groq")
+    monkeypatch.setattr(config, "current_model", "openai/gpt-oss-120b")
+    monkeypatch.setattr(config, "has_credentials", lambda _provider: False)
+    monkeypatch.setattr(config, "first_available_provider", lambda: "google_ai_studio")
 
-    def fake_stream(messages, provider=None, model=None, **kwargs):
-        calls.append(provider)
-        yield "token", "часть ответа"
-        yield "error", "stream interrupted"
-        yield "done", ""
+    provider, model, _cfg = ai_providers.resolve_target()
 
-    monkeypatch.setattr(ai_providers, "_chat_stream_once", fake_stream)
-    events = list(ai_providers.chat_stream([{"role": "user", "content": "вопрос"}]))
+    assert provider == "groq"
+    assert model == "openai/gpt-oss-120b"
 
-    assert calls == ["groq"]
-    assert ("token", "часть ответа") in events
-    assert any(kind == "error" for kind, _value in events)
+
+def test_startup_provider_check_does_not_change_provider(monkeypatch):
+    monkeypatch.setattr(config, "current_provider", "groq")
+    monkeypatch.setattr(config, "current_model", "openai/gpt-oss-120b")
+    monkeypatch.setattr(config, "has_credentials", lambda _provider: False)
+    monkeypatch.setattr(config, "first_available_provider", lambda: "google_ai_studio")
+
+    config.ensure_usable_provider()
+
+    assert config.current_provider == "groq"
+    assert config.current_model == "openai/gpt-oss-120b"
