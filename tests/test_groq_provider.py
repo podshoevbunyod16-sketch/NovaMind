@@ -184,3 +184,39 @@ def test_chat_stream_marks_partial_response_as_incomplete(monkeypatch):
     events = list(ai_providers.chat_stream([{"role": "user", "content": "hi"}]))
     errors = [chunk for kind, chunk in events if kind == "error"]
     assert errors and "не полностью" in errors[0]
+
+
+
+def test_groq_compound_reset_header_sets_real_cooldown():
+    class Response:
+        headers = {"x-ratelimit-reset-tokens": "2m15.4s"}
+
+    assert ai_providers._groq_429_cooldown(Response(), "rate limit reached") == 136
+
+
+def test_groq_cooldown_waits_for_longest_request_or_token_window():
+    class Response:
+        headers = {
+            "x-ratelimit-reset-requests": "3.2s",
+            "x-ratelimit-reset-tokens": "1h2m",
+        }
+
+    assert ai_providers._groq_429_cooldown(Response(), "rate limit reached") == 3720
+
+
+def test_groq_cooldown_reads_retry_duration_from_error_body():
+    class Response:
+        headers = {}
+
+    assert ai_providers._groq_429_cooldown(
+        Response(), "Rate limit reached. Please try again in 2m15.4s."
+    ) == 136
+
+
+def test_groq_daily_limit_uses_long_cooldown_when_no_reset_is_provided():
+    class Response:
+        headers = {}
+
+    assert ai_providers._groq_429_cooldown(
+        Response(), "tokens per day limit reached"
+    ) == ai_providers.GROQ_KEY_COOLDOWN
