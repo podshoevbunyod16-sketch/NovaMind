@@ -47,46 +47,102 @@ def openai_compatible_request(url, payload, headers, timeout=90, max_retries=2):
     return None, "OpenAI-compatible сервер недоступен"
 
 
+def _parse_duration_seconds(value):
+    """Parse Groq reset durations such as '2m15.4s' or '1h2m3s'."""
+    raw = str(value or "").strip()
+    match = re.fullmatch(
+        r"(?:(\d+(?:\.\d+)?)h)?\s*(?:(\d+(?:\.\d+)?)m)?\s*(?:(\d+(?:\.\d+)?)s)?",
+        raw,
+        flags=re.IGNORECASE,
+    )
+    if not match or not any(part is not None for part in match.groups()):
+        return None
+    hours, minutes, seconds = (float(part or 0) for part in match.groups())
+    return max(0, hours * 3600 + minutes * 60 + seconds)
+
+
+def _bounded_seconds(value):
+    return max(1, min(int(float(value) + 0.999999), 25 * 3600))
+
+
 def _retry_after_seconds(headers, default=60):
-    """Разбирает Retry-After и rate-limit reset headers с верхним безопасным пределом."""
+    """Parse Retry-After plus Groq's compound x-ratelimit-reset values."""
     headers = headers or {}
     value = headers.get("Retry-After")
     if value:
         try:
-            return max(1, min(int(float(value)), 25 * 3600))
-        except (TypeError, ValueError):
+            return _bounded_seconds(value)
+        except (TypeError, ValueError, OverflowError):
+            duration = _parse_duration_seconds(value)
+            if duration is not None:
+                return _bounded_seconds(duration)
             try:
                 when = parsedate_to_datetime(value)
                 if when.tzinfo is None:
                     when = when.replace(tzinfo=timezone.utc)
-                return max(1, min(int((when - datetime.now(timezone.utc)).total_seconds()), 25 * 3600))
+                return _bounded_seconds((when - datetime.now(timezone.utc)).total_seconds())
             except (TypeError, ValueError, OverflowError):
                 pass
-    for name in ("X-RateLimit-Reset", "x-ratelimit-reset-requests", "x-ratelimit-reset-tokens", "x-ratelimit-reset"):
-        value = headers.get(name)
-        if not value:
+
+    reset_values = []
+    for name in (
+        "X-RateLimit-Reset",
+        "x-ratelimit-reset-requests",
+        "x-ratelimit-reset-tokens",
+        "x-ratelimit-reset",
+    ):
+        raw_value = headers.get(name)
+        if raw_value is None:
+            continue
+        duration = _parse_duration_seconds(raw_value)
+        if duration is not None:
+            reset_values.append(duration)
             continue
         try:
-            raw = str(value).strip().lower()
-            seconds = float(raw[:-1]) if raw.endswith("s") else float(raw)
-            if not raw.endswith("s") and seconds > 1_000_000_000:
+            seconds = float(str(raw_value).strip())
+            if seconds > 1_000_000_000:
                 seconds -= time.time()
             if seconds > 0:
-                return max(1, min(int(seconds), 25 * 3600))
+                reset_values.append(seconds)
         except (TypeError, ValueError, OverflowError):
             continue
-    return max(1, min(int(default), 25 * 3600))
+
+    if reset_values:
+        # A key is usable only after all exceeded request/token windows reset.
+        return _bounded_seconds(max(reset_values))
+    if default is None:
+        return None
+    return _bounded_seconds(default)
 
 
 def _groq_429_cooldown(response, detail):
     headers = getattr(response, "headers", {}) or {}
     text = (detail or "").lower()
     reset_headers = " ".join(str(v).lower() for k, v in headers.items() if "reset" in k.lower())
-    daily = ("per day", "per-day", "daily limit", "daily quota", "tokens per day", "requests per day", "day limit")
+    daily = (
+        "per day", "per-day", "daily limit", "daily quota", "tokens per day",
+        "requests per day", "day limit", " tpd", " rpd",
+    )
+
+    header_wait = _retry_after_seconds(headers, default=None)
+    if header_wait is not None:
+        return header_wait
+
+    # Groq often returns the reset time in the JSON error message, e.g.
+    # "Please try again in 2m15.4s"; use it when headers are absent.
+    wait_match = re.search(
+        r"(?:try again in|retry in|reset in)\s+([0-9hms.\s]+)",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if wait_match:
+        body_wait = _parse_duration_seconds(wait_match.group(1).strip().rstrip(" .,:;"))
+        if body_wait is not None:
+            return _bounded_seconds(body_wait)
+
     if any(term in text for term in daily) or "daily" in reset_headers:
-        return _retry_after_seconds(headers, GROQ_KEY_COOLDOWN)
-    # The word "quota" alone is ambiguous and should not trigger a 25-hour lockout.
-    return _retry_after_seconds(headers, 60)
+        return GROQ_KEY_COOLDOWN
+    return GROQ_RATE_LIMIT_COOLDOWN
 
 
 def _format_gemini_error(status_code, response):
@@ -492,18 +548,13 @@ def supports_reasoning(model: str) -> bool:
 
 
 def resolve_target(provider: str = None, model: str = None):
-    """(provider, model, provider_cfg) — с откатом на рабочий провайдер."""
+    """Return only the explicitly selected provider/model; never auto-switch."""
     import config
-    provider = provider or config.current_provider
-    model = model or config.current_model
-    cfg = config.PROVIDERS.get(provider) or config.PROVIDERS["local_demo"]
-    if not config.has_credentials(provider):
-        fallback = config.first_available_provider()
-        if fallback != provider:
-            models = config.PROVIDERS.get(fallback, {}).get("models") or []
-            return fallback, (models[0]["id"] if models else "nova-local-1"), config.PROVIDERS[fallback]
-    return provider, model, cfg
-
+    selected_provider = provider or config.current_provider
+    selected_model = model or config.current_model
+    if selected_provider not in config.PROVIDERS:
+        raise ValueError(f"Неизвестный AI-провайдер: {selected_provider}")
+    return selected_provider, selected_model, config.PROVIDERS[selected_provider]
 
 FREE_TIER_PROVIDERS = frozenset({
     "groq", "cerebras", "google_ai_studio", "openai_compatible", "local_demo",
@@ -562,27 +613,9 @@ def _free_models(provider: str, selected: str = "") -> list[str]:
 
 
 def free_failover_targets(provider: str | None = None, model: str | None = None) -> list[tuple[str, str]]:
-    """Primary target followed by credentialed free alternatives."""
-    import config
-    primary_provider, primary_model, _cfg = resolve_target(provider, model)
-    raw_order = [part.strip() for part in os.getenv("AI_FAILOVER_ORDER", "").split(",") if part.strip()]
-    order = [primary_provider, *(raw_order or DEFAULT_FAILOVER_ORDER)]
-    targets: list[tuple[str, str]] = []
-    for name in order:
-        if name not in config.PROVIDERS or any(p == name for p, _m in targets):
-            continue
-        if (name != primary_provider and name not in {"local_demo", "openai_compatible"}
-                and not config.has_credentials(name)):
-            continue
-        selected = primary_model if name == primary_provider else ""
-        models = _free_models(name, selected)
-        if not models:
-            continue
-        targets.append((name, models[0]))
-    if not any(name == "local_demo" for name, _model in targets):
-        targets.append(("local_demo", "nova-local-1"))
-    return targets
-
+    """Compatibility helper: returns only the explicitly selected target."""
+    selected_provider, selected_model, _cfg = resolve_target(provider, model)
+    return [(selected_provider, selected_model)]
 
 def _chat_completion_once(messages, provider=None, model=None, system=None,
                           temperature=0.7, max_tokens=None, timeout=90, extra=None,
@@ -656,32 +689,24 @@ def _chat_completion_once(messages, provider=None, model=None, system=None,
 def chat_completion(messages, provider=None, model=None, system=None,
                     temperature=0.7, max_tokens=None, timeout=90, extra=None,
                     tools=None, tool_choice=None):
-    """Completion with automatic failover across free models only."""
-    failures: list[dict] = []
-    targets = free_failover_targets(provider, model)
-    for index, (target_provider, target_model) in enumerate(targets):
-        text, meta = _chat_completion_once(
-            messages, provider=target_provider, model=target_model, system=system,
-            temperature=temperature, max_tokens=max_tokens, timeout=timeout,
-            extra=extra, tools=tools, tool_choice=tool_choice,
-        )
-        if text is not None:
-            result_meta = dict(meta or {}) if isinstance(meta, dict) else {}
-            result_meta["failover"] = list(failures)
-            result_meta["failover_count"] = len(failures)
-            result_meta["free_model"] = True
-            if failures:
-                logger.warning("AI failover succeeded: %s/%s after %d failure(s)",
-                               target_provider, target_model, len(failures))
-            return text, result_meta
-        failure = {"provider": target_provider, "model": target_model,
-                   "error": str(meta or "неизвестная ошибка")[:500]}
-        failures.append(failure)
-        logger.warning("AI provider failed (%s/%s), trying next free provider: %s",
-                       target_provider, target_model, failure["error"])
-    return None, "Все бесплатные AI-провайдеры недоступны: " + "; ".join(
-        f"{item['provider']}: {item['error']}" for item in failures)
+    """Complete a request using only the selected provider; no provider failover."""
+    target_provider, target_model, _cfg = resolve_target(provider, model)
+    text, meta = _chat_completion_once(
+        messages, provider=target_provider, model=target_model, system=system,
+        temperature=temperature, max_tokens=max_tokens, timeout=timeout,
+        extra=extra, tools=tools, tool_choice=tool_choice,
+    )
+    if text is None:
+        error = str(meta or "неизвестная ошибка провайдера")
+        logger.warning("Selected AI provider failed (%s/%s): %s",
+                       target_provider, target_model, error)
+        return None, error
 
+    result_meta = dict(meta or {}) if isinstance(meta, dict) else {}
+    result_meta["failover"] = []
+    result_meta["failover_count"] = 0
+    result_meta["free_model"] = is_free_ai_model(target_provider, target_model)
+    return text, result_meta
 
 def _chat_stream_once(messages, provider=None, model=None, system=None, temperature=0.7,
                 max_tokens=None, timeout=90, reasoning=False, reasoning_effort="low"):
@@ -783,49 +808,19 @@ def _chat_stream_once(messages, provider=None, model=None, system=None, temperat
 
 def chat_stream(messages, provider=None, model=None, system=None, temperature=0.7,
                 max_tokens=None, timeout=90, reasoning=False, reasoning_effort="low"):
-    """Stream from the first responsive free provider.
-
-    Events are buffered until the first answer token. Thus a provider that
-    times out or returns an empty response can be replaced without leaving a
-    broken bubble or leaking an intermediate error into the user response.
-    Once tokens started, the stream is never replayed through another model to
-    avoid duplicated/mixed answers.
-    """
-    failures: list[str] = []
-    targets = free_failover_targets(provider, model)
-    for target_provider, target_model in targets:
-        pending: list[tuple[str, str]] = []
-        produced_token = False
-        failed = ""
-        for kind, chunk in _chat_stream_once(
-            messages, provider=target_provider, model=target_model, system=system,
-            temperature=temperature, max_tokens=max_tokens, timeout=timeout,
-            reasoning=reasoning, reasoning_effort=reasoning_effort,
-        ):
-            if kind == "error" and not produced_token:
-                failed = str(chunk or "ошибка потока")
-                continue
-            if kind == "token":
-                if not produced_token:
-                    produced_token = True
-                    for buffered in pending:
-                        yield buffered
-                    pending.clear()
-                yield kind, chunk
-            elif kind == "done":
-                continue
-            elif produced_token:
-                yield kind, chunk
-            else:
-                pending.append((kind, chunk))
-        if produced_token:
-            yield "done", ""
-            return
-        failures.append(f"{target_provider}/{target_model}: {failed or 'пустой ответ'}")
-        logger.warning("AI stream failover: %s", failures[-1])
-    yield "error", "Все бесплатные AI-провайдеры недоступны: " + "; ".join(failures)
-    yield "done", ""
-
+    """Stream from the selected provider only. Never replay through another provider."""
+    target_provider, target_model, _cfg = resolve_target(provider, model)
+    done_seen = False
+    for kind, chunk in _chat_stream_once(
+        messages, provider=target_provider, model=target_model, system=system,
+        temperature=temperature, max_tokens=max_tokens, timeout=timeout,
+        reasoning=reasoning, reasoning_effort=reasoning_effort,
+    ):
+        if kind == "done":
+            done_seen = True
+        yield kind, chunk
+    if not done_seen:
+        yield "done", ""
 
 def _raw_stream(provider, model, payload, cfg, timeout):
     """Низкоуровневый поток токенов конкретного провайдера."""
@@ -924,6 +919,11 @@ def _raw_stream(provider, model, payload, cfg, timeout):
 
         if provider == "groq":
             mark_groq_key_success(current_key)
+            try:
+                from groq_rotation import record_limits
+                record_limits(getattr(response, "headers", None), current_key)
+            except Exception:
+                logger.debug("Не удалось сохранить заголовки лимитов Groq", exc_info=True)
         response.encoding = "utf-8"
         try:
             for raw in response.iter_lines(decode_unicode=True):
